@@ -1,7 +1,9 @@
 #include "ksh.h"
 
 #include <string.h>
+#include <stdint.h>
 
+#include "elf_loader.h"
 #include "esp_flash_disk.h"
 #include "hal.h"
 
@@ -67,6 +69,17 @@ static void print_hex_u8(uint8 x)
   putc_console(hexd[x & 0x0f]);
 }
 
+static void print_hex_u32(uint32 x)
+{
+  const char hexd[] = "0123456789abcdef";
+  int i;
+  puts_console("0x");
+  for(i = 7; i >= 0; i--){
+    uint8 nib = (x >> (i * 4)) & 0x0f;
+    putc_console(hexd[nib]);
+  }
+}
+
 static int split(char *line, char **argv, int max_args)
 {
   int argc = 0;
@@ -118,6 +131,8 @@ static void cmd_help(void)
   puts_line("  diskinfo");
   puts_line("  diskread <sector>");
   puts_line("  diskwrite <sector> <byte0-255>");
+  puts_line("  elfinfo <sector> <nsectors>");
+  puts_line("  elfrun <sector> <nsectors>");
   puts_line("  reboot");
 }
 
@@ -174,6 +189,49 @@ static void cmd_diskwrite(uint32 sector, uint8 value)
   }
 
   puts_line("diskwrite ok");
+}
+
+static void cmd_elfinfo(uint32 sector, uint32 nsectors)
+{
+  elf_image_t img;
+  if(elf_load_from_flash(sector, nsectors, &img) != 0){
+    puts_line("elfinfo: invalid or unsupported ELF");
+    return;
+  }
+
+  puts_console("etype=");
+  print_u32((uint32)img.etype);
+  puts_console(" machine=");
+  print_u32((uint32)img.machine);
+  puts_console(" segs=");
+  print_u32((uint32)img.seg_count);
+  puts_console(" entry=");
+  print_hex_u32((uint32)(uintptr_t)img.entry);
+  puts_line("");
+
+  elf_unload(&img);
+}
+
+static void cmd_elfrun(uint32 sector, uint32 nsectors)
+{
+  elf_image_t img;
+  int retv = 0;
+
+  if(elf_load_from_flash(sector, nsectors, &img) != 0){
+    puts_line("elfrun: load failed");
+    return;
+  }
+
+  if(elf_run(&img, &retv) != 0){
+    puts_line("elfrun: entry execution failed");
+    elf_unload(&img);
+    return;
+  }
+
+  puts_console("elfrun: return=");
+  print_u32((uint32)retv);
+  puts_line("");
+  elf_unload(&img);
 }
 
 void ksh_run(void)
@@ -234,6 +292,22 @@ void ksh_run(void)
           puts_line("usage: diskwrite <sector> <byte0-255>");
         else
           cmd_diskwrite(sector, (uint8)value);
+      } else if(strcmp(argv[0], "elfinfo") == 0){
+        uint32 sector = (argc >= 2) ? parse_u32(argv[1], &ok) : 0;
+        int ok2 = 0;
+        uint32 nsectors = (argc >= 3) ? parse_u32(argv[2], &ok2) : 0;
+        if(argc < 3 || !ok || !ok2 || nsectors == 0)
+          puts_line("usage: elfinfo <sector> <nsectors>");
+        else
+          cmd_elfinfo(sector, nsectors);
+      } else if(strcmp(argv[0], "elfrun") == 0){
+        uint32 sector = (argc >= 2) ? parse_u32(argv[1], &ok) : 0;
+        int ok2 = 0;
+        uint32 nsectors = (argc >= 3) ? parse_u32(argv[2], &ok2) : 0;
+        if(argc < 3 || !ok || !ok2 || nsectors == 0)
+          puts_line("usage: elfrun <sector> <nsectors>");
+        else
+          cmd_elfrun(sector, nsectors);
       } else if(strcmp(argv[0], "reboot") == 0){
         puts_line("rebooting...");
         hal_reboot();

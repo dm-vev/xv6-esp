@@ -4,6 +4,7 @@ idf_component_register(
     "../kernel/xv6_esp_boot.c"
     "../kernel/hal_esp32s3.c"
     "../kernel/esp_flash_disk.c"
+    "../kernel/elf_loader.c"
     "../kernel/ksh.c"
   INCLUDE_DIRS
     "."
