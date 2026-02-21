@@ -51,6 +51,12 @@ typedef struct {
   int max_heap_kb;
 } ksh_job_task_t;
 
+typedef struct {
+  int in_fd;
+  int out_fd;
+  int err_fd;
+} ksh_io_t;
+
 static ksh_job_t g_jobs[KSH_MAX_JOBS];
 static int g_next_job_id = 1;
 static uint32 g_ulimit_ms = 0;
@@ -224,7 +230,7 @@ static int parse_line(char *line, char **argv, int max_args)
       continue;
     }
 
-    if(ch == '|' || ch == '&'){
+    if(ch == '|' || ch == '&' || ch == '<' || ch == '>'){
       if(tok){
         *dst++ = 0;
         if(argc >= max_args)
@@ -234,7 +240,17 @@ static int parse_line(char *line, char **argv, int max_args)
       }
       if(argc >= max_args)
         return max_args;
-      argv[argc++] = (ch == '|') ? "|" : "&";
+      if(ch == '|')
+        argv[argc++] = "|";
+      else if(ch == '&')
+        argv[argc++] = "&";
+      else if(ch == '<')
+        argv[argc++] = "<";
+      else if(*src == '>'){
+        src++;
+        argv[argc++] = ">>";
+      } else
+        argv[argc++] = ">";
       continue;
     }
 
@@ -268,6 +284,7 @@ static void cmd_help(void)
   puts_line("  <elf-command> [args]");
   puts_line("  <elf-command> [args] &");
   puts_line("  <a> | <b> | <c> ...");
+  puts_line("  redirection: < > >> 2> 2>>");
   puts_line("  ps");
   puts_line("  jobs");
   puts_line("  fg <jobid>");
@@ -681,6 +698,160 @@ static int run_foreground_with_limits(int argc, char **argv, int in_fd, int out_
   return exit_code == 0 ? 0 : -1;
 }
 
+static int is_fd_token(const char *s, int *out_fd)
+{
+  if(s && s[0] >= '0' && s[0] <= '2' && s[1] == 0){
+    if(out_fd)
+      *out_fd = (int)(s[0] - '0');
+    return 1;
+  }
+  return 0;
+}
+
+static int is_redir_token(const char *s)
+{
+  return (strcmp(s, "<") == 0 || strcmp(s, ">") == 0 || strcmp(s, ">>") == 0);
+}
+
+static int is_control_token(const char *s)
+{
+  return (strcmp(s, "|") == 0 || strcmp(s, "&") == 0 || is_redir_token(s));
+}
+
+static void close_io_custom_fds(const ksh_io_t *io, const ksh_io_t *base)
+{
+  int base_fds[3];
+  int vals[3];
+  int i, j;
+
+  if(io == 0 || base == 0)
+    return;
+
+  base_fds[0] = base->in_fd;
+  base_fds[1] = base->out_fd;
+  base_fds[2] = base->err_fd;
+  vals[0] = io->in_fd;
+  vals[1] = io->out_fd;
+  vals[2] = io->err_fd;
+
+  for(i = 0; i < 3; i++){
+    int is_base = 0;
+    if(vals[i] < 3)
+      continue;
+    for(j = 0; j < 3; j++){
+      if(vals[i] == base_fds[j]){
+        is_base = 1;
+        break;
+      }
+    }
+    if(is_base)
+      continue;
+    for(j = 0; j < i; j++){
+      if(vals[i] == vals[j]){
+        is_base = 1;
+        break;
+      }
+    }
+    if(!is_base)
+      (void)xv6_close(vals[i]);
+  }
+}
+
+static int parse_exec_and_redir(int argc, char **argv, const ksh_io_t *base_io, char **exec_argv, int max_exec,
+                                int *out_argc, ksh_io_t *out_io)
+{
+  int i;
+  int n = 0;
+  ksh_io_t io;
+
+  if(base_io == 0 || exec_argv == 0 || out_argc == 0 || out_io == 0)
+    return -1;
+
+  io = *base_io;
+  for(i = 0; i < argc; i++){
+    int target_fd;
+    int flags;
+    int fd;
+    int *dst;
+    const char *op = argv[i];
+    const char *path;
+
+    if(!is_redir_token(op)){
+      if(strcmp(op, "|") == 0 || strcmp(op, "&") == 0){
+        puts_line("syntax: bad token");
+        goto fail;
+      }
+      if(n >= max_exec - 1){
+        puts_line("exec: too many args");
+        goto fail;
+      }
+      exec_argv[n++] = argv[i];
+      continue;
+    }
+
+    target_fd = (op[0] == '<') ? 0 : 1;
+    if(n > 0 && is_fd_token(exec_argv[n - 1], &target_fd))
+      n--;
+    if(op[0] == '<' && target_fd != 0){
+      puts_line("redir: bad input fd");
+      goto fail;
+    }
+
+    if(i + 1 >= argc){
+      puts_line("redir: missing path");
+      goto fail;
+    }
+    path = argv[++i];
+    if(is_control_token(path)){
+      puts_line("redir: bad path");
+      goto fail;
+    }
+
+    if(op[0] == '<')
+      flags = XV6_O_RDONLY;
+    else if(strcmp(op, ">>") == 0)
+      flags = XV6_O_WRONLY | XV6_O_CREAT | XV6_O_APPEND;
+    else
+      flags = XV6_O_WRONLY | XV6_O_CREAT | XV6_O_TRUNC;
+
+    fd = xv6_open(path, flags);
+    if(fd < 0){
+      puts_console("redir: open failed: ");
+      puts_line(path);
+      goto fail;
+    }
+
+    if(target_fd == 0)
+      dst = &io.in_fd;
+    else if(target_fd == 1)
+      dst = &io.out_fd;
+    else if(target_fd == 2)
+      dst = &io.err_fd;
+    else {
+      xv6_close(fd);
+      puts_line("redir: bad fd");
+      goto fail;
+    }
+
+    if(*dst >= 3 && *dst != base_io->in_fd && *dst != base_io->out_fd && *dst != base_io->err_fd)
+      xv6_close(*dst);
+    *dst = fd;
+  }
+
+  if(n <= 0){
+    puts_line("syntax: empty command");
+    goto fail;
+  }
+  exec_argv[n] = 0;
+  *out_argc = n;
+  *out_io = io;
+  return 0;
+
+fail:
+  close_io_custom_fds(&io, base_io);
+  return -1;
+}
+
 static int find_pipe_pos(int argc, char **argv)
 {
   int i;
@@ -747,20 +918,44 @@ static int run_pipeline(int argc, char **argv, int run_bg, int max_heap_kb, uint
   }
 
   for(i = 0; i < stage_count; i++){
-    int in_fd = (i == 0) ? 0 : pipe_r[i - 1];
-    int out_fd = (i == stage_count - 1) ? 1 : pipe_w[i];
+    char *stage_exec[KSH_MAX_ARGS];
+    int stage_exec_argc = 0;
+    int base_in = (i == 0) ? 0 : pipe_r[i - 1];
+    int base_out = (i == stage_count - 1) ? 1 : pipe_w[i];
+    ksh_io_t base_io;
+    ksh_io_t io;
     int sid = -1;
     int stage_argc = stage_lens[i];
     char **stage_argv = &argv[stage_starts[i]];
 
+    base_io.in_fd = base_in;
+    base_io.out_fd = base_out;
+    base_io.err_fd = 2;
+    if(parse_exec_and_redir(stage_argc, stage_argv, &base_io, stage_exec, KSH_MAX_ARGS, &stage_exec_argc, &io) != 0)
+      goto fail;
+
+    if(i > 0 && io.in_fd != base_in && pipe_r[i - 1] >= 3){
+      xv6_close(pipe_r[i - 1]);
+      pipe_r[i - 1] = -1;
+    }
+    if(i < stage_count - 1 && io.out_fd != base_out && pipe_w[i] >= 3){
+      xv6_close(pipe_w[i]);
+      pipe_w[i] = -1;
+    }
+
     if(i == stage_count - 1 && !run_bg){
-      final_rc = run_foreground_with_limits(stage_argc, stage_argv, in_fd, out_fd, 2, max_heap_kb, max_runtime_ms);
+      final_rc =
+        run_foreground_with_limits(stage_exec_argc, stage_exec, io.in_fd, io.out_fd, io.err_fd, max_heap_kb, max_runtime_ms);
     } else {
-      if(spawn_background_ex(stage_argc, stage_argv, in_fd, out_fd, 2, 1, run_bg ? 0 : 1, max_heap_kb,
+      if(spawn_background_ex(stage_exec_argc, stage_exec, io.in_fd, io.out_fd, io.err_fd, 1, run_bg ? 0 : 1, max_heap_kb,
                              max_runtime_ms, &sid) != 0)
+      {
+        close_io_custom_fds(&io, &base_io);
         goto fail;
+      }
       jobs[njobs++] = sid;
     }
+    close_io_custom_fds(&io, &base_io);
 
     if(i > 0 && pipe_r[i - 1] >= 3){
       xv6_close(pipe_r[i - 1]);
@@ -793,13 +988,29 @@ fail:
 
 static int execute_external(int argc, char **argv, int run_bg, int max_heap_kb, uint32 max_runtime_ms)
 {
+  char *exec_argv[KSH_MAX_ARGS];
+  int exec_argc = 0;
+  int rc;
+  ksh_io_t base_io;
+  ksh_io_t io;
+
   if(find_pipe_pos(argc, argv) >= 0)
     return run_pipeline(argc, argv, run_bg, max_heap_kb, max_runtime_ms);
 
-  if(run_bg)
-    return spawn_background_ex(argc, argv, 0, 1, 2, 0, 0, max_heap_kb, max_runtime_ms, 0);
+  base_io.in_fd = 0;
+  base_io.out_fd = 1;
+  base_io.err_fd = 2;
 
-  return run_foreground_with_limits(argc, argv, 0, 1, 2, max_heap_kb, max_runtime_ms);
+  if(parse_exec_and_redir(argc, argv, &base_io, exec_argv, KSH_MAX_ARGS, &exec_argc, &io) != 0)
+    return -1;
+
+  if(run_bg)
+    rc = spawn_background_ex(exec_argc, exec_argv, io.in_fd, io.out_fd, io.err_fd, 0, 0, max_heap_kb, max_runtime_ms, 0);
+  else
+    rc = run_foreground_with_limits(exec_argc, exec_argv, io.in_fd, io.out_fd, io.err_fd, max_heap_kb, max_runtime_ms);
+
+  close_io_custom_fds(&io, &base_io);
+  return rc;
 }
 
 static void cmd_jobs(void)

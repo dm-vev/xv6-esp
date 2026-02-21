@@ -190,6 +190,22 @@ def main() -> int:
         out = cmd(sock, "head -c 8 /etc/motd | stdinhead 8 | stdinhead 4")
         assert "xv6-" in out
 
+        out = cmd(sock, "head -c 5 /etc/motd > /tmp/r.txt")
+        assert "xv6> " in out
+
+        out = cmd(sock, "head -c 3 /etc/motd >> /tmp/r.txt")
+        assert "xv6> " in out
+
+        out = cmd(sock, "stdinhead 8 < /tmp/r.txt")
+        assert "xv6-exv6" in out
+
+        out = cmd(sock, "head -c 1 /etc/motd 2> /tmp/err.log")
+        assert "x" in out
+
+        out = cmd(sock, "ls /tmp")
+        assert "r.txt" in out
+        assert "err.log" in out
+
         out = cmd(sock, "ulimit -t 150")
         assert "xv6> " in out
 
