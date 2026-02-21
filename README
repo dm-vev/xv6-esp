@@ -46,3 +46,22 @@ You will need a RISC-V "newlib" tool chain from
 https://github.com/riscv/riscv-gnu-toolchain, and qemu compiled for
 riscv64-softmmu.  Once they are installed, and in your shell
 search path, you can run "make qemu".
+
+ESP32-S3 (ESP-IDF 6.0) M1 PORT
+
+This repository also contains a first ESP-IDF based bring-up path for
+ESP32-S3 (`main/app_main.c` with code in `kernel/*_esp*.c`).
+
+Key properties of this M1 bring-up:
+- single app task runtime (`app_main`),
+- UART interactive kernel shell (`ksh`),
+- raw SPI flash partition block backend (`xv6fs`).
+
+Build steps:
+1. Install ESP-IDF 6.0 and export the environment.
+2. Set target: `idf.py set-target esp32s3`
+3. Build: `idf.py build`
+4. Flash and monitor: `idf.py -p <PORT> flash monitor`
+
+The ESP build is intentionally separate from the original `make qemu`
+flow and does not replace the RISC-V path.
