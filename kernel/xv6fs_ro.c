@@ -22,17 +22,40 @@ static uint32 g_data_start;
 #define VFD_FREE 0
 #define VFD_FILE 1
 #define VFD_DEV 2
+#define XV6_MAX_PTY 4
+
+#define DEV_ROLE_NONE 0
+#define DEV_ROLE_PTY_MASTER 1
+#define DEV_ROLE_PTY_SLAVE 2
 
 typedef struct {
   int used;
   int kind;
   int flags;
+  int dev_role;
+  int dev_id;
   uint32 inum;
   uint32 off;
   char path[MAXPATH];
 } xv6_vfd_t;
 
 static xv6_vfd_t g_fds[XV6_MAX_FD];
+
+typedef struct {
+  int alloc;
+  int master_open;
+  int slave_open;
+  uint8 m2s[256];
+  uint16 m2s_r;
+  uint16 m2s_w;
+  uint16 m2s_n;
+  uint8 s2m[256];
+  uint16 s2m_r;
+  uint16 s2m_w;
+  uint16 s2m_n;
+} xv6_pty_t;
+
+static xv6_pty_t g_ptys[XV6_MAX_PTY];
 
 static int dev_canonical_path(const char *path, char *out, int out_len)
 {
@@ -44,8 +67,8 @@ static int dev_canonical_path(const char *path, char *out, int out_len)
     path = "/dev/stdout";
   else if(strcmp(path, "/dev/fd/2") == 0)
     path = "/dev/stderr";
-  else if(strcmp(path, "/dev/pts/0") == 0 || strcmp(path, "/dev/pts/ptmx") == 0)
-    path = "/dev/tty";
+  else if(strcmp(path, "/dev/pts/ptmx") == 0)
+    path = "/dev/ptmx";
   if((int)strlen(path) >= out_len)
     return -1;
   strcpy(out, path);
@@ -58,6 +81,80 @@ static int is_dev_node(const char *path)
   if(dev_canonical_path(path, canon, sizeof(canon)) != 0)
     return 0;
   return strncmp(canon, "/dev/", 5) == 0 || strcmp(canon, "/dev") == 0;
+}
+
+static int parse_pts_id(const char *path, int *out_id)
+{
+  const char *p;
+  int v = 0;
+  if(path == 0 || out_id == 0)
+    return -1;
+  if(strncmp(path, "/dev/pts/", 9) != 0)
+    return -1;
+  p = path + 9;
+  if(*p == 0 || *p < '0' || *p > '9')
+    return -1;
+  while(*p >= '0' && *p <= '9'){
+    v = v * 10 + (*p - '0');
+    if(v >= XV6_MAX_PTY)
+      return -1;
+    p++;
+  }
+  if(*p != 0)
+    return -1;
+  *out_id = v;
+  return 0;
+}
+
+static int pty_q_push(uint8 *buf, uint16 *w, uint16 *n, uint16 cap, const uint8 *src, uint32 size)
+{
+  uint32 i;
+  uint32 wrote = 0;
+  for(i = 0; i < size; i++){
+    if(*n >= cap)
+      break;
+    buf[*w] = src[i];
+    *w = (uint16)((*w + 1) % cap);
+    (*n)++;
+    wrote++;
+  }
+  return (int)wrote;
+}
+
+static int pty_q_pop(uint8 *buf, uint16 *r, uint16 *n, uint16 cap, uint8 *dst, uint32 size)
+{
+  uint32 i;
+  uint32 out = 0;
+  for(i = 0; i < size; i++){
+    if(*n == 0)
+      break;
+    dst[i] = buf[*r];
+    *r = (uint16)((*r + 1) % cap);
+    (*n)--;
+    out++;
+  }
+  return (int)out;
+}
+
+static int pty_alloc_id(void)
+{
+  int i;
+  for(i = 0; i < XV6_MAX_PTY; i++){
+    if(!g_ptys[i].alloc){
+      memset(&g_ptys[i], 0, sizeof(g_ptys[i]));
+      g_ptys[i].alloc = 1;
+      return i;
+    }
+  }
+  return -1;
+}
+
+static void pty_try_free(int id)
+{
+  if(id < 0 || id >= XV6_MAX_PTY)
+    return;
+  if(g_ptys[id].alloc && !g_ptys[id].master_open && !g_ptys[id].slave_open)
+    memset(&g_ptys[id], 0, sizeof(g_ptys[id]));
 }
 
 static int dev_prng_fill(void *buf, uint32 n)
@@ -133,6 +230,40 @@ static int dev_write(const char *path, const void *data, uint32 size)
      strcmp(canon, "/dev/urandom") == 0)
     return 0;
   return -1;
+}
+
+static int dev_read_fd(const xv6_vfd_t *fd, void *buf, uint32 size)
+{
+  if(fd == 0 || buf == 0)
+    return -1;
+  if(fd->dev_role == DEV_ROLE_PTY_MASTER || fd->dev_role == DEV_ROLE_PTY_SLAVE){
+    int id = fd->dev_id;
+    xv6_pty_t *p;
+    if(id < 0 || id >= XV6_MAX_PTY || !g_ptys[id].alloc)
+      return -1;
+    p = &g_ptys[id];
+    if(fd->dev_role == DEV_ROLE_PTY_MASTER)
+      return pty_q_pop(p->s2m, &p->s2m_r, &p->s2m_n, sizeof(p->s2m), (uint8 *)buf, size);
+    return pty_q_pop(p->m2s, &p->m2s_r, &p->m2s_n, sizeof(p->m2s), (uint8 *)buf, size);
+  }
+  return dev_read(fd->path, fd->off, buf, size);
+}
+
+static int dev_write_fd(const xv6_vfd_t *fd, const void *buf, uint32 size)
+{
+  if(fd == 0 || buf == 0)
+    return -1;
+  if(fd->dev_role == DEV_ROLE_PTY_MASTER || fd->dev_role == DEV_ROLE_PTY_SLAVE){
+    int id = fd->dev_id;
+    xv6_pty_t *p;
+    if(id < 0 || id >= XV6_MAX_PTY || !g_ptys[id].alloc)
+      return -1;
+    p = &g_ptys[id];
+    if(fd->dev_role == DEV_ROLE_PTY_MASTER)
+      return pty_q_push(p->m2s, &p->m2s_w, &p->m2s_n, sizeof(p->m2s), (const uint8 *)buf, size);
+    return pty_q_push(p->s2m, &p->s2m_w, &p->s2m_n, sizeof(p->s2m), (const uint8 *)buf, size);
+  }
+  return dev_write(fd->path, buf, size) == 0 ? (int)size : -1;
 }
 
 static int dev_read_alloc(const char *path, void **out_data, uint32 *out_size)
@@ -845,6 +976,7 @@ static int vfs_create_regular_file(const char *path, uint32 *out_inum)
 void xv6_vfs_reset(void)
 {
   memset(g_fds, 0, sizeof(g_fds));
+  memset(g_ptys, 0, sizeof(g_ptys));
 
   g_fds[0].used = 1;
   g_fds[0].kind = VFD_DEV;
@@ -866,6 +998,7 @@ int xv6_open(const char *path, int flags)
 {
   int fd;
   char canon[MAXPATH];
+  int pty_id = -1;
   uint32 inum;
   struct dinode ip;
 
@@ -884,6 +1017,20 @@ int xv6_open(const char *path, int flags)
       goto fail;
     g_fds[fd].kind = VFD_DEV;
     strcpy(g_fds[fd].path, canon);
+    if(strcmp(canon, "/dev/ptmx") == 0){
+      pty_id = pty_alloc_id();
+      if(pty_id < 0)
+        goto fail;
+      g_ptys[pty_id].master_open = 1;
+      g_fds[fd].dev_role = DEV_ROLE_PTY_MASTER;
+      g_fds[fd].dev_id = pty_id;
+    } else if(parse_pts_id(canon, &pty_id) == 0){
+      if(!g_ptys[pty_id].alloc || g_ptys[pty_id].slave_open)
+        goto fail;
+      g_ptys[pty_id].slave_open = 1;
+      g_fds[fd].dev_role = DEV_ROLE_PTY_SLAVE;
+      g_fds[fd].dev_id = pty_id;
+    }
     return fd;
   }
 
@@ -925,7 +1072,7 @@ int xv6_read(int fd, void *buf, uint32 size)
     return -1;
 
   if(g_fds[fd].kind == VFD_DEV){
-    int n = dev_read(g_fds[fd].path, g_fds[fd].off, buf, size);
+    int n = dev_read_fd(&g_fds[fd], buf, size);
     if(n > 0)
       g_fds[fd].off += (uint32)n;
     return n;
@@ -954,7 +1101,7 @@ int xv6_write(int fd, const void *buf, uint32 size)
     return -1;
 
   if(g_fds[fd].kind == VFD_DEV)
-    return dev_write(g_fds[fd].path, buf, size) == 0 ? (int)size : -1;
+    return dev_write_fd(&g_fds[fd], buf, size);
 
   if(read_inode(g_fds[fd].inum, &ip) != 0 || ip.type != T_FILE)
     return -1;
@@ -970,6 +1117,16 @@ int xv6_close(int fd)
 {
   if(fd < 0 || fd >= XV6_MAX_FD || !g_fds[fd].used || fd <= 2)
     return -1;
+  if(g_fds[fd].kind == VFD_DEV){
+    int id = g_fds[fd].dev_id;
+    if(g_fds[fd].dev_role == DEV_ROLE_PTY_MASTER && id >= 0 && id < XV6_MAX_PTY){
+      g_ptys[id].master_open = 0;
+      pty_try_free(id);
+    } else if(g_fds[fd].dev_role == DEV_ROLE_PTY_SLAVE && id >= 0 && id < XV6_MAX_PTY){
+      g_ptys[id].slave_open = 0;
+      pty_try_free(id);
+    }
+  }
   memset(&g_fds[fd], 0, sizeof(g_fds[fd]));
   return 0;
 }

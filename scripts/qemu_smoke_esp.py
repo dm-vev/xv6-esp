@@ -153,6 +153,10 @@ def main() -> int:
         out = cmd(sock, "ls /tmp")
         assert "dd3.bin" in out
 
+        out = cmd(sock, "ptydemo")
+        assert "slave:ping" in out
+        assert "master:pong" in out
+
         out = cmd(sock, "write /dev/full x")
         assert "write: failed: /dev/full" in out
 
