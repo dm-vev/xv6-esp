@@ -204,6 +204,10 @@ static void register_default_symbols(void)
     { "xv6fs_write_file_path", (void *)xv6fs_write_file_path },
     { "xv6fs_mkdir_path", (void *)xv6fs_mkdir_path },
     { "xv6fs_unlink_path", (void *)xv6fs_unlink_path },
+    { "xv6_open", (void *)xv6_open },
+    { "xv6_read", (void *)xv6_read },
+    { "xv6_write", (void *)xv6_write },
+    { "xv6_close", (void *)xv6_close },
   };
   (void)elf_loader_register_host_symbols(syms, (int)(sizeof(syms) / sizeof(syms[0])));
 }
@@ -215,6 +219,7 @@ void ksh_run(void)
 
   elf_loader_init();
   register_default_symbols();
+  xv6_vfs_reset();
 
   puts_line("xv6-esp32s3 ksh ready");
   cmd_help();

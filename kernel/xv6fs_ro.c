@@ -18,52 +18,95 @@ static int g_ready;
 static uint32 g_nbitmap;
 static uint32 g_data_start;
 
-static int is_dev_node(const char *path)
+#define XV6_MAX_FD 32
+#define VFD_FREE 0
+#define VFD_FILE 1
+#define VFD_DEV 2
+
+typedef struct {
+  int used;
+  int kind;
+  int flags;
+  uint32 inum;
+  uint32 off;
+  char path[MAXPATH];
+} xv6_vfd_t;
+
+static xv6_vfd_t g_fds[XV6_MAX_FD];
+
+static int dev_canonical_path(const char *path, char *out, int out_len)
 {
-  if(path == 0)
-    return 0;
-  return strncmp(path, "/dev/", 5) == 0 || strcmp(path, "/dev") == 0;
+  if(path == 0 || out == 0 || out_len <= 0)
+    return -1;
+  if(strcmp(path, "/dev/fd/0") == 0)
+    path = "/dev/stdin";
+  else if(strcmp(path, "/dev/fd/1") == 0)
+    path = "/dev/stdout";
+  else if(strcmp(path, "/dev/fd/2") == 0)
+    path = "/dev/stderr";
+  else if(strcmp(path, "/dev/pts/0") == 0 || strcmp(path, "/dev/pts/ptmx") == 0)
+    path = "/dev/tty";
+  if((int)strlen(path) >= out_len)
+    return -1;
+  strcpy(out, path);
+  return 0;
 }
 
-static int dev_read_alloc(const char *path, void **out_data, uint32 *out_size)
+static int is_dev_node(const char *path)
 {
-  uint8 *buf;
+  char canon[MAXPATH];
+  if(dev_canonical_path(path, canon, sizeof(canon)) != 0)
+    return 0;
+  return strncmp(canon, "/dev/", 5) == 0 || strcmp(canon, "/dev") == 0;
+}
+
+static int dev_prng_fill(void *buf, uint32 n)
+{
+  uint8 *p = (uint8 *)buf;
+  uint32 x = (uint32)hal_ticks() ^ 0x9e3779b9u;
   uint32 i;
 
-  if(strcmp(path, "/dev/null") == 0){
-    buf = (uint8 *)malloc(1);
-    if(buf == 0)
-      return -1;
-    *out_data = buf;
-    *out_size = 0;
-    return 0;
+  for(i = 0; i < n; i++){
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    p[i] = (uint8)x;
   }
+  return (int)n;
+}
 
-  if(strcmp(path, "/dev/zero") == 0 || strcmp(path, "/dev/full") == 0){
-    *out_size = 256;
-    buf = (uint8 *)malloc(*out_size);
-    if(buf == 0)
-      return -1;
-    memset(buf, 0, *out_size);
-    *out_data = buf;
+static int dev_read(const char *path, uint32 off, void *buf, uint32 size)
+{
+  char canon[MAXPATH];
+  uint8 *p = (uint8 *)buf;
+  uint32 i = 0;
+
+  if(dev_canonical_path(path, canon, sizeof(canon)) != 0 || buf == 0)
+    return -1;
+  (void)off;
+
+  if(strcmp(canon, "/dev/null") == 0)
     return 0;
+  if(strcmp(canon, "/dev/zero") == 0 || strcmp(canon, "/dev/full") == 0){
+    memset(buf, 0, size);
+    return (int)size;
   }
-
-  if(strcmp(path, "/dev/random") == 0 || strcmp(path, "/dev/urandom") == 0){
-    uint32 x = (uint32)hal_ticks();
-    *out_size = 64;
-    buf = (uint8 *)malloc(*out_size);
-    if(buf == 0)
-      return -1;
-    // Tiny PRNG is enough for non-crypto demo entropy.
-    for(i = 0; i < *out_size; i++){
-      x ^= x << 13;
-      x ^= x >> 17;
-      x ^= x << 5;
-      buf[i] = (uint8)x;
+  if(strcmp(canon, "/dev/random") == 0 || strcmp(canon, "/dev/urandom") == 0)
+    return dev_prng_fill(buf, size);
+  if(strcmp(canon, "/dev/stdin") == 0 || strcmp(canon, "/dev/tty") == 0){
+    while(i < size){
+      int c = hal_console_getc();
+      if(c < 0){
+        if(i > 0)
+          break;
+        hal_delay_ms(1);
+        continue;
+      }
+      p[i++] = (uint8)c;
+      if(c == '\n' || c == '\r')
+        break;
     }
-    *out_data = buf;
-    return 0;
+    return (int)i;
   }
 
   return -1;
@@ -71,27 +114,45 @@ static int dev_read_alloc(const char *path, void **out_data, uint32 *out_size)
 
 static int dev_write(const char *path, const void *data, uint32 size)
 {
-  const char *c;
-  const uint8 *p = (const uint8 *)data;
+  char canon[MAXPATH];
+  const char *c = (const char *)data;
 
-  if(strcmp(path, "/dev/full") == 0)
+  if(dev_canonical_path(path, canon, sizeof(canon)) != 0 || data == 0)
     return -1;
-  if(strcmp(path, "/dev/stdin") == 0)
+  if(strcmp(canon, "/dev/full") == 0 || strcmp(canon, "/dev/stdin") == 0)
     return -1;
 
-  if(strcmp(path, "/dev/console") == 0 || strcmp(path, "/dev/tty") == 0 ||
-     strcmp(path, "/dev/stdout") == 0 || strcmp(path, "/dev/stderr") == 0){
-    for(c = (const char *)data; size > 0; size--)
+  if(strcmp(canon, "/dev/console") == 0 || strcmp(canon, "/dev/tty") == 0 || strcmp(canon, "/dev/stdout") == 0 ||
+     strcmp(canon, "/dev/stderr") == 0 || strcmp(canon, "/dev/kmsg") == 0){
+    while(size--)
       hal_console_putc(*c++);
     return 0;
   }
 
-  if(strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/zero") == 0 || strcmp(path, "/dev/random") == 0 ||
-     strcmp(path, "/dev/urandom") == 0)
+  if(strcmp(canon, "/dev/null") == 0 || strcmp(canon, "/dev/zero") == 0 || strcmp(canon, "/dev/random") == 0 ||
+     strcmp(canon, "/dev/urandom") == 0)
     return 0;
-
-  (void)p;
   return -1;
+}
+
+static int dev_read_alloc(const char *path, void **out_data, uint32 *out_size)
+{
+  uint8 *buf;
+  int n;
+  if(path == 0 || out_data == 0 || out_size == 0)
+    return -1;
+  *out_size = 256;
+  buf = (uint8 *)malloc(*out_size ? *out_size : 1);
+  if(buf == 0)
+    return -1;
+  n = dev_read(path, 0, buf, *out_size);
+  if(n < 0){
+    free(buf);
+    return -1;
+  }
+  *out_size = (uint32)n;
+  *out_data = buf;
+  return 0;
 }
 
 static int read_block(uint32 bno, void *dst)
@@ -554,6 +615,7 @@ int xv6fs_ro_init(void)
   g_nbitmap = g_sb.size / BPB + 1;
   g_data_start = g_sb.bmapstart + g_nbitmap;
   g_ready = 1;
+  xv6_vfs_reset();
   ESP_LOGI(TAG, "mounted: size=%u nblocks=%u ninodes=%u", g_sb.size, g_sb.nblocks, g_sb.ninodes);
   return 0;
 }
@@ -745,6 +807,171 @@ int xv6fs_unlink_path(const char *path)
     return write_inode(inum, &ip);
   }
   return write_inode(inum, &ip);
+}
+
+static int vfs_alloc_fd(void)
+{
+  int i;
+  for(i = 3; i < XV6_MAX_FD; i++){
+    if(!g_fds[i].used)
+      return i;
+  }
+  return -1;
+}
+
+static int vfs_create_regular_file(const char *path, uint32 *out_inum)
+{
+  uint32 pinum, inum;
+  char name[DIRSIZ + 1];
+  struct dinode ip;
+
+  if(path_parent(path, &pinum, name) != 0)
+    return -1;
+  if(dir_lookup_inum(pinum, name, &inum, &ip) == 0){
+    if(ip.type != T_FILE)
+      return -1;
+    *out_inum = inum;
+    return 0;
+  }
+
+  if(alloc_inode(T_FILE, &inum) != 0)
+    return -1;
+  if(dir_add_entry(pinum, name, inum) != 0)
+    return -1;
+  *out_inum = inum;
+  return 0;
+}
+
+void xv6_vfs_reset(void)
+{
+  memset(g_fds, 0, sizeof(g_fds));
+
+  g_fds[0].used = 1;
+  g_fds[0].kind = VFD_DEV;
+  g_fds[0].flags = XV6_O_RDONLY;
+  strcpy(g_fds[0].path, "/dev/stdin");
+
+  g_fds[1].used = 1;
+  g_fds[1].kind = VFD_DEV;
+  g_fds[1].flags = XV6_O_WRONLY;
+  strcpy(g_fds[1].path, "/dev/stdout");
+
+  g_fds[2].used = 1;
+  g_fds[2].kind = VFD_DEV;
+  g_fds[2].flags = XV6_O_WRONLY;
+  strcpy(g_fds[2].path, "/dev/stderr");
+}
+
+int xv6_open(const char *path, int flags)
+{
+  int fd;
+  char canon[MAXPATH];
+  uint32 inum;
+  struct dinode ip;
+
+  if(!g_ready || path == 0 || path[0] == 0)
+    return -1;
+  fd = vfs_alloc_fd();
+  if(fd < 0)
+    return -1;
+
+  memset(&g_fds[fd], 0, sizeof(g_fds[fd]));
+  g_fds[fd].used = 1;
+  g_fds[fd].flags = flags;
+
+  if(is_dev_node(path)){
+    if(dev_canonical_path(path, canon, sizeof(canon)) != 0)
+      goto fail;
+    g_fds[fd].kind = VFD_DEV;
+    strcpy(g_fds[fd].path, canon);
+    return fd;
+  }
+
+  if(path_lookup(path, &inum, &ip) != 0){
+    if((flags & XV6_O_CREAT) == 0)
+      goto fail;
+    if(vfs_create_regular_file(path, &inum) != 0)
+      goto fail;
+    if(read_inode(inum, &ip) != 0 || ip.type != T_FILE)
+      goto fail;
+  } else if(ip.type != T_FILE){
+    goto fail;
+  }
+
+  g_fds[fd].kind = VFD_FILE;
+  g_fds[fd].inum = inum;
+  g_fds[fd].off = 0;
+  if(flags & XV6_O_TRUNC){
+    if(inode_truncate(inum, &ip) != 0)
+      goto fail;
+  } else if(flags & XV6_O_APPEND){
+    g_fds[fd].off = ip.size;
+  }
+  return fd;
+
+fail:
+  memset(&g_fds[fd], 0, sizeof(g_fds[fd]));
+  return -1;
+}
+
+int xv6_read(int fd, void *buf, uint32 size)
+{
+  struct dinode ip;
+  uint32 nread;
+
+  if(fd < 0 || fd >= XV6_MAX_FD || !g_fds[fd].used || buf == 0)
+    return -1;
+  if((g_fds[fd].flags & XV6_O_WRONLY) == XV6_O_WRONLY)
+    return -1;
+
+  if(g_fds[fd].kind == VFD_DEV){
+    int n = dev_read(g_fds[fd].path, g_fds[fd].off, buf, size);
+    if(n > 0)
+      g_fds[fd].off += (uint32)n;
+    return n;
+  }
+
+  if(read_inode(g_fds[fd].inum, &ip) != 0 || ip.type != T_FILE)
+    return -1;
+  if(g_fds[fd].off >= ip.size)
+    return 0;
+  nread = size;
+  if(g_fds[fd].off + nread > ip.size)
+    nread = ip.size - g_fds[fd].off;
+  if(nread > 0 && inode_read_range(&ip, g_fds[fd].off, buf, nread) != 0)
+    return -1;
+  g_fds[fd].off += nread;
+  return (int)nread;
+}
+
+int xv6_write(int fd, const void *buf, uint32 size)
+{
+  struct dinode ip;
+
+  if(fd < 0 || fd >= XV6_MAX_FD || !g_fds[fd].used || buf == 0)
+    return -1;
+  if((g_fds[fd].flags & XV6_O_WRONLY) == 0 && (g_fds[fd].flags & XV6_O_RDWR) == 0)
+    return -1;
+
+  if(g_fds[fd].kind == VFD_DEV)
+    return dev_write(g_fds[fd].path, buf, size) == 0 ? (int)size : -1;
+
+  if(read_inode(g_fds[fd].inum, &ip) != 0 || ip.type != T_FILE)
+    return -1;
+  if(inode_write_range(&ip, g_fds[fd].off, buf, size) != 0)
+    return -1;
+  if(write_inode(g_fds[fd].inum, &ip) != 0)
+    return -1;
+  g_fds[fd].off += size;
+  return (int)size;
+}
+
+int xv6_close(int fd)
+{
+  if(fd < 0 || fd >= XV6_MAX_FD || !g_fds[fd].used || fd <= 2)
+    return -1;
+  memset(&g_fds[fd], 0, sizeof(g_fds[fd]));
+  return 0;
 }
 
 int xv6fs_ro_list(int index, char *name_out, int name_out_len, uint32 *size_out)
