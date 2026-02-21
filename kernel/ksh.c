@@ -8,7 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/reent.h>
+#include <dirent.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
@@ -169,6 +172,25 @@ static void *k_host_memcpy(void *dst, const void *src, unsigned int n)
   return memcpy(dst, src, n);
 }
 
+static int k_bcmp(const void *a, const void *b, size_t n)
+{
+  return memcmp(a, b, n);
+}
+
+static void k_bcopy(const void *src, void *dst, size_t n)
+{
+  if(src == 0 || dst == 0)
+    return;
+  (void)memmove(dst, src, n);
+}
+
+static void k_bzero(void *dst, size_t n)
+{
+  if(dst == 0)
+    return;
+  (void)memset(dst, 0, n);
+}
+
 static int k_map_open_flags(int flags)
 {
   int xv6_flags = 0;
@@ -263,6 +285,25 @@ static int k_close(int fd)
     return -1;
   }
   return 0;
+}
+
+static int k_dup(int fd)
+{
+  int rc = xv6_dup(fd);
+  if(rc < 0){
+    errno = EBADF;
+    return -1;
+  }
+  return rc;
+}
+
+static int k_dup2(int oldfd, int newfd)
+{
+  if(oldfd == newfd)
+    return newfd;
+  if(newfd >= 0)
+    (void)k_close(newfd);
+  return k_dup(oldfd);
 }
 
 static off_t k_lseek(int fd, off_t offset, int whence)
@@ -366,6 +407,11 @@ static int k_unlink(const char *path)
   return 0;
 }
 
+static int k_rmdir(const char *path)
+{
+  return k_unlink(path);
+}
+
 static int k_chdir(const char *path)
 {
   path = (const char *)elf_loader_translate_ptr(path);
@@ -396,6 +442,265 @@ static char *k_getcwd(char *buf, size_t size)
 static int k_isatty(int fd)
 {
   return (fd >= 0 && fd <= 2) ? 1 : 0;
+}
+
+static int k_utimes(const char *path, const struct timeval times[2])
+{
+  (void)times;
+  path = (const char *)elf_loader_translate_ptr(path);
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_lutimes(const char *path, const struct timeval times[2])
+{
+  return k_utimes(path, times);
+}
+
+static mode_t g_umask = 0;
+
+static mode_t k_umask(mode_t mask)
+{
+  mode_t old = g_umask;
+  g_umask = mask;
+  return old;
+}
+
+static int k_fsync(int fd)
+{
+  (void)fd;
+  return 0;
+}
+
+static int k_fdatasync(int fd)
+{
+  (void)fd;
+  return 0;
+}
+
+static void k_sync(void)
+{
+}
+
+static int k_ftruncate(int fd, off_t length)
+{
+  (void)fd;
+  (void)length;
+  return 0;
+}
+
+static int k_truncate(const char *path, off_t length)
+{
+  path = (const char *)elf_loader_translate_ptr(path);
+  (void)length;
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_link(const char *oldpath, const char *newpath)
+{
+  oldpath = (const char *)elf_loader_translate_ptr(oldpath);
+  newpath = (const char *)elf_loader_translate_ptr(newpath);
+  if(oldpath == 0 || newpath == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_rename(const char *oldpath, const char *newpath)
+{
+  oldpath = (const char *)elf_loader_translate_ptr(oldpath);
+  newpath = (const char *)elf_loader_translate_ptr(newpath);
+  if(oldpath == 0 || newpath == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_symlink(const char *target, const char *linkpath)
+{
+  target = (const char *)elf_loader_translate_ptr(target);
+  linkpath = (const char *)elf_loader_translate_ptr(linkpath);
+  if(target == 0 || linkpath == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_readlink(const char *path, char *buf, size_t bufsz)
+{
+  path = (const char *)elf_loader_translate_ptr(path);
+  (void)buf;
+  (void)bufsz;
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_mknod(const char *path, mode_t mode, dev_t dev)
+{
+  path = (const char *)elf_loader_translate_ptr(path);
+  (void)mode;
+  (void)dev;
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_mkfifo(const char *path, mode_t mode)
+{
+  path = (const char *)elf_loader_translate_ptr(path);
+  (void)mode;
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  errno = ENOSYS;
+  return -1;
+}
+
+static void (*k_signal(int sig, void (*handler)(int)))(int)
+{
+  (void)sig;
+  (void)handler;
+  errno = ENOSYS;
+  return SIG_ERR;
+}
+
+static int k_sigaction(int sig, const struct sigaction *act, struct sigaction *oldact)
+{
+  (void)sig;
+  (void)act;
+  (void)oldact;
+  return 0;
+}
+
+static int k_sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
+{
+  (void)how;
+  (void)set;
+  if(oldset)
+    (void)sigemptyset(oldset);
+  return 0;
+}
+
+static int k_sigemptyset(sigset_t *set)
+{
+  if(set == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  memset(set, 0, sizeof(*set));
+  return 0;
+}
+
+static int k_sigfillset(sigset_t *set)
+{
+  if(set == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  memset(set, 0xff, sizeof(*set));
+  return 0;
+}
+
+static int k_sigaddset(sigset_t *set, int signo)
+{
+  (void)signo;
+  if(set == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_sigdelset(sigset_t *set, int signo)
+{
+  (void)signo;
+  if(set == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_sigismember(const sigset_t *set, int signo)
+{
+  (void)set;
+  (void)signo;
+  return 0;
+}
+
+static int k_raise(int sig)
+{
+  (void)sig;
+  return 0;
+}
+
+static unsigned int k_sleep(unsigned int sec)
+{
+  usleep(sec * 1000000U);
+  return 0;
+}
+
+static int k_fchmod(int fd, mode_t mode)
+{
+  (void)fd;
+  (void)mode;
+  return 0;
+}
+
+static int k_chown(const char *path, uid_t owner, gid_t group)
+{
+  path = (const char *)elf_loader_translate_ptr(path);
+  (void)owner;
+  (void)group;
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_lchown(const char *path, uid_t owner, gid_t group)
+{
+  return k_chown(path, owner, group);
+}
+
+static int k_fchown(int fd, uid_t owner, gid_t group)
+{
+  (void)fd;
+  (void)owner;
+  (void)group;
+  return 0;
+}
+
+static void k_exit(int status)
+{
+  elf_loader_host_exit(status);
+}
+
+static void k_abort(void)
+{
+  elf_loader_host_exit(134);
 }
 
 extern int ksh_register_libc_host_symbols(void);
@@ -1913,6 +2218,10 @@ static void register_default_symbols(void)
     { "printf", (void *)k_host_printf },
     { "fprintf", (void *)k_host_fprintf },
     { "vfprintf", (void *)vfprintf },
+    { "sprintf", (void *)sprintf },
+    { "snprintf", (void *)snprintf },
+    { "vsprintf", (void *)vsprintf },
+    { "vsnprintf", (void *)vsnprintf },
     { "fputs", (void *)fputs },
     { "fputc", (void *)fputc },
     { "fopen", (void *)fopen },
@@ -1921,18 +2230,36 @@ static void register_default_symbols(void)
     { "fgets", (void *)fgets },
     { "fgetc", (void *)fgetc },
     { "getc", (void *)getc },
+    { "getchar", (void *)getchar },
+    { "fread", (void *)fread },
+    { "fwrite", (void *)fwrite },
+    { "setbuf", (void *)setbuf },
+    { "setvbuf", (void *)setvbuf },
     { "putchar", (void *)putchar },
     { "fflush", (void *)fflush },
     { "clearerr", (void *)clearerr },
+    { "feof", (void *)feof },
+    { "ferror", (void *)ferror },
+    { "fseek", (void *)fseek },
+    { "ftell", (void *)ftell },
+    { "rewind", (void *)rewind },
+    { "ungetc", (void *)ungetc },
+    { "perror", (void *)perror },
+    { "strerror", (void *)strerror },
     { "fileno", (void *)fileno },
-    { "exit", (void *)exit },
-    { "abort", (void *)abort },
+    { "exit", (void *)k_exit },
+    { "abort", (void *)k_abort },
     { "malloc", (void *)malloc },
     { "calloc", (void *)calloc },
     { "realloc", (void *)realloc },
     { "free", (void *)free },
     { "memset", (void *)memset },
     { "memcpy", (void *)k_host_memcpy },
+    { "bcmp", (void *)k_bcmp },
+    { "bcopy", (void *)k_bcopy },
+    { "bzero", (void *)k_bzero },
+    { "index", (void *)strchr },
+    { "rindex", (void *)strrchr },
     { "strlen", (void *)k_host_strlen },
     { "strcmp", (void *)k_host_strcmp },
     { "usleep", (void *)usleep },
@@ -1958,6 +2285,8 @@ static void register_default_symbols(void)
     { "read", (void *)k_read },
     { "write", (void *)k_write },
     { "close", (void *)k_close },
+    { "dup", (void *)k_dup },
+    { "dup2", (void *)k_dup2 },
     { "lseek", (void *)k_lseek },
     { "stat", (void *)k_stat },
     { "lstat", (void *)k_lstat },
@@ -1965,10 +2294,45 @@ static void register_default_symbols(void)
     { "access", (void *)k_access },
     { "mkdir", (void *)k_mkdir },
     { "unlink", (void *)k_unlink },
+    { "rmdir", (void *)k_rmdir },
     { "chmod", (void *)k_chmod },
     { "chdir", (void *)k_chdir },
     { "getcwd", (void *)k_getcwd },
     { "isatty", (void *)k_isatty },
+    { "utimes", (void *)k_utimes },
+    { "lutimes", (void *)k_lutimes },
+    { "umask", (void *)k_umask },
+    { "sync", (void *)k_sync },
+    { "fsync", (void *)k_fsync },
+    { "fdatasync", (void *)k_fdatasync },
+    { "ftruncate", (void *)k_ftruncate },
+    { "truncate", (void *)k_truncate },
+    { "link", (void *)k_link },
+    { "rename", (void *)k_rename },
+    { "symlink", (void *)k_symlink },
+    { "readlink", (void *)k_readlink },
+    { "mknod", (void *)k_mknod },
+    { "mkfifo", (void *)k_mkfifo },
+    { "signal", (void *)k_signal },
+    { "sigaction", (void *)k_sigaction },
+    { "sigprocmask", (void *)k_sigprocmask },
+    { "sigemptyset", (void *)k_sigemptyset },
+    { "sigfillset", (void *)k_sigfillset },
+    { "sigaddset", (void *)k_sigaddset },
+    { "sigdelset", (void *)k_sigdelset },
+    { "sigismember", (void *)k_sigismember },
+    { "raise", (void *)k_raise },
+    { "sleep", (void *)k_sleep },
+    { "fchmod", (void *)k_fchmod },
+    { "chown", (void *)k_chown },
+    { "lchown", (void *)k_lchown },
+    { "fchown", (void *)k_fchown },
+    { "getopt", (void *)getopt },
+    { "dirfd", (void *)dirfd },
+    { "optind", (void *)&optind },
+    { "opterr", (void *)&opterr },
+    { "optopt", (void *)&optopt },
+    { "optarg", (void *)&optarg },
     { "__getreent", (void *)__getreent },
   };
 

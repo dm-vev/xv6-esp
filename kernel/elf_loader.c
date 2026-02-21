@@ -1,5 +1,6 @@
 #include "elf_loader.h"
 
+#include <setjmp.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -149,6 +150,8 @@ static int g_host_sym_count;
 typedef struct {
   TaskHandle_t task;
   elf_module_t *mod;
+  jmp_buf jb;
+  int jb_valid;
 } elf_call_ctx_t;
 static elf_call_ctx_t g_call_ctx[ELF_CALL_CTX_MAX];
 static SemaphoreHandle_t g_call_ctx_mu;
@@ -177,6 +180,8 @@ static void call_ctx_set_current(elf_module_t *mod)
   for(i = 0; i < ELF_CALL_CTX_MAX; i++){
     if(g_call_ctx[i].task == self){
       g_call_ctx[i].mod = mod;
+      if(mod == 0)
+        g_call_ctx[i].jb_valid = 0;
       call_ctx_unlock();
       return;
     }
@@ -186,6 +191,7 @@ static void call_ctx_set_current(elf_module_t *mod)
   if(free_i >= 0){
     g_call_ctx[free_i].task = self;
     g_call_ctx[free_i].mod = mod;
+    g_call_ctx[free_i].jb_valid = 0;
   }
   call_ctx_unlock();
 }
@@ -205,6 +211,23 @@ static elf_module_t *call_ctx_get_current(void)
   }
   call_ctx_unlock();
   return m;
+}
+
+static elf_call_ctx_t *call_ctx_get_current_slot(void)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int i;
+  elf_call_ctx_t *slot = 0;
+
+  call_ctx_lock();
+  for(i = 0; i < ELF_CALL_CTX_MAX; i++){
+    if(g_call_ctx[i].task == self){
+      slot = &g_call_ctx[i];
+      break;
+    }
+  }
+  call_ctx_unlock();
+  return slot;
 }
 
 static int read_flash_image(uint32 sector, uint32 sector_count, uint8 **out, uint32 *out_size)
@@ -375,8 +398,10 @@ static void *resolve_host_symbol(const char *name)
 {
   int i;
   for(i = g_host_sym_count - 1; i >= 0; i--){
-    if(strcmp(name, g_host_syms[i].name) == 0)
-      return g_host_syms[i].addr;
+    if(strcmp(name, g_host_syms[i].name) == 0){
+      if(g_host_syms[i].addr != 0)
+        return g_host_syms[i].addr;
+    }
   }
   return 0;
 }
@@ -814,6 +839,9 @@ int elf_module_call_main(elf_module_t *mod, int argc, char **argv, int *retv)
 {
   typedef int (*main_fn_t)(int argc, char **argv);
   main_fn_t fn;
+  elf_call_ctx_t *slot;
+  int jmp_rc;
+  int app_rc = -1;
 
   if(mod == 0)
     return -1;
@@ -825,12 +853,32 @@ int elf_module_call_main(elf_module_t *mod, int argc, char **argv, int *retv)
     return -1;
 
   call_ctx_set_current(mod);
+  slot = call_ctx_get_current_slot();
+  if(slot != 0){
+    slot->jb_valid = 1;
+    jmp_rc = setjmp(slot->jb);
+    if(jmp_rc == 0){
+      app_rc = fn(argc, argv);
+    } else {
+      app_rc = jmp_rc - 1;
+    }
+    slot->jb_valid = 0;
+  } else {
+    app_rc = fn(argc, argv);
+  }
   if(retv)
-    *retv = fn(argc, argv);
-  else
-    (void)fn(argc, argv);
+    *retv = app_rc;
   call_ctx_set_current(0);
   return 0;
+}
+
+void elf_loader_host_exit(int status)
+{
+  elf_call_ctx_t *slot = call_ctx_get_current_slot();
+  if(slot != 0 && slot->jb_valid){
+    longjmp(slot->jb, status + 1);
+  }
+  abort();
 }
 
 const void *elf_loader_translate_ptr(const void *ptr)

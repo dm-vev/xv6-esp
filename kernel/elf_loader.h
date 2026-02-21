@@ -30,5 +30,6 @@ int elf_module_call_main(elf_module_t *mod, int argc, char **argv, int *retv);
 int elf_module_info(elf_module_t *mod, uint16 *etype, uint16 *machine, uint32 *entry_vaddr, int *nsegs, int *nexports);
 void elf_module_list(const char **names, int max_names, int *out_count);
 const void *elf_loader_translate_ptr(const void *ptr);
+void elf_loader_host_exit(int status);
 
 #endif
