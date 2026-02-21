@@ -7,5 +7,4 @@ idf_component_register(
     "../kernel/ksh.c"
   INCLUDE_DIRS
     "."
-    "../kernel"
 )

@@ -1,4 +1,4 @@
-#include "xv6_esp_boot.h"
+#include "../kernel/xv6_esp_boot.h"
 
 void app_main(void)
 {

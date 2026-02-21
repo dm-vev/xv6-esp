@@ -62,7 +62,7 @@ static void print_u64(uint64 v)
 
 static void print_hex_u8(uint8 x)
 {
-  const char hexd[16] = "0123456789abcdef";
+  const char hexd[] = "0123456789abcdef";
   putc_console(hexd[(x >> 4) & 0x0f]);
   putc_console(hexd[x & 0x0f]);
 }

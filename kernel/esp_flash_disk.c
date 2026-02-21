@@ -2,12 +2,12 @@
 
 #include "esp_log.h"
 #include "esp_partition.h"
-#include "esp_spi_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
 static const char *TAG = "xv6_flash_disk";
 static const char *XV6_PARTITION_LABEL = "xv6fs";
+static const uint32 XV6_FLASH_ERASE_SIZE = 4096U;
 
 static const esp_partition_t *g_part;
 static SemaphoreHandle_t g_disk_mu;
@@ -78,7 +78,7 @@ int esp_flash_disk_write(uint32 sector, const void *src, uint32 sector_count)
   uint32 len;
   uint32 erase_base;
   uint32 erase_len;
-  const uint32 erase_sz = (uint32)SPI_FLASH_SEC_SIZE;
+  const uint32 erase_sz = XV6_FLASH_ERASE_SIZE;
 
   if(g_part == 0 || src == 0)
     return -1;
