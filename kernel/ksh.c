@@ -6,6 +6,9 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "elf_loader.h"
 #include "esp_flash_disk.h"
 #include "hal.h"
@@ -39,6 +42,27 @@ static int k_fs_readdir_path(const char *path, int index, char *name_out, int na
 {
   return xv6fs_list_path(path, index, name_out, name_out_len, type_out, size_out);
 }
+
+#define KSH_MAX_JOBS 8
+
+typedef struct {
+  int used;
+  int id;
+  int done;
+  int exit_code;
+  char cmd[96];
+} ksh_job_t;
+
+typedef struct {
+  int slot;
+  int argc;
+  char **argv;
+} ksh_job_task_t;
+
+static ksh_job_t g_jobs[KSH_MAX_JOBS];
+static int g_next_job_id = 1;
+static SemaphoreHandle_t g_jobs_lock;
+static SemaphoreHandle_t g_loader_lock;
 
 static void putc_console(int c)
 {
@@ -75,6 +99,21 @@ static void print_u32(uint32 v)
   }
   while(i > 0)
     putc_console(tmp[--i]);
+}
+
+static int parse_u32_dec(const char *s, uint32 *out)
+{
+  uint32 v = 0;
+  if(s == 0 || *s == 0 || out == 0)
+    return -1;
+  while(*s){
+    if(*s < '0' || *s > '9')
+      return -1;
+    v = v * 10 + (uint32)(*s - '0');
+    s++;
+  }
+  *out = v;
+  return 0;
 }
 
 static void print_u64(uint64 v)
@@ -122,10 +161,13 @@ static void cmd_help(void)
   puts_line("commands:");
   puts_line("  help");
   puts_line("  <elf-command> [args]");
+  puts_line("  <elf-command> [args] &");
+  puts_line("  jobs");
+  puts_line("  wait [jobid]");
   puts_line("  reboot");
 }
 
-static int try_run_elf_command(int argc, char **argv)
+static int run_elf_command(int argc, char **argv, int *exit_code)
 {
   elf_module_t *m;
   void *image = 0;
@@ -138,6 +180,11 @@ static int try_run_elf_command(int argc, char **argv)
   if(argc <= 0 || argv == 0 || argv[0] == 0 || argv[0][0] == 0)
     return -1;
 
+  if(exit_code)
+    *exit_code = 127;
+
+  if(g_loader_lock)
+    (void)xSemaphoreTake(g_loader_lock, portMAX_DELAY);
   m = elf_module_find(argv[0]);
   if(m == 0){
     if(strchr(argv[0], '/')){
@@ -158,21 +205,31 @@ static int try_run_elf_command(int argc, char **argv)
       }
     }
     if(image == 0){
+      if(g_loader_lock)
+        (void)xSemaphoreGive(g_loader_lock);
       puts_line("exec: command not found");
       return -1;
     }
     if(elf_module_load_from_bytes(argv[0], image, image_size, &m) != 0){
       free(image);
+      if(g_loader_lock)
+        (void)xSemaphoreGive(g_loader_lock);
       puts_line("exec: elf load failed");
       return -1;
     }
     free(image);
   }
+  if(g_loader_lock)
+    (void)xSemaphoreGive(g_loader_lock);
 
   if(elf_module_call_main(m, argc, argv, &retv) != 0){
     puts_line("exec: entry call failed");
+    if(exit_code)
+      *exit_code = 126;
     return -1;
   }
+  if(exit_code)
+    *exit_code = retv;
   if(retv != 0){
     puts_console(argv[0]);
     puts_console(": exit=");
@@ -180,6 +237,235 @@ static int try_run_elf_command(int argc, char **argv)
     puts_line("");
   }
   return 0;
+}
+
+static int job_find_slot_by_id(int id)
+{
+  int i;
+  for(i = 0; i < KSH_MAX_JOBS; i++){
+    if(g_jobs[i].used && g_jobs[i].id == id)
+      return i;
+  }
+  return -1;
+}
+
+static void job_print_one(const ksh_job_t *j)
+{
+  putc_console('[');
+  print_u32((uint32)j->id);
+  puts_console("] ");
+  if(j->done){
+    puts_console("done ");
+    print_u32((uint32)j->exit_code);
+    putc_console(' ');
+  } else {
+    puts_console("running ");
+  }
+  puts_line(j->cmd);
+}
+
+static void cmd_jobs(void)
+{
+  int i;
+  int any = 0;
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  for(i = 0; i < KSH_MAX_JOBS; i++){
+    if(!g_jobs[i].used)
+      continue;
+    job_print_one(&g_jobs[i]);
+    any = 1;
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+  if(!any)
+    puts_line("jobs: empty");
+}
+
+static void job_task(void *arg)
+{
+  int i;
+  int exit_code = 127;
+  ksh_job_task_t *t = (ksh_job_task_t *)arg;
+
+  (void)run_elf_command(t->argc, t->argv, &exit_code);
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  if(t->slot >= 0 && t->slot < KSH_MAX_JOBS && g_jobs[t->slot].used){
+    g_jobs[t->slot].done = 1;
+    g_jobs[t->slot].exit_code = exit_code;
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  for(i = 0; i < t->argc; i++)
+    free(t->argv[i]);
+  free(t->argv);
+  free(t);
+  vTaskDelete(NULL);
+}
+
+static int spawn_background(int argc, char **argv)
+{
+  int i;
+  int slot = -1;
+  int id = 0;
+  int pos = 0;
+  ksh_job_task_t *t = 0;
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  for(i = 0; i < KSH_MAX_JOBS; i++){
+    if(!g_jobs[i].used){
+      slot = i;
+      break;
+    }
+  }
+  if(slot < 0){
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+    puts_line("jobs: table full");
+    return -1;
+  }
+
+  t = (ksh_job_task_t *)calloc(1, sizeof(*t));
+  if(t == 0){
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+    puts_line("jobs: no memory");
+    return -1;
+  }
+  t->argv = (char **)calloc((unsigned)argc + 1, sizeof(char *));
+  if(t->argv == 0){
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+    free(t);
+    puts_line("jobs: no memory");
+    return -1;
+  }
+  t->argc = argc;
+  t->slot = slot;
+  for(i = 0; i < argc; i++){
+    size_t n = strlen(argv[i]) + 1;
+    t->argv[i] = (char *)malloc(n);
+    if(t->argv[i] == 0){
+      int j;
+      for(j = 0; j < i; j++)
+        free(t->argv[j]);
+      free(t->argv);
+      free(t);
+      if(g_jobs_lock)
+        (void)xSemaphoreGive(g_jobs_lock);
+      puts_line("jobs: no memory");
+      return -1;
+    }
+    memcpy(t->argv[i], argv[i], n);
+  }
+  t->argv[argc] = 0;
+
+  id = g_next_job_id++;
+  if(g_next_job_id < 1)
+    g_next_job_id = 1;
+  memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
+  g_jobs[slot].used = 1;
+  g_jobs[slot].id = id;
+  for(i = 0; i < argc; i++){
+    int n = snprintf(g_jobs[slot].cmd + pos, sizeof(g_jobs[slot].cmd) - (unsigned)pos, "%s%s", (i ? " " : ""),
+                     argv[i]);
+    if(n <= 0 || pos + n >= (int)sizeof(g_jobs[slot].cmd)){
+      g_jobs[slot].cmd[sizeof(g_jobs[slot].cmd) - 1] = 0;
+      break;
+    }
+    pos += n;
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(xTaskCreate(job_task, "xv6_bg", 6144, t, 5, 0) != pdPASS){
+    if(g_jobs_lock)
+      (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+    memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+    for(i = 0; i < argc; i++)
+      free(t->argv[i]);
+    free(t->argv);
+    free(t);
+    puts_line("jobs: spawn failed");
+    return -1;
+  }
+
+  putc_console('[');
+  print_u32((uint32)id);
+  puts_line("] started");
+  return 0;
+}
+
+static void cmd_wait(int argc, char **argv)
+{
+  if(argc == 1){
+    while(1){
+      int i;
+      int has_used = 0;
+      int has_running = 0;
+      if(g_jobs_lock)
+        (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+      for(i = 0; i < KSH_MAX_JOBS; i++){
+        if(!g_jobs[i].used)
+          continue;
+        has_used = 1;
+        if(g_jobs[i].done)
+          memset(&g_jobs[i], 0, sizeof(g_jobs[i]));
+        else
+          has_running = 1;
+      }
+      if(g_jobs_lock)
+        (void)xSemaphoreGive(g_jobs_lock);
+      if(!has_used || !has_running)
+        break;
+      hal_delay_ms(10);
+    }
+    puts_line("wait: done");
+    return;
+  }
+
+  if(argc == 2){
+    uint32 id = 0;
+    if(parse_u32_dec(argv[1], &id) != 0){
+      puts_line("wait: bad job id");
+      return;
+    }
+    while(1){
+      int slot;
+      int done = 0;
+      int exit_code = 0;
+      if(g_jobs_lock)
+        (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+      slot = job_find_slot_by_id((int)id);
+      if(slot < 0){
+        if(g_jobs_lock)
+          (void)xSemaphoreGive(g_jobs_lock);
+        puts_line("wait: no such job");
+        return;
+      }
+      if(g_jobs[slot].done){
+        done = 1;
+        exit_code = g_jobs[slot].exit_code;
+        memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
+      }
+      if(g_jobs_lock)
+        (void)xSemaphoreGive(g_jobs_lock);
+      if(done){
+        puts_console("wait: done ");
+        print_u32((uint32)exit_code);
+        puts_line("");
+        return;
+      }
+      hal_delay_ms(10);
+    }
+  }
+
+  puts_line("usage: wait [jobid]");
 }
 
 static void register_default_symbols(void)
@@ -219,6 +505,8 @@ void ksh_run(void)
   int len = 0;
 
   elf_loader_init();
+  g_jobs_lock = xSemaphoreCreateMutex();
+  g_loader_lock = xSemaphoreCreateMutex();
   register_default_symbols();
   xv6_vfs_reset();
 
@@ -236,6 +524,7 @@ void ksh_run(void)
     if(c == '\r' || c == '\n'){
       char *argv[16];
       int argc;
+      int run_bg = 0;
       line[len] = 0;
       puts_line("");
 
@@ -245,15 +534,32 @@ void ksh_run(void)
         len = 0;
         continue;
       }
+      if(argc > 0 && strcmp(argv[argc - 1], "&") == 0){
+        run_bg = 1;
+        argc--;
+        if(argc == 0){
+          puts_line("syntax: command &");
+          puts_console("xv6> ");
+          len = 0;
+          continue;
+        }
+      }
 
       if(strcmp(argv[0], "help") == 0){
         cmd_help();
+      } else if(strcmp(argv[0], "jobs") == 0){
+        cmd_jobs();
+      } else if(strcmp(argv[0], "wait") == 0){
+        cmd_wait(argc, argv);
       } else if(strcmp(argv[0], "reboot") == 0){
         puts_line("rebooting...");
         hal_reboot();
       } else {
-        if(try_run_elf_command(argc, argv) != 0)
+        if(run_bg){
+          (void)spawn_background(argc, argv);
+        } else if(run_elf_command(argc, argv, 0) != 0){
           puts_line("unknown command");
+        }
       }
 
       len = 0;

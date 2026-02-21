@@ -4,7 +4,6 @@ extern int printf(const char *fmt, ...);
 extern int xv6_open(const char *path, int flags);
 extern int xv6_read(int fd, void *buf, u32 size);
 extern int xv6_close(int fd);
-extern int xv6_write(int fd, const void *buf, u32 size);
 
 #define O_RDWR 0x0002
 
@@ -32,8 +31,12 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  if(n > 0)
-    (void)xv6_write(1, buf, (u32)n);
+  if(n > 0){
+    if(n >= (int)sizeof(buf))
+      n = (int)sizeof(buf) - 1;
+    buf[n] = 0;
+    printf("%s", buf);
+  }
   xv6_close(sfd);
   return 0;
 }

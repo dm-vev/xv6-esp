@@ -154,6 +154,15 @@ def main() -> int:
         out = cmd(sock, "ls /tmp")
         assert "dd3.bin" in out
 
+        out = cmd(sock, "sleep 400 &")
+        assert "started" in out
+
+        out = cmd(sock, "jobs")
+        assert "sleep 400" in out
+
+        out = cmd(sock, "wait")
+        assert "wait: done" in out
+
         out = cmd(sock, "ptydemo")
         assert "slave:ping" in out
         assert "master:pong" in out

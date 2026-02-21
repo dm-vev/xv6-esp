@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_flash_disk.h"
 #include "esp_log.h"
 #include "fs.h"
@@ -17,6 +19,7 @@ static struct superblock g_sb;
 static int g_ready;
 static uint32 g_nbitmap;
 static uint32 g_data_start;
+static SemaphoreHandle_t g_vfs_lock;
 
 #define XV6_MAX_FD 32
 #define VFD_FREE 0
@@ -56,6 +59,18 @@ typedef struct {
 } xv6_pty_t;
 
 static xv6_pty_t g_ptys[XV6_MAX_PTY];
+
+static void vfs_lock(void)
+{
+  if(g_vfs_lock)
+    (void)xSemaphoreTake(g_vfs_lock, portMAX_DELAY);
+}
+
+static void vfs_unlock(void)
+{
+  if(g_vfs_lock)
+    (void)xSemaphoreGive(g_vfs_lock);
+}
 
 static int dev_canonical_path(const char *path, char *out, int out_len)
 {
@@ -734,6 +749,8 @@ int xv6fs_ro_init(void)
   uint8 blk[BSIZE];
 
   g_ready = 0;
+  if(g_vfs_lock == 0)
+    g_vfs_lock = xSemaphoreCreateMutex();
   memset(&g_sb, 0, sizeof(g_sb));
 
   if(read_block(1, blk) != 0)
@@ -976,6 +993,9 @@ static int vfs_create_regular_file(const char *path, uint32 *out_inum)
 
 void xv6_vfs_reset(void)
 {
+  if(g_vfs_lock == 0)
+    g_vfs_lock = xSemaphoreCreateMutex();
+  vfs_lock();
   memset(g_fds, 0, sizeof(g_fds));
   memset(g_ptys, 0, sizeof(g_ptys));
 
@@ -993,6 +1013,7 @@ void xv6_vfs_reset(void)
   g_fds[2].kind = VFD_DEV;
   g_fds[2].flags = XV6_O_WRONLY;
   strcpy(g_fds[2].path, "/dev/stderr");
+  vfs_unlock();
 }
 
 int xv6_open(const char *path, int flags)
@@ -1005,9 +1026,10 @@ int xv6_open(const char *path, int flags)
 
   if(!g_ready || path == 0 || path[0] == 0)
     return -1;
+  vfs_lock();
   fd = vfs_alloc_fd();
   if(fd < 0)
-    return -1;
+    goto fail_unlock;
 
   memset(&g_fds[fd], 0, sizeof(g_fds[fd]));
   g_fds[fd].used = 1;
@@ -1032,6 +1054,7 @@ int xv6_open(const char *path, int flags)
       g_fds[fd].dev_role = DEV_ROLE_PTY_SLAVE;
       g_fds[fd].dev_id = pty_id;
     }
+    vfs_unlock();
     return fd;
   }
 
@@ -1055,10 +1078,13 @@ int xv6_open(const char *path, int flags)
   } else if(flags & XV6_O_APPEND){
     g_fds[fd].off = ip.size;
   }
+  vfs_unlock();
   return fd;
 
 fail:
   memset(&g_fds[fd], 0, sizeof(g_fds[fd]));
+fail_unlock:
+  vfs_unlock();
   return -1;
 }
 
@@ -1066,58 +1092,79 @@ int xv6_read(int fd, void *buf, uint32 size)
 {
   struct dinode ip;
   uint32 nread;
+  int rc;
 
   if(fd < 0 || fd >= XV6_MAX_FD || !g_fds[fd].used || buf == 0)
     return -1;
+  vfs_lock();
   if((g_fds[fd].flags & XV6_O_WRONLY) == XV6_O_WRONLY)
-    return -1;
+    goto fail;
 
   if(g_fds[fd].kind == VFD_DEV){
-    int n = dev_read_fd(&g_fds[fd], buf, size);
-    if(n > 0)
-      g_fds[fd].off += (uint32)n;
-    return n;
+    rc = dev_read_fd(&g_fds[fd], buf, size);
+    if(rc > 0)
+      g_fds[fd].off += (uint32)rc;
+    vfs_unlock();
+    return rc;
   }
 
   if(read_inode(g_fds[fd].inum, &ip) != 0 || ip.type != T_FILE)
-    return -1;
-  if(g_fds[fd].off >= ip.size)
+    goto fail;
+  if(g_fds[fd].off >= ip.size){
+    vfs_unlock();
     return 0;
+  }
   nread = size;
   if(g_fds[fd].off + nread > ip.size)
     nread = ip.size - g_fds[fd].off;
   if(nread > 0 && inode_read_range(&ip, g_fds[fd].off, buf, nread) != 0)
-    return -1;
+    goto fail;
   g_fds[fd].off += nread;
+  vfs_unlock();
   return (int)nread;
+
+fail:
+  vfs_unlock();
+  return -1;
 }
 
 int xv6_write(int fd, const void *buf, uint32 size)
 {
   struct dinode ip;
+  int rc;
 
   if(fd < 0 || fd >= XV6_MAX_FD || !g_fds[fd].used || buf == 0)
     return -1;
+  vfs_lock();
   if((g_fds[fd].flags & XV6_O_WRONLY) == 0 && (g_fds[fd].flags & XV6_O_RDWR) == 0)
-    return -1;
+    goto fail;
 
-  if(g_fds[fd].kind == VFD_DEV)
-    return dev_write_fd(&g_fds[fd], buf, size);
+  if(g_fds[fd].kind == VFD_DEV){
+    rc = dev_write_fd(&g_fds[fd], buf, size);
+    vfs_unlock();
+    return rc;
+  }
 
   if(read_inode(g_fds[fd].inum, &ip) != 0 || ip.type != T_FILE)
-    return -1;
+    goto fail;
   if(inode_write_range(&ip, g_fds[fd].off, buf, size) != 0)
-    return -1;
+    goto fail;
   if(write_inode(g_fds[fd].inum, &ip) != 0)
-    return -1;
+    goto fail;
   g_fds[fd].off += size;
+  vfs_unlock();
   return (int)size;
+
+fail:
+  vfs_unlock();
+  return -1;
 }
 
 int xv6_close(int fd)
 {
   if(fd < 0 || fd >= XV6_MAX_FD || !g_fds[fd].used || fd <= 2)
     return -1;
+  vfs_lock();
   if(g_fds[fd].kind == VFD_DEV){
     int id = g_fds[fd].dev_id;
     if(g_fds[fd].dev_role == DEV_ROLE_PTY_MASTER && id >= 0 && id < XV6_MAX_PTY){
@@ -1129,6 +1176,7 @@ int xv6_close(int fd)
     }
   }
   memset(&g_fds[fd], 0, sizeof(g_fds[fd]));
+  vfs_unlock();
   return 0;
 }
 
@@ -1137,16 +1185,22 @@ int xv6_ptsname(int master_fd, char *out_path, int out_len)
   int id;
   if(out_path == 0 || out_len <= 0)
     return -1;
+  vfs_lock();
   if(master_fd < 0 || master_fd >= XV6_MAX_FD || !g_fds[master_fd].used)
-    return -1;
+    goto fail;
   if(g_fds[master_fd].kind != VFD_DEV || g_fds[master_fd].dev_role != DEV_ROLE_PTY_MASTER)
-    return -1;
+    goto fail;
   id = g_fds[master_fd].dev_id;
   if(id < 0 || id >= XV6_MAX_PTY || !g_ptys[id].alloc)
-    return -1;
+    goto fail;
   if(snprintf(out_path, out_len, "/dev/pts/%d", id) <= 0)
-    return -1;
+    goto fail;
+  vfs_unlock();
   return 0;
+
+fail:
+  vfs_unlock();
+  return -1;
 }
 
 int xv6fs_ro_list(int index, char *name_out, int name_out_len, uint32 *size_out)

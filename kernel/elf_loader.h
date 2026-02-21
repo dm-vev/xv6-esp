@@ -3,7 +3,7 @@
 
 #include "types.h"
 
-#define ELFLOADER_MAX_MODULES 8
+#define ELFLOADER_MAX_MODULES 32
 #define ELFLOADER_MAX_EXPORTS 96
 #define ELFLOADER_NAME_MAX 32
 
