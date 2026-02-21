@@ -65,7 +65,31 @@ Build steps:
 
 Filesystem image source:
 - Everything under `fsroot/` is packed into `xv6fs.bin` during build.
-- ELF user commands are built and copied into `fsroot/bin` in the staging step.
+- ELF user commands are described as applets via `applets/<name>/applet.cmake`.
+- Each applet manifest defines compile sources, install path, deps/resources, and enabled state.
+- Enabled applets are built into `build/applets/*` and staged into `build/fsroot_stage/*` before `mkfs`.
+
+Applet layout:
+- shared headers: `applets/include/`
+- one applet per directory: `applets/<name>/`
+- manifest path: `applets/<name>/applet.cmake`
+
+Applet manifest example:
+```cmake
+xv6_applet(
+  NAME ls
+  ENABLED ON
+  SOURCES ls.c
+  BUILD_DEPS ../include/xv6_user.h
+  INSTALL_PATH /bin/ls
+)
+```
+
+BSD-oriented applets currently included:
+`basename`, `cat`, `cp`, `dd`, `dirname`, `echo`, `false`, `head`, `ls`, `mkdir`, `mv`, `pwd`, `rm`, `sleep`, `touch`, `true`, `uname`.
+
+Project-specific extra applets:
+`mem`, `ticks`, `write`, `ptydemo`, `ptysend`, `ptyrecv`, `stdinhead`.
 
 ESP QEMU smoke test:
 - `./scripts/qemu_smoke_esp.py`

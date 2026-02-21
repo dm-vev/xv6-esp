@@ -16,29 +16,27 @@ idf_component_register(
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   set(XV6FS_BLOCKS 896)
   set(XV6FS_ROOT_DIR "${PROJECT_DIR}/fsroot")
-  set(ESP_USER_DIR "${CMAKE_BINARY_DIR}/esp_user")
+  set(APPLET_BUILD_DIR "${CMAKE_BINARY_DIR}/applets")
+  set(APPLET_SRC_DIR "${PROJECT_DIR}/applets")
+  set(APPLET_INCLUDE_DIR "${APPLET_SRC_DIR}/include")
   set(FSROOT_STAGE "${CMAKE_BINARY_DIR}/fsroot_stage")
-  set(FSROOT_BIN "${FSROOT_STAGE}/bin")
-  set(MKFS_TOOL "${CMAKE_BINARY_DIR}/mkfs_host")
-  set(ESP_USER_LS "${ESP_USER_DIR}/ls")
-  set(ESP_USER_ECHO "${ESP_USER_DIR}/echo")
-  set(ESP_USER_MEM "${ESP_USER_DIR}/mem")
-  set(ESP_USER_TICKS "${ESP_USER_DIR}/ticks")
-  set(ESP_USER_MKDIR "${ESP_USER_DIR}/mkdir")
-  set(ESP_USER_WRITE "${ESP_USER_DIR}/write")
-  set(ESP_USER_CAT "${ESP_USER_DIR}/cat")
-  set(ESP_USER_RM "${ESP_USER_DIR}/rm")
-  set(ESP_USER_HEAD "${ESP_USER_DIR}/head")
-  set(ESP_USER_DD "${ESP_USER_DIR}/dd")
-  set(ESP_USER_CP "${ESP_USER_DIR}/cp")
-  set(ESP_USER_MV "${ESP_USER_DIR}/mv")
-  set(ESP_USER_PTYDEMO "${ESP_USER_DIR}/ptydemo")
-  set(ESP_USER_PTYSEND "${ESP_USER_DIR}/ptysend")
-  set(ESP_USER_PTYRECV "${ESP_USER_DIR}/ptyrecv")
-  set(ESP_USER_SLEEP "${ESP_USER_DIR}/sleep")
-  set(ESP_USER_STDINHEAD "${ESP_USER_DIR}/stdinhead")
   set(FSROOT_STAMP "${CMAKE_BINARY_DIR}/fsroot_stage.stamp")
+  set(MKFS_TOOL "${CMAKE_BINARY_DIR}/mkfs_host")
+  set(LIBC_SYMBOLS_C "${CMAKE_BINARY_DIR}/generated/libc_host_symbols.c")
+  set(LIBC_SYMBOLS_GEN "${PROJECT_DIR}/scripts/gen_libc_symbols.py")
+  set(LIBC_A_PATH "${CMAKE_BINARY_DIR}/esp-idf/newlib/libnewlib.a")
+  if(NOT Python3_EXECUTABLE)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  endif()
+  if(NOT CMAKE_NM)
+    find_program(CMAKE_NM NAMES ${CMAKE_C_COMPILER_TARGET}-nm nm)
+  endif()
+  if(NOT CMAKE_NM)
+    message(FATAL_ERROR "nm tool not found")
+  endif()
+
   file(GLOB_RECURSE FSROOT_SOURCE_FILES CONFIGURE_DEPENDS "${XV6FS_ROOT_DIR}/*")
+
   set(ESP_USER_FLAGS
     -Os
     -ffreestanding
@@ -46,10 +44,30 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     -fno-stack-protector
     -fPIC
     -nostdlib
+    -I${APPLET_INCLUDE_DIR}
     -Wl,-shared
     -Wl,-e,main
     -Wl,--unresolved-symbols=ignore-all
   )
+
+  add_custom_command(
+    OUTPUT ${LIBC_SYMBOLS_C}
+    COMMAND ${Python3_EXECUTABLE} ${LIBC_SYMBOLS_GEN} --nm ${CMAKE_NM} --libc ${LIBC_A_PATH} --out ${LIBC_SYMBOLS_C} --header ${PROJECT_DIR}/kernel/elf_loader.h
+    DEPENDS ${LIBC_SYMBOLS_GEN} ${LIBC_A_PATH}
+    VERBATIM
+  )
+  set_source_files_properties(${LIBC_SYMBOLS_C} PROPERTIES GENERATED TRUE)
+  target_sources(${COMPONENT_LIB} PRIVATE ${LIBC_SYMBOLS_C})
+
+  include(${CMAKE_CURRENT_LIST_DIR}/cmake/applets.cmake)
+
+  file(GLOB APPLET_MANIFESTS CONFIGURE_DEPENDS "${APPLET_SRC_DIR}/*/applet.cmake")
+  if(NOT APPLET_MANIFESTS)
+    message(FATAL_ERROR "No applet manifests found in ${APPLET_SRC_DIR}")
+  endif()
+  foreach(APPLET_MANIFEST IN LISTS APPLET_MANIFESTS)
+    include(${APPLET_MANIFEST})
+  endforeach()
 
   add_custom_command(
     OUTPUT ${MKFS_TOOL}
@@ -59,172 +77,14 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     VERBATIM
   )
 
-  add_custom_command(
-    OUTPUT ${ESP_USER_LS}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_LS} ${PROJECT_DIR}/esp_user/ls.c
-    DEPENDS ${PROJECT_DIR}/esp_user/ls.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_ECHO}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_ECHO} ${PROJECT_DIR}/esp_user/echo.c
-    DEPENDS ${PROJECT_DIR}/esp_user/echo.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_MEM}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_MEM} ${PROJECT_DIR}/esp_user/mem.c
-    DEPENDS ${PROJECT_DIR}/esp_user/mem.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_TICKS}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_TICKS} ${PROJECT_DIR}/esp_user/ticks.c
-    DEPENDS ${PROJECT_DIR}/esp_user/ticks.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_MKDIR}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_MKDIR} ${PROJECT_DIR}/esp_user/mkdir.c
-    DEPENDS ${PROJECT_DIR}/esp_user/mkdir.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_WRITE}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_WRITE} ${PROJECT_DIR}/esp_user/write.c
-    DEPENDS ${PROJECT_DIR}/esp_user/write.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_CAT}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_CAT} ${PROJECT_DIR}/esp_user/cat.c
-    DEPENDS ${PROJECT_DIR}/esp_user/cat.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_RM}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_RM} ${PROJECT_DIR}/esp_user/rm.c
-    DEPENDS ${PROJECT_DIR}/esp_user/rm.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_HEAD}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_HEAD} ${PROJECT_DIR}/esp_user/head.c
-    DEPENDS ${PROJECT_DIR}/esp_user/head.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_DD}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_DD} ${PROJECT_DIR}/esp_user/dd.c
-    DEPENDS ${PROJECT_DIR}/esp_user/dd.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_CP}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_CP} ${PROJECT_DIR}/esp_user/cp.c
-    DEPENDS ${PROJECT_DIR}/esp_user/cp.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_MV}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_MV} ${PROJECT_DIR}/esp_user/mv.c
-    DEPENDS ${PROJECT_DIR}/esp_user/mv.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_PTYDEMO}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_PTYDEMO} ${PROJECT_DIR}/esp_user/ptydemo.c
-    DEPENDS ${PROJECT_DIR}/esp_user/ptydemo.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_PTYSEND}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_PTYSEND} ${PROJECT_DIR}/esp_user/ptysend.c
-    DEPENDS ${PROJECT_DIR}/esp_user/ptysend.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_PTYRECV}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_PTYRECV} ${PROJECT_DIR}/esp_user/ptyrecv.c
-    DEPENDS ${PROJECT_DIR}/esp_user/ptyrecv.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_SLEEP}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_SLEEP} ${PROJECT_DIR}/esp_user/sleep.c
-    DEPENDS ${PROJECT_DIR}/esp_user/sleep.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${ESP_USER_STDINHEAD}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
-    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_STDINHEAD} ${PROJECT_DIR}/esp_user/stdinhead.c
-    DEPENDS ${PROJECT_DIR}/esp_user/stdinhead.c
-    VERBATIM
-  )
-
-  add_custom_command(
-    OUTPUT ${FSROOT_STAMP}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6FS_ROOT_DIR}
-    COMMAND ${CMAKE_COMMAND} -E rm -rf ${FSROOT_STAGE}
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${XV6FS_ROOT_DIR} ${FSROOT_STAGE}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${FSROOT_BIN}
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_LS} ${FSROOT_BIN}/ls
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_ECHO} ${FSROOT_BIN}/echo
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_MEM} ${FSROOT_BIN}/mem
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_TICKS} ${FSROOT_BIN}/ticks
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_MKDIR} ${FSROOT_BIN}/mkdir
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_WRITE} ${FSROOT_BIN}/write
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_CAT} ${FSROOT_BIN}/cat
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_RM} ${FSROOT_BIN}/rm
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_HEAD} ${FSROOT_BIN}/head
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_DD} ${FSROOT_BIN}/dd
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_CP} ${FSROOT_BIN}/cp
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_MV} ${FSROOT_BIN}/mv
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_PTYDEMO} ${FSROOT_BIN}/ptydemo
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_PTYSEND} ${FSROOT_BIN}/ptysend
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_PTYRECV} ${FSROOT_BIN}/ptyrecv
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_SLEEP} ${FSROOT_BIN}/sleep
-    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_STDINHEAD} ${FSROOT_BIN}/stdinhead
-    COMMAND ${CMAKE_COMMAND} -E touch ${FSROOT_STAMP}
-    DEPENDS ${ESP_USER_LS} ${ESP_USER_ECHO} ${ESP_USER_MEM} ${ESP_USER_TICKS} ${ESP_USER_MKDIR}
-            ${ESP_USER_WRITE} ${ESP_USER_CAT} ${ESP_USER_RM} ${ESP_USER_HEAD} ${ESP_USER_DD}
-            ${ESP_USER_CP} ${ESP_USER_MV} ${ESP_USER_PTYDEMO} ${ESP_USER_PTYSEND} ${ESP_USER_PTYRECV}
-            ${ESP_USER_SLEEP} ${ESP_USER_STDINHEAD}
-            ${FSROOT_SOURCE_FILES}
-    VERBATIM
+  xv6_emit_applet_build_graph(
+    APPLET_OUT_DIR "${APPLET_BUILD_DIR}"
+    FSROOT_ROOT_DIR "${XV6FS_ROOT_DIR}"
+    FSROOT_STAGE "${FSROOT_STAGE}"
+    FSROOT_STAMP "${FSROOT_STAMP}"
+    STAMP_DIR "${CMAKE_BINARY_DIR}/applet_stamps"
+    DEFAULT_CFLAGS ${ESP_USER_FLAGS}
+    FSROOT_SOURCE_FILES ${FSROOT_SOURCE_FILES}
   )
 
   add_custom_command(
