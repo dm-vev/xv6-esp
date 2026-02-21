@@ -12,5 +12,6 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
                     uint32 *size_out);
 int xv6fs_write_file_path(const char *path, const void *data, uint32 size);
 int xv6fs_mkdir_path(const char *path);
+int xv6fs_unlink_path(const char *path);
 
 #endif

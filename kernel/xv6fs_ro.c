@@ -431,6 +431,34 @@ static int dir_add_entry(uint32 dir_inum, const char *name, uint32 inum)
   return write_inode(dir_inum, &dir);
 }
 
+static int dir_find_entry_offset(uint32 dir_inum, const char *name, uint32 *out_off, struct dirent *out_de)
+{
+  struct dinode dir;
+  uint32 off;
+
+  if(read_inode(dir_inum, &dir) != 0 || dir.type != T_DIR)
+    return -1;
+
+  for(off = 0; off + sizeof(struct dirent) <= dir.size; off += sizeof(struct dirent)){
+    struct dirent de;
+    char dname[DIRSIZ + 1];
+    if(inode_read_range(&dir, off, &de, sizeof(de)) != 0)
+      return -1;
+    if(de.inum == 0)
+      continue;
+    memset(dname, 0, sizeof(dname));
+    memcpy(dname, de.name, DIRSIZ);
+    if(strcmp(name, dname) == 0){
+      if(out_off)
+        *out_off = off;
+      if(out_de)
+        *out_de = de;
+      return 0;
+    }
+  }
+  return 1;
+}
+
 int xv6fs_ro_init(void)
 {
   uint8 blk[BSIZE];
@@ -594,6 +622,45 @@ int xv6fs_write_file_path(const char *path, const void *data, uint32 size)
     return -1;
   if(size > 0 && inode_write_range(&ip, 0, data, size) != 0)
     return -1;
+  return write_inode(inum, &ip);
+}
+
+int xv6fs_unlink_path(const char *path)
+{
+  uint32 pinum, inum, off;
+  char name[DIRSIZ + 1];
+  struct dirent de;
+  struct dinode pip, ip;
+
+  if(path == 0 || !g_ready || strcmp(path, "/") == 0)
+    return -1;
+  if(path_parent(path, &pinum, name) != 0)
+    return -1;
+  if(read_inode(pinum, &pip) != 0 || pip.type != T_DIR)
+    return -1;
+  if(dir_find_entry_offset(pinum, name, &off, &de) != 0)
+    return -1;
+
+  inum = de.inum;
+  if(read_inode(inum, &ip) != 0)
+    return -1;
+  if(ip.type != T_FILE)
+    return -1;
+
+  memset(&de, 0, sizeof(de));
+  if(inode_write_range(&pip, off, &de, sizeof(de)) != 0)
+    return -1;
+  if(write_inode(pinum, &pip) != 0)
+    return -1;
+
+  if(ip.nlink > 0)
+    ip.nlink--;
+  if(ip.nlink == 0){
+    if(inode_truncate(inum, &ip) != 0)
+      return -1;
+    memset(&ip, 0, sizeof(ip));
+    return write_inode(inum, &ip);
+  }
   return write_inode(inum, &ip);
 }
 

@@ -200,8 +200,10 @@ static void register_default_symbols(void)
     { "k_puts", (void *)k_puts },
     { "k_free_heap", (void *)k_free_heap },
     { "xv6fs_readdir_path", (void *)k_fs_readdir_path },
+    { "xv6fs_read_file_alloc_path", (void *)xv6fs_read_file_alloc_path },
     { "xv6fs_write_file_path", (void *)xv6fs_write_file_path },
     { "xv6fs_mkdir_path", (void *)xv6fs_mkdir_path },
+    { "xv6fs_unlink_path", (void *)xv6fs_unlink_path },
   };
   (void)elf_loader_register_host_symbols(syms, (int)(sizeof(syms) / sizeof(syms[0])));
 }

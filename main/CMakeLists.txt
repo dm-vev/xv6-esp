@@ -19,6 +19,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   set(FSROOT_DIR "${CMAKE_BINARY_DIR}/fsroot")
   set(FSROOT_BIN "${FSROOT_DIR}/bin")
   set(FSROOT_ETC "${FSROOT_DIR}/etc")
+  set(FSROOT_TMP "${FSROOT_DIR}/tmp")
+  set(FSROOT_HOME "${FSROOT_DIR}/home")
   set(MKFS_TOOL "${CMAKE_BINARY_DIR}/mkfs_host")
   set(ESP_USER_LS "${ESP_USER_DIR}/ls")
   set(ESP_USER_ECHO "${ESP_USER_DIR}/echo")
@@ -26,6 +28,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   set(ESP_USER_TICKS "${ESP_USER_DIR}/ticks")
   set(ESP_USER_MKDIR "${ESP_USER_DIR}/mkdir")
   set(ESP_USER_WRITE "${ESP_USER_DIR}/write")
+  set(ESP_USER_CAT "${ESP_USER_DIR}/cat")
+  set(ESP_USER_RM "${ESP_USER_DIR}/rm")
   set(FSROOT_STAMP "${FSROOT_DIR}/.stamp")
   set(ESP_USER_FLAGS
     -Os
@@ -96,25 +100,45 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   )
 
   add_custom_command(
+    OUTPUT ${ESP_USER_CAT}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
+    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_CAT} ${PROJECT_DIR}/esp_user/cat.c
+    DEPENDS ${PROJECT_DIR}/esp_user/cat.c
+    VERBATIM
+  )
+
+  add_custom_command(
+    OUTPUT ${ESP_USER_RM}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
+    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_RM} ${PROJECT_DIR}/esp_user/rm.c
+    DEPENDS ${PROJECT_DIR}/esp_user/rm.c
+    VERBATIM
+  )
+
+  add_custom_command(
     OUTPUT ${FSROOT_STAMP}
     COMMAND ${CMAKE_COMMAND} -E rm -rf ${FSROOT_DIR}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${FSROOT_BIN}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${FSROOT_ETC}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${FSROOT_TMP}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${FSROOT_HOME}
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_LS} ${FSROOT_BIN}/ls
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_ECHO} ${FSROOT_BIN}/echo
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_MEM} ${FSROOT_BIN}/mem
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_TICKS} ${FSROOT_BIN}/ticks
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_MKDIR} ${FSROOT_BIN}/mkdir
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_WRITE} ${FSROOT_BIN}/write
+    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_CAT} ${FSROOT_BIN}/cat
+    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_RM} ${FSROOT_BIN}/rm
     COMMAND ${CMAKE_COMMAND} -E touch ${FSROOT_STAMP}
     DEPENDS ${ESP_USER_LS} ${ESP_USER_ECHO} ${ESP_USER_MEM} ${ESP_USER_TICKS} ${ESP_USER_MKDIR}
-            ${ESP_USER_WRITE}
+            ${ESP_USER_WRITE} ${ESP_USER_CAT} ${ESP_USER_RM}
     VERBATIM
   )
 
   add_custom_command(
     OUTPUT ${XV6FS_IMAGE}
-    COMMAND ${MKFS_TOOL} ${XV6FS_IMAGE} -s ${XV6FS_BLOCKS} ${FSROOT_BIN} ${FSROOT_ETC}
+    COMMAND ${MKFS_TOOL} ${XV6FS_IMAGE} -s ${XV6FS_BLOCKS} ${FSROOT_BIN} ${FSROOT_ETC} ${FSROOT_TMP} ${FSROOT_HOME}
     DEPENDS ${MKFS_TOOL} ${FSROOT_STAMP}
     VERBATIM
   )
