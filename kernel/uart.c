@@ -1,4 +1,47 @@
 //
+// low-level UART glue.
+//
+// On ESP builds, route xv6 console I/O through hal_console_* to avoid
+// relying on 16550 registers and TX interrupts that do not exist there.
+//
+
+#ifdef ESP_PLATFORM
+
+#include "types.h"
+#include "hal.h"
+
+void
+uartinit(void)
+{
+}
+
+void
+uartwrite(char buf[], int n)
+{
+  for(int i = 0; i < n; i++)
+    hal_console_putc((uint8)buf[i]);
+}
+
+void
+uartputc_sync(int c)
+{
+  hal_console_putc(c);
+}
+
+int
+uartgetc(void)
+{
+  return hal_console_getc();
+}
+
+void
+uartintr(void)
+{
+}
+
+#else
+
+//
 // low-level driver for 16550a UART.
 //
 
@@ -159,3 +202,5 @@ uartintr(void)
     consoleintr(c);
   }
 }
+
+#endif

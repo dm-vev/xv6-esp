@@ -13,12 +13,18 @@ BUILD = ROOT / "build"
 
 
 def resolve_idf_export() -> str:
+    def has_export_script(base: Path) -> bool:
+        try:
+            return (base / "export.sh").exists()
+        except OSError:
+            return False
+
     candidates = []
     if os.environ.get("IDF_PATH"):
         candidates.append(Path(os.environ["IDF_PATH"]))
     candidates.extend((Path("/root/esp-idf"), Path("/tmp/esp-idf")))
     for p in candidates:
-        if p and (p / "export.sh").exists():
+        if p and has_export_script(p):
             return f"source {p}/export.sh >/dev/null"
     raise RuntimeError("ESP-IDF not found. Set IDF_PATH or install to /root/esp-idf.")
 
@@ -154,6 +160,7 @@ def main() -> int:
     sock = None
     try:
         sock = wait_socket("127.0.0.1", 5555, timeout_s=20.0)
+        sock.sendall(b"\n")
         boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
         print(boot)
 
