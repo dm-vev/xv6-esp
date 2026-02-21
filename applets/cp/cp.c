@@ -104,7 +104,11 @@ int copy(
             (void) close(fold);
             return(1);
         }
-        (void) sprintf(destname, "%s/%s", to, last);
+        if (snprintf(destname, sizeof(destname), "%s/%s", to, last) >= (int)sizeof(destname)) {
+            fprintf(stderr, "cp: %s/%s: Name too long\n", to, last);
+            (void) close(fold);
+            return (1);
+        }
         to = destname;
     }
     if (rflag && (stfrom.st_mode&S_IFMT) == S_IFDIR) {
@@ -214,7 +218,11 @@ int rcopy(
             errs++;
             continue;
         }
-        (void) sprintf(fromname, "%s/%s", from, dp->d_name);
+        if (snprintf(fromname, sizeof(fromname), "%s/%s", from, dp->d_name) >= (int)sizeof(fromname)) {
+            fprintf(stderr, "cp: %s/%s: Name too long.\n", from, dp->d_name);
+            errs++;
+            continue;
+        }
         errs += copy(fromname, to);
     }
 }

@@ -67,6 +67,16 @@ typedef struct {
 
 static xv6_vfd_t g_fds[XV6_MAX_FD];
 
+static void copy_cstr(char *dst, int dst_len, const char *src)
+{
+  if(dst == 0 || dst_len <= 0)
+    return;
+  if(src == 0)
+    src = "";
+  strncpy(dst, src, (size_t)dst_len - 1u);
+  dst[dst_len - 1] = 0;
+}
+
 typedef struct {
   int alloc;
   int master_open;
@@ -132,7 +142,7 @@ static xv6_task_ctx_t *task_ctx_get(int create)
     g_task_ctx[free_slot].ctx.in_fd = 0;
     g_task_ctx[free_slot].ctx.out_fd = 1;
     g_task_ctx[free_slot].ctx.err_fd = 2;
-    strcpy(g_task_ctx[free_slot].ctx.cwd, "/");
+    copy_cstr(g_task_ctx[free_slot].ctx.cwd, sizeof(g_task_ctx[free_slot].ctx.cwd), "/");
     task_ctx_unlock();
     return &g_task_ctx[free_slot].ctx;
   }
@@ -152,7 +162,7 @@ static void task_ctx_reset_all(void)
       g_task_ctx[i].ctx.in_fd = 0;
       g_task_ctx[i].ctx.out_fd = 1;
       g_task_ctx[i].ctx.err_fd = 2;
-      strcpy(g_task_ctx[i].ctx.cwd, "/");
+      copy_cstr(g_task_ctx[i].ctx.cwd, sizeof(g_task_ctx[i].ctx.cwd), "/");
     }
   }
   task_ctx_unlock();
@@ -289,7 +299,7 @@ static int dev_canonical_path(const char *path, char *out, int out_len)
     path = "/dev/ptmx";
   if((int)strlen(path) >= out_len)
     return -1;
-  strcpy(out, path);
+  copy_cstr(out, out_len, path);
   return 0;
 }
 
@@ -898,7 +908,7 @@ static int path_parent(const char *path, uint32 *parent_inum, char *name_out)
     if(!next_path_elem(&save, next)){
       if(parent_inum)
         *parent_inum = inum;
-      strcpy(name_out, elem);
+      copy_cstr(name_out, DIRSIZ + 1, elem);
       return 0;
     }
     {
@@ -910,7 +920,7 @@ static int path_parent(const char *path, uint32 *parent_inum, char *name_out)
       ip = next_ip;
       (void)ip;
       p = save;
-      strcpy(elem, next);
+      copy_cstr(elem, sizeof(elem), next);
     }
   }
 }
@@ -1283,17 +1293,17 @@ void xv6_vfs_reset(void)
   g_fds[0].used = 1;
   g_fds[0].kind = VFD_DEV;
   g_fds[0].flags = XV6_O_RDONLY;
-  strcpy(g_fds[0].path, "/dev/stdin");
+  copy_cstr(g_fds[0].path, sizeof(g_fds[0].path), "/dev/stdin");
 
   g_fds[1].used = 1;
   g_fds[1].kind = VFD_DEV;
   g_fds[1].flags = XV6_O_WRONLY;
-  strcpy(g_fds[1].path, "/dev/stdout");
+  copy_cstr(g_fds[1].path, sizeof(g_fds[1].path), "/dev/stdout");
 
   g_fds[2].used = 1;
   g_fds[2].kind = VFD_DEV;
   g_fds[2].flags = XV6_O_WRONLY;
-  strcpy(g_fds[2].path, "/dev/stderr");
+  copy_cstr(g_fds[2].path, sizeof(g_fds[2].path), "/dev/stderr");
   vfs_unlock();
   task_ctx_reset_all();
   ctx = task_ctx_get(1);
@@ -1327,7 +1337,7 @@ int xv6_open(const char *path, int flags)
     if(dev_canonical_path(abs_path, canon, sizeof(canon)) != 0)
       goto fail;
     g_fds[fd].kind = VFD_DEV;
-    strcpy(g_fds[fd].path, canon);
+    copy_cstr(g_fds[fd].path, sizeof(g_fds[fd].path), canon);
     if(strcmp(canon, "/dev/ptmx") == 0){
       pty_id = pty_alloc_id();
       if(pty_id < 0)
@@ -1742,7 +1752,7 @@ int xv6_chdir(const char *path)
   ctx = task_ctx_get(1);
   if(ctx == 0)
     return -1;
-  strcpy(ctx->cwd, abs_path);
+  copy_cstr(ctx->cwd, sizeof(ctx->cwd), abs_path);
   return 0;
 }
 
@@ -1757,7 +1767,7 @@ int xv6_getcwd(char *out_path, int out_len)
     return -1;
   if((int)strlen(ctx->cwd) >= out_len)
     return -1;
-  strcpy(out_path, ctx->cwd);
+  copy_cstr(out_path, out_len, ctx->cwd);
   return 0;
 }
 

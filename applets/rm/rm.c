@@ -132,7 +132,8 @@ int rm(char arg[], int level)
         prevname[0] = '\0';
         while ((dp = readdir(dirp)) != NULL) {
             if (dotname(dp->d_name)) {
-                strcpy(prevname, dp->d_name);
+                strncpy(prevname, dp->d_name, sizeof(prevname) - 1);
+                prevname[sizeof(prevname) - 1] = '\0';
                 continue;
             }
             append(dp->d_name);
@@ -161,7 +162,8 @@ int rm(char arg[], int level)
                     fprintf(stderr, "rm: internal synchronization error: %s, %s, %s\n", arg, cp,
                             dp->d_name);
                 }
-                strcpy(prevname, dp->d_name);
+                strncpy(prevname, dp->d_name, sizeof(prevname) - 1);
+                prevname[sizeof(prevname) - 1] = '\0';
             }
         }
         closedir(dirp);

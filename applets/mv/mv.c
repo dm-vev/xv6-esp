@@ -108,7 +108,10 @@ int movewithshortname(char *src, char *dest)
         error("%s/%s: pathname too long", dest, shortname);
         return (1);
     }
-    sprintf(target, "%s/%s", dest, shortname);
+    if (snprintf(target, sizeof(target), "%s/%s", dest, shortname) >= (int)sizeof(target)) {
+        error("%s/%s: pathname too long", dest, shortname);
+        return (1);
+    }
     return (move(src, target));
 }
 
@@ -287,7 +290,10 @@ void Perror(char *s)
 {
     char buf[MAXPATHLEN + 10];
 
-    sprintf(buf, "mv: %s", s);
+    if (snprintf(buf, sizeof(buf), "mv: %s", s) >= (int)sizeof(buf)) {
+        strncpy(buf, "mv", sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+    }
     perror(buf);
 }
 
@@ -295,6 +301,9 @@ void Perror2(char *s1, char *s2)
 {
     char buf[MAXPATHLEN + 20];
 
-    sprintf(buf, "mv: %s: %s", s1, s2);
+    if (snprintf(buf, sizeof(buf), "mv: %s: %s", s1, s2) >= (int)sizeof(buf)) {
+        strncpy(buf, "mv", sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+    }
     perror(buf);
 }
