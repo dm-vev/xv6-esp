@@ -90,6 +90,16 @@ static int g_loaded_module_valid = 0;
 
 static int dispatch_command(int argc, char **argv, int run_bg);
 
+static void k_copy_cstr(char *dst, int dst_len, const char *src)
+{
+  if(dst == 0 || dst_len <= 0)
+    return;
+  if(src == 0)
+    src = "";
+  strncpy(dst, src, (size_t)dst_len - 1u);
+  dst[dst_len - 1] = 0;
+}
+
 #define XV6_KSTAT_T_DIR 1
 #define XV6_KSTAT_T_FILE 2
 #define XV6_KSTAT_T_DEVICE 3
@@ -1488,9 +1498,9 @@ static int env_set(const char *key, const char *val)
     i = free_i;
     memset(&g_env[i], 0, sizeof(g_env[i]));
     g_env[i].used = 1;
-    strcpy(g_env[i].key, key);
+    k_copy_cstr(g_env[i].key, sizeof(g_env[i].key), key);
   }
-  strcpy(g_env[i].val, val);
+  k_copy_cstr(g_env[i].val, sizeof(g_env[i].val), val);
   return 0;
 }
 
@@ -2137,7 +2147,7 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
   t->err_fd = err_fd;
   t->max_heap_kb = max_heap_kb;
   if(xv6_getcwd(t->cwd, sizeof(t->cwd)) != 0)
-    strcpy(t->cwd, "/");
+    k_copy_cstr(t->cwd, sizeof(t->cwd), "/");
 
   if(t->in_fd >= 3){
     t->in_fd = xv6_dup(t->in_fd);

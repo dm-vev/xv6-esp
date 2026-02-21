@@ -258,6 +258,7 @@ void append(char *name)
         exit(1);
     } else if (pathp != path && pathp[-1] != '/')
         *pathp++ = '/';
-    strcpy(pathp, name);
+    memcpy(pathp, name, (size_t)n);
     pathp += n;
+    *pathp = '\0';
 }
