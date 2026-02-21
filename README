@@ -67,5 +67,8 @@ Filesystem image source:
 - Everything under `fsroot/` is packed into `xv6fs.bin` during build.
 - ELF user commands are built and copied into `fsroot/bin` in the staging step.
 
+ESP QEMU smoke test:
+- `./scripts/qemu_smoke_esp.py`
+
 The ESP build is intentionally separate from the original `make qemu`
 flow and does not replace the RISC-V path.
