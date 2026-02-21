@@ -108,6 +108,7 @@ Static analysis:
 - strict mode (CI-equivalent): `STRICT=1 BUILD_DIR=build ./scripts/static_analysis.sh`
 - CMake target: `idf.py static_analysis`
 - CI workflow: `.github/workflows/static-analysis.yml`
+- pre-commit integration: `pre-commit install` (runs static pipeline before commit)
 
 Static toolset currently integrated:
 - `cppcheck` (C/C++)
