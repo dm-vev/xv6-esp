@@ -8,9 +8,9 @@ from pathlib import Path
 VALID_C_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def collect_symbols(nm_bin: str, libc_a: str) -> list[str]:
+def collect_symbols(nm_bin: str, libs: list[str]) -> list[str]:
     out = subprocess.check_output(
-        [nm_bin, "--defined-only", "-g", libc_a],
+        [nm_bin, "--defined-only", "-g", *libs],
         text=True,
         stderr=subprocess.STDOUT,
     )
@@ -57,12 +57,12 @@ def render(symbols: list[str], header_path: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--nm", required=True)
-    parser.add_argument("--libc", required=True)
+    parser.add_argument("--lib", action="append", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--header", required=True)
     args = parser.parse_args()
 
-    symbols = collect_symbols(args.nm, args.libc)
+    symbols = collect_symbols(args.nm, args.lib)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render(symbols, args.header), encoding="utf-8")
