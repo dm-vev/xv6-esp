@@ -7,6 +7,7 @@
 #include "esp_flash_disk.h"
 #include "esp_log.h"
 #include "fs.h"
+#include "hal.h"
 #include "param.h"
 #include "stat.h"
 
@@ -16,6 +17,82 @@ static struct superblock g_sb;
 static int g_ready;
 static uint32 g_nbitmap;
 static uint32 g_data_start;
+
+static int is_dev_node(const char *path)
+{
+  if(path == 0)
+    return 0;
+  return strncmp(path, "/dev/", 5) == 0 || strcmp(path, "/dev") == 0;
+}
+
+static int dev_read_alloc(const char *path, void **out_data, uint32 *out_size)
+{
+  uint8 *buf;
+  uint32 i;
+
+  if(strcmp(path, "/dev/null") == 0){
+    buf = (uint8 *)malloc(1);
+    if(buf == 0)
+      return -1;
+    *out_data = buf;
+    *out_size = 0;
+    return 0;
+  }
+
+  if(strcmp(path, "/dev/zero") == 0 || strcmp(path, "/dev/full") == 0){
+    *out_size = 256;
+    buf = (uint8 *)malloc(*out_size);
+    if(buf == 0)
+      return -1;
+    memset(buf, 0, *out_size);
+    *out_data = buf;
+    return 0;
+  }
+
+  if(strcmp(path, "/dev/random") == 0 || strcmp(path, "/dev/urandom") == 0){
+    uint32 x = (uint32)hal_ticks();
+    *out_size = 64;
+    buf = (uint8 *)malloc(*out_size);
+    if(buf == 0)
+      return -1;
+    // Tiny PRNG is enough for non-crypto demo entropy.
+    for(i = 0; i < *out_size; i++){
+      x ^= x << 13;
+      x ^= x >> 17;
+      x ^= x << 5;
+      buf[i] = (uint8)x;
+    }
+    *out_data = buf;
+    return 0;
+  }
+
+  return -1;
+}
+
+static int dev_write(const char *path, const void *data, uint32 size)
+{
+  const char *c;
+  const uint8 *p = (const uint8 *)data;
+
+  if(strcmp(path, "/dev/full") == 0)
+    return -1;
+  if(strcmp(path, "/dev/stdin") == 0)
+    return -1;
+
+  if(strcmp(path, "/dev/console") == 0 || strcmp(path, "/dev/tty") == 0 ||
+     strcmp(path, "/dev/stdout") == 0 || strcmp(path, "/dev/stderr") == 0){
+    for(c = (const char *)data; size > 0; size--)
+      hal_console_putc(*c++);
+    return 0;
+  }
+
+  if(strcmp(path, "/dev/null") == 0 || strcmp(path, "/dev/zero") == 0 || strcmp(path, "/dev/random") == 0 ||
+     strcmp(path, "/dev/urandom") == 0)
+    return 0;
+
+  (void)p;
+  return -1;
+}
 
 static int read_block(uint32 bno, void *dst)
 {
@@ -540,6 +617,8 @@ int xv6fs_read_file_alloc_path(const char *path, void **out_data, uint32 *out_si
 
   if(path == 0 || out_data == 0 || out_size == 0 || !g_ready)
     return -1;
+  if(is_dev_node(path))
+    return dev_read_alloc(path, out_data, out_size);
   if(path_lookup(path, &inum, &ip) != 0 || ip.type != T_FILE)
     return -1;
 
@@ -601,6 +680,8 @@ int xv6fs_write_file_path(const char *path, const void *data, uint32 size)
 
   if(path == 0 || data == 0 || !g_ready)
     return -1;
+  if(is_dev_node(path))
+    return dev_write(path, data, size);
   if(path_parent(path, &pinum, name) != 0)
     return -1;
 
@@ -633,6 +714,8 @@ int xv6fs_unlink_path(const char *path)
   struct dinode pip, ip;
 
   if(path == 0 || !g_ready || strcmp(path, "/") == 0)
+    return -1;
+  if(is_dev_node(path))
     return -1;
   if(path_parent(path, &pinum, name) != 0)
     return -1;
