@@ -72,11 +72,14 @@ ESP QEMU smoke test:
 - `idf.py qemu_smoke`
 - `./scripts/qemu_stress_esp.py`
 - `idf.py qemu_stress`
+- `./scripts/qemu_soak_esp.py`
+- `idf.py qemu_soak`
 
 Includes PTY check via `ptydemo` (`/dev/ptmx` <-> dynamic `/dev/pts/N`).
 Also checks two-ELF PTY flow: `ptysend` -> `ptyrecv`.
 Shell supports background jobs: `cmd &`, `ps`, `jobs`, `fg <jobid>`, `kill <jobid>`, `wait [jobid]`.
 Pipe-like IPC in shell: `left | right`.
+Shell redirection: `<`, `>`, `>>`, `2>`, `2>>`.
 Job limits: `limit <ms> <heap_kb> <cmd...> [&]`.
 
 The ESP build is intentionally separate from the original `make qemu`
