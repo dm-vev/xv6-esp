@@ -87,12 +87,13 @@ main(int argc, char *argv[])
   char buf[BSIZE];
   struct dinode din;
   int argi = 2;
+  const char *import_dir = 0;
 
 
   static_assert(sizeof(int) == 4, "Integers must be 4 bytes!");
 
   if(argc < 2){
-    fprintf(stderr, "Usage: mkfs fs.img [-s blocks] files...\n");
+    fprintf(stderr, "Usage: mkfs fs.img [-s blocks] [--from-dir dir] [files...]\n");
     exit(1);
   }
 
@@ -103,6 +104,11 @@ main(int argc, char *argv[])
       exit(1);
     }
     argi = 4;
+  }
+
+  if(argc >= argi + 2 && strcmp(argv[argi], "--from-dir") == 0){
+    import_dir = argv[argi + 1];
+    argi += 2;
   }
 
   assert((BSIZE % sizeof(struct dinode)) == 0);
@@ -155,18 +161,43 @@ main(int argc, char *argv[])
   strcpy(de.name, "..");
   iappend(rootino, &de, sizeof(de));
 
-  for(i = argi; i < argc; i++){
-    const char *src = argv[i];
-    const char *name = rindex(src, '/');
-    if(name)
-      name++;
-    else
-      name = src;
-    if(name[0] == 0)
-      continue;
-    if(import_path(rootino, src, name) != 0){
-      fprintf(stderr, "mkfs: failed to import %s\n", src);
+  if(import_dir){
+    DIR *dp = opendir(import_dir);
+    struct dirent *ent;
+    if(dp == 0){
+      fprintf(stderr, "mkfs: cannot open directory %s\n", import_dir);
       exit(1);
+    }
+    while((ent = readdir(dp)) != 0){
+      char src_path[1024];
+      if(strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+        continue;
+      if(snprintf(src_path, sizeof(src_path), "%s/%s", import_dir, ent->d_name) >= (int)sizeof(src_path)){
+        fprintf(stderr, "mkfs: path too long: %s/%s\n", import_dir, ent->d_name);
+        closedir(dp);
+        exit(1);
+      }
+      if(import_path(rootino, src_path, ent->d_name) != 0){
+        fprintf(stderr, "mkfs: failed to import %s\n", src_path);
+        closedir(dp);
+        exit(1);
+      }
+    }
+    closedir(dp);
+  } else {
+    for(i = argi; i < argc; i++){
+      const char *src = argv[i];
+      const char *name = rindex(src, '/');
+      if(name)
+        name++;
+      else
+        name = src;
+      if(name[0] == 0)
+        continue;
+      if(import_path(rootino, src, name) != 0){
+        fprintf(stderr, "mkfs: failed to import %s\n", src);
+        exit(1);
+      }
     }
   }
 
