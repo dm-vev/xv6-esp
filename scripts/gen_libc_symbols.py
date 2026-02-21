@@ -36,8 +36,9 @@ def render(symbols: list[str], header_path: str) -> str:
     lines.append("")
     lines.append("#pragma GCC diagnostic push")
     lines.append("#pragma GCC diagnostic ignored \"-Wbuiltin-declaration-mismatch\"")
+    lines.append("#pragma GCC diagnostic ignored \"-Warray-bounds\"")
     for s in symbols:
-        lines.append(f"extern int {s};")
+        lines.append(f"extern char {s} __attribute__((weak));")
     lines.append("#pragma GCC diagnostic pop")
     lines.append("")
     lines.append("static const elf_host_symbol_t g_libc_host_syms[] = {")
