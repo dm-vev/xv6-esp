@@ -160,4 +160,10 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     DEPENDS xv6fs_img_gen
     USES_TERMINAL
   )
+
+  add_custom_target(hil_applets
+    COMMAND ${PROJECT_DIR}/scripts/hil_applets_esp.py
+    DEPENDS xv6fs_img_gen
+    USES_TERMINAL
+  )
 endif()

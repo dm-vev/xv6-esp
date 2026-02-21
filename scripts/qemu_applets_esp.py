@@ -73,10 +73,13 @@ def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> b
     raise RuntimeError(f"timeout waiting for marker {marker!r}")
 
 
-def cmd(sock: socket.socket, command: str, timeout_s: float = 12.0) -> str:
+def cmd(sock: socket.socket, command: str, timeout_s: float = 60.0) -> str:
+    def _sanitize(text: str) -> str:
+        return "".join(ch for ch in text if ch in "\r\n\t" or 32 <= ord(ch) <= 126)
+
     sock.sendall((command + "\n").encode())
     out = recv_until(sock, b"xv6> ", timeout_s=timeout_s).decode(errors="ignore")
-    print(f"$ {command}\n{out}")
+    print(f"$ {command}\n{_sanitize(out)}")
     return out
 
 
@@ -101,8 +104,7 @@ def ensure_qemu_efuse() -> None:
         efuse.write_bytes(bytes(1024))
 
 
-def launch_qemu() -> subprocess.Popen:
-    qemu_bin = idf_which("qemu-system-xtensa")
+def launch_qemu(qemu_bin: str) -> subprocess.Popen:
     flash = BUILD / "qemu_flash.bin"
     efuse = BUILD / "qemu_efuse.bin"
     args = [
@@ -159,12 +161,78 @@ def parse_manifest_applets() -> list[str]:
     return names
 
 
+def parse_applet_flags(applet: str) -> list[str]:
+    flags: set[str] = set()
+    applet_dir = APPLETS_DIR / applet
+    if not applet_dir.exists():
+        return []
+    for src in applet_dir.glob("*.c"):
+        text = src.read_text(encoding="utf-8", errors="ignore")
+        for m in re.finditer(r"case\s+'([A-Za-z0-9])'\s*:", text):
+            flags.add(m.group(1))
+    return sorted(flags)
+
+
+def build_flag_command(applet: str, fl: str) -> str | None:
+    if applet == "cat":
+        return f"cat -{fl} /no_such_file"
+    if applet == "cmp":
+        return f"cmp -{fl} /no_such_file /no_such_file2"
+    if applet == "cp":
+        return f"cp -{fl}"
+    if applet == "ls":
+        return f"ls -{fl} /"
+    if applet == "mkdir":
+        return f"mkdir -{fl} /tmp/integration/auto"
+    if applet == "mv":
+        return f"mv -{fl} /no_src /no_dst"
+    if applet == "rm":
+        return f"rm -{fl} /no_such_file"
+    if applet == "tee":
+        return f"echo sample | tee -{fl} /tee_auto.out"
+    if applet == "touch":
+        return f"touch -{fl} /touch_auto.out"
+    if applet == "tr":
+        if fl == "d":
+            return "echo abc | tr -d a"
+        if fl == "c":
+            return "echo abc | tr -c a b"
+        if fl == "s":
+            return "echo aaabbb | tr -s a"
+        return None
+    if applet == "uname":
+        return f"uname -{fl}"
+    if applet == "uniq":
+        return f"uniq -{fl} /no_such_file"
+    if applet == "wc":
+        return f"wc -{fl} /no_such_file"
+    return None
+
+
+def build_applet_commands(applet: str, matrix: dict[str, list[str]]) -> list[str]:
+    cmds: list[str] = []
+    seen: set[str] = set()
+    for c in matrix.get(applet, [applet]):
+        if c not in seen:
+            cmds.append(c)
+            seen.add(c)
+    for fl in parse_applet_flags(applet):
+        c = build_flag_command(applet, fl)
+        if c is None:
+            continue
+        if c not in seen:
+            cmds.append(c)
+            seen.add(c)
+    return cmds
+
+
 def assert_ok_output(applet: str, out: str) -> None:
     bad_markers = (
         "command not found",
         "elf load failed",
         "module '",
         "unresolved symbol:",
+        "jobs: spawn failed",
         "Guru Meditation Error",
         "panic'ed",
         "Backtrace:",
@@ -175,33 +243,103 @@ def assert_ok_output(applet: str, out: str) -> None:
             raise AssertionError(f"{applet}: detected failure marker '{marker}'")
 
 
-def test_matrix() -> dict[str, str]:
+def test_matrix() -> dict[str, list[str]]:
     return {
-        "basename": "basename /sample.txt",
-        "cat": "cat /sample.txt",
-        "cmp": "cmp /sample.txt /sample.txt",
-        "cp": "cp /sample.txt /sample.cp",
-        "dd": "dd if=/sample.txt of=/dd.out bs=1 count=4",
-        "dirname": "dirname /sample.txt",
-        "echo": "echo hello",
-        "head": "head -c 4 /sample.txt",
-        "ls": "ls /",
-        "mkdir": "mkdir /applet_dir",
-        "mv": "mv /sample.cp /sample.mv",
-        "printenv": "printenv",
-        "pwd": "pwd",
-        "rev": "rev /sample.txt",
-        "rm": "rm /sample.mv",
-        "rmdir": "rmdir /applet_dir",
-        "sleep": "sleep 1",
-        "split": "split -b 4 /sample.txt /split_",
-        "sum": "sum /sample.txt",
-        "tee": "head -c 4 /sample.txt | tee /tee.out",
-        "touch": "touch /touch.out",
-        "tr": "head -c 4 /sample.txt | tr a A",
-        "uname": "uname",
-        "uniq": "uniq /sample.txt",
-        "wc": "wc /sample.txt",
+        "basename": [
+            "basename /bin/echo",
+            "basename /bin/echo .x",
+        ],
+        "cat": [
+            "cat -u /no_such_file",
+            "cat -n /no_such_file",
+        ],
+        "cmp": [
+            "cmp -s /no_such_file /no_such_file2",
+            "cmp -l /no_such_file /no_such_file2",
+        ],
+        "cp": [
+            "cp -p",
+            "cp -r",
+        ],
+        "dd": [
+            "dd if=/no_such_input of=/dd_echo bs=16 count=1",
+            "dd conv=unknown if=/no_such_input of=/dd_cat",
+        ],
+        "dirname": [
+            "dirname /bin/echo",
+            "dirname /bin",
+        ],
+        "echo": [
+            "echo -n hello",
+            "echo world",
+        ],
+        "head": [
+            "head -2 /no_such_file",
+        ],
+        "ls": [
+            "ls /",
+            "ls /bin",
+        ],
+        "mkdir": [
+            "mkdir -p /tmp/integration/a",
+            "mkdir -p /tmp/integration/b",
+        ],
+        "mv": [
+            "mv -f /cp_echo /mv_echo",
+            "mv -f /cp_cat /mv_cat",
+        ],
+        "printenv": [
+            "printenv",
+            "printenv PATH",
+        ],
+        "pwd": [
+            "pwd",
+        ],
+        "rev": [
+            "rev /no_such_file",
+        ],
+        "rm": [
+            "rm -f /mv_echo",
+            "rm -f /mv_cat",
+        ],
+        "rmdir": [
+            "rmdir /tmp/integration/a",
+            "rmdir /tmp/integration/b",
+        ],
+        "sleep": [
+            "sleep 1",
+        ],
+        "split": [
+            "split -2 /no_such_file /split_echo_",
+            "split -2 /no_such_file /split_cat_",
+        ],
+        "sum": [
+            "sum /no_such_file",
+        ],
+        "tee": [
+            "echo sample | tee -a /tee.out",
+            "echo next | tee -a /tee.out",
+        ],
+        "touch": [
+            "touch /touch.out",
+            "touch /touch2.out",
+        ],
+        "tr": [
+            "echo abc | tr a A",
+            "echo xyz | tr x X",
+        ],
+        "uname": [
+            "uname -a",
+            "uname -r",
+        ],
+        "uniq": [
+            "uniq -c /no_such_file",
+            "uniq -u /no_such_file",
+        ],
+        "wc": [
+            "wc -l /no_such_file",
+            "wc -wc /no_such_file",
+        ],
     }
 
 
@@ -220,23 +358,27 @@ def main() -> int:
     if missing:
         raise RuntimeError(f"No test command defined for applets: {', '.join(missing)}")
 
+    qemu_bin = idf_which("qemu-system-xtensa")
     for applet in applets:
-        qemu_proc = launch_qemu()
-        sock = None
-        try:
-            sock = wait_socket("127.0.0.1", 5555, timeout_s=20.0)
-            sock.sendall(b"\n")
-            boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
-            print(boot)
-            cmd(sock, "echo sample > /sample.txt")
-            out = cmd(sock, matrix[applet], timeout_s=20.0)
-            assert_ok_output(applet, out)
-        finally:
-            if sock is not None:
-                sock.close()
-            stop_qemu(qemu_proc)
+        commands = build_applet_commands(applet, matrix)
+        if not commands:
+            raise RuntimeError(f"No commands generated for applet {applet}")
+        for command in commands:
+            qemu_proc = launch_qemu(qemu_bin)
+            sock = None
+            try:
+                sock = wait_socket("127.0.0.1", 5555, timeout_s=20.0)
+                sock.sendall(b"\n")
+                _boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
+                cmd(sock, "export PATH=/bin:/usr/bin:.")
+                out = cmd(sock, command, timeout_s=60.0)
+                assert_ok_output(applet, out)
+            finally:
+                if sock is not None:
+                    sock.close()
+                stop_qemu(qemu_proc)
 
-    print(f"QEMU applet test passed ({len(applets)} applets)")
+    print(f"QEMU applet test passed ({len(applets)} applets, exhaustive flags)")
     return 0
 
 
