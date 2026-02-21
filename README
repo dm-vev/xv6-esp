@@ -71,7 +71,8 @@ ESP QEMU smoke test:
 - `./scripts/qemu_smoke_esp.py`
 - `idf.py qemu_smoke`
 
-Includes PTY check via `ptydemo` (`/dev/ptmx` <-> `/dev/pts/0`).
+Includes PTY check via `ptydemo` (`/dev/ptmx` <-> dynamic `/dev/pts/N`).
+Also checks two-ELF PTY flow: `ptysend` -> `ptyrecv`.
 
 The ESP build is intentionally separate from the original `make qemu`
 flow and does not replace the RISC-V path.

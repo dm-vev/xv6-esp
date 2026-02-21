@@ -208,6 +208,7 @@ static void register_default_symbols(void)
     { "xv6_read", (void *)xv6_read },
     { "xv6_write", (void *)xv6_write },
     { "xv6_close", (void *)xv6_close },
+    { "xv6_ptsname", (void *)xv6_ptsname },
   };
   (void)elf_loader_register_host_symbols(syms, (int)(sizeof(syms) / sizeof(syms[0])));
 }

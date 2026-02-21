@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import re
 import socket
 import subprocess
 import sys
@@ -157,11 +158,16 @@ def main() -> int:
         assert "slave:ping" in out
         assert "master:pong" in out
 
-        out = cmd(sock, "write /dev/full x")
-        assert "write: failed: /dev/full" in out
+        out = cmd(sock, "ptysend hello-from-elf")
+        m = re.search(r"/dev/pts/[0-9]+", out)
+        assert m is not None
+        slave = m.group(0)
 
-        out = cmd(sock, "write /dev/stdout smoke-ok")
-        assert "smoke-ok" in out
+        out = cmd(sock, f"ptyrecv {slave}")
+        assert "hello-from-elf" in out
+
+        out = cmd(sock, "dd if=/dev/zero of=/dev/full bs=4 count=1")
+        assert "dd: write failed" in out
     finally:
         if sock is not None:
             sock.close()

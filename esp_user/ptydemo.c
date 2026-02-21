@@ -5,12 +5,14 @@ extern int xv6_open(const char *path, int flags);
 extern int xv6_read(int fd, void *buf, u32 size);
 extern int xv6_write(int fd, const void *buf, u32 size);
 extern int xv6_close(int fd);
+extern int xv6_ptsname(int master_fd, char *out_path, int out_len);
 
 #define O_RDWR 0x0002
 
 int main(void)
 {
   char buf[64];
+  char slave[32];
   int mfd = -1;
   int sfd = -1;
   int n;
@@ -22,10 +24,15 @@ int main(void)
     printf("ptydemo: open /dev/ptmx failed\n");
     return 1;
   }
-  sfd = xv6_open("/dev/pts/0", O_RDWR);
+  if(xv6_ptsname(mfd, slave, sizeof(slave)) != 0){
+    xv6_close(mfd);
+    printf("ptydemo: ptsname failed\n");
+    return 1;
+  }
+  sfd = xv6_open(slave, O_RDWR);
   if(sfd < 0){
     xv6_close(mfd);
-    printf("ptydemo: open /dev/pts/0 failed\n");
+    printf("ptydemo: open %s failed\n", slave);
     return 1;
   }
 

@@ -19,6 +19,7 @@ int xv6_open(const char *path, int flags);
 int xv6_read(int fd, void *buf, uint32 size);
 int xv6_write(int fd, const void *buf, uint32 size);
 int xv6_close(int fd);
+int xv6_ptsname(int master_fd, char *out_path, int out_len);
 void xv6_vfs_reset(void);
 
 #define XV6_O_RDONLY 0x0000

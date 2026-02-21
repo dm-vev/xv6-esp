@@ -153,7 +153,8 @@ static void pty_try_free(int id)
 {
   if(id < 0 || id >= XV6_MAX_PTY)
     return;
-  if(g_ptys[id].alloc && !g_ptys[id].master_open && !g_ptys[id].slave_open)
+  if(g_ptys[id].alloc && !g_ptys[id].master_open && !g_ptys[id].slave_open && g_ptys[id].m2s_n == 0 &&
+     g_ptys[id].s2m_n == 0)
     memset(&g_ptys[id], 0, sizeof(g_ptys[id]));
 }
 
@@ -1128,6 +1129,23 @@ int xv6_close(int fd)
     }
   }
   memset(&g_fds[fd], 0, sizeof(g_fds[fd]));
+  return 0;
+}
+
+int xv6_ptsname(int master_fd, char *out_path, int out_len)
+{
+  int id;
+  if(out_path == 0 || out_len <= 0)
+    return -1;
+  if(master_fd < 0 || master_fd >= XV6_MAX_FD || !g_fds[master_fd].used)
+    return -1;
+  if(g_fds[master_fd].kind != VFD_DEV || g_fds[master_fd].dev_role != DEV_ROLE_PTY_MASTER)
+    return -1;
+  id = g_fds[master_fd].dev_id;
+  if(id < 0 || id >= XV6_MAX_PTY || !g_ptys[id].alloc)
+    return -1;
+  if(snprintf(out_path, out_len, "/dev/pts/%d", id) <= 0)
+    return -1;
   return 0;
 }
 
