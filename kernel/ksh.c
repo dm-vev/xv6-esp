@@ -2,9 +2,13 @@
 
 #include <stdarg.h>
 #include <stdint.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/reent.h>
 #include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
@@ -73,11 +77,16 @@ static ksh_job_t g_jobs[KSH_MAX_JOBS];
 static int g_next_job_id = 1;
 static uint32 g_ulimit_ms = 0;
 static int g_ulimit_heap_kb = 0;
+static volatile int g_ksh_started = 0;
 static SemaphoreHandle_t g_jobs_lock;
 static SemaphoreHandle_t g_loader_lock;
 static ksh_env_t g_env[KSH_MAX_ENV];
 
 static int dispatch_command(int argc, char **argv, int run_bg);
+
+#define XV6_KSTAT_T_DIR 1
+#define XV6_KSTAT_T_FILE 2
+#define XV6_KSTAT_T_DEVICE 3
 
 static int k_ticks(void)
 {
@@ -91,6 +100,7 @@ static int k_free_heap(void)
 
 static int k_puts(const char *s)
 {
+  s = (const char *)elf_loader_translate_ptr(s);
   if(s == 0)
     return -1;
   while(*s)
@@ -99,6 +109,297 @@ static int k_puts(const char *s)
   hal_console_putc('\n');
   return 0;
 }
+
+static int k_host_printf(const char *fmt, ...)
+{
+  va_list ap;
+  int n;
+  fmt = (const char *)elf_loader_translate_ptr(fmt);
+  if(fmt == 0)
+    return -1;
+  va_start(ap, fmt);
+  n = vprintf(fmt, ap);
+  va_end(ap);
+  return n;
+}
+
+static int k_host_puts(const char *s)
+{
+  s = (const char *)elf_loader_translate_ptr(s);
+  if(s == 0)
+    return -1;
+  return puts(s);
+}
+
+static int k_host_fprintf(FILE *stream, const char *fmt, ...)
+{
+  va_list ap;
+  int n;
+  fmt = (const char *)elf_loader_translate_ptr(fmt);
+  if(fmt == 0)
+    return -1;
+  va_start(ap, fmt);
+  n = vfprintf(stream, fmt, ap);
+  va_end(ap);
+  return n;
+}
+
+static unsigned int k_host_strlen(const char *s)
+{
+  s = (const char *)elf_loader_translate_ptr(s);
+  if(s == 0)
+    return 0;
+  return (unsigned int)strlen(s);
+}
+
+static int k_host_strcmp(const char *a, const char *b)
+{
+  a = (const char *)elf_loader_translate_ptr(a);
+  b = (const char *)elf_loader_translate_ptr(b);
+  if(a == 0 || b == 0)
+    return (a == b) ? 0 : (a ? 1 : -1);
+  return strcmp(a, b);
+}
+
+static void *k_host_memcpy(void *dst, const void *src, unsigned int n)
+{
+  src = elf_loader_translate_ptr(src);
+  if(dst == 0 || src == 0)
+    return dst;
+  return memcpy(dst, src, n);
+}
+
+static int k_map_open_flags(int flags)
+{
+  int xv6_flags = 0;
+  switch(flags & O_ACCMODE){
+  case O_WRONLY:
+    xv6_flags |= XV6_O_WRONLY;
+    break;
+  case O_RDWR:
+    xv6_flags |= XV6_O_RDWR;
+    break;
+  default:
+    xv6_flags |= XV6_O_RDONLY;
+    break;
+  }
+  if(flags & O_CREAT)
+    xv6_flags |= XV6_O_CREAT;
+  if(flags & O_TRUNC)
+    xv6_flags |= XV6_O_TRUNC;
+  if(flags & O_APPEND)
+    xv6_flags |= XV6_O_APPEND;
+  return xv6_flags;
+}
+
+static mode_t k_mode_from_xv6_type(uint16 type)
+{
+  if(type == XV6_KSTAT_T_DIR)
+    return (mode_t)(S_IFDIR | 0777);
+  if(type == XV6_KSTAT_T_DEVICE)
+    return (mode_t)(S_IFCHR | 0666);
+  return (mode_t)(S_IFREG | 0666);
+}
+
+static int k_fill_host_stat(const xv6_kstat_t *kst, struct stat *st)
+{
+  if(kst == 0 || st == 0)
+    return -1;
+  memset(st, 0, sizeof(*st));
+  st->st_ino = (ino_t)kst->ino;
+  st->st_nlink = (nlink_t)(kst->nlink ? kst->nlink : 1);
+  st->st_mode = k_mode_from_xv6_type(kst->type);
+  st->st_size = (off_t)kst->size;
+  return 0;
+}
+
+static int k_open(const char *path, int flags, ...)
+{
+  int fd;
+  mode_t mode = 0;
+  va_list ap;
+  path = (const char *)elf_loader_translate_ptr(path);
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  va_start(ap, flags);
+  mode = (mode_t)va_arg(ap, int);
+  va_end(ap);
+  (void)mode;
+  fd = xv6_open(path, k_map_open_flags(flags));
+  if(fd < 0)
+    errno = ENOENT;
+  return fd;
+}
+
+static int k_creat(const char *path, mode_t mode)
+{
+  return k_open(path, O_CREAT | O_TRUNC | O_WRONLY, mode);
+}
+
+static int k_read(int fd, void *buf, size_t size)
+{
+  int rc = xv6_read(fd, buf, (uint32)size);
+  if(rc < 0)
+    errno = EIO;
+  return rc;
+}
+
+static int k_write(int fd, const void *buf, size_t size)
+{
+  int rc = xv6_write(fd, buf, (uint32)size);
+  if(rc < 0)
+    errno = EIO;
+  return rc;
+}
+
+static int k_close(int fd)
+{
+  if(fd >= 0 && fd <= 2)
+    return 0;
+  if(xv6_close(fd) != 0){
+    errno = EBADF;
+    return -1;
+  }
+  return 0;
+}
+
+static off_t k_lseek(int fd, off_t offset, int whence)
+{
+  int rc = xv6_lseek(fd, (int)offset, whence);
+  if(rc < 0){
+    errno = EINVAL;
+    return (off_t)-1;
+  }
+  return (off_t)rc;
+}
+
+static int k_fstat(int fd, struct stat *st)
+{
+  xv6_kstat_t kst;
+  if(st == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(xv6_fstat(fd, &kst) != 0){
+    errno = EBADF;
+    return -1;
+  }
+  return k_fill_host_stat(&kst, st);
+}
+
+static int k_stat(const char *path, struct stat *st)
+{
+  xv6_kstat_t kst;
+  path = (const char *)elf_loader_translate_ptr(path);
+  if(path == 0 || st == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(xv6_stat_path(path, &kst) != 0){
+    errno = ENOENT;
+    return -1;
+  }
+  return k_fill_host_stat(&kst, st);
+}
+
+static int k_lstat(const char *path, struct stat *st)
+{
+  return k_stat(path, st);
+}
+
+static int k_access(const char *path, int mode)
+{
+  path = (const char *)elf_loader_translate_ptr(path);
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(xv6_access(path, mode) != 0){
+    errno = ENOENT;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_chmod(const char *path, mode_t mode)
+{
+  path = (const char *)elf_loader_translate_ptr(path);
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(xv6_chmod(path, (int)mode) != 0){
+    errno = ENOENT;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_mkdir(const char *path, mode_t mode)
+{
+  (void)mode;
+  path = (const char *)elf_loader_translate_ptr(path);
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(xv6fs_mkdir_path(path) != 0){
+    errno = EIO;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_unlink(const char *path)
+{
+  path = (const char *)elf_loader_translate_ptr(path);
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(xv6fs_unlink_path(path) != 0){
+    errno = ENOENT;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_chdir(const char *path)
+{
+  path = (const char *)elf_loader_translate_ptr(path);
+  if(path == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(xv6_chdir(path) != 0){
+    errno = ENOENT;
+    return -1;
+  }
+  return 0;
+}
+
+static char *k_getcwd(char *buf, size_t size)
+{
+  if(buf == 0 || size == 0){
+    errno = EINVAL;
+    return 0;
+  }
+  if(xv6_getcwd(buf, (int)size) != 0){
+    errno = ERANGE;
+    return 0;
+  }
+  return buf;
+}
+
+static int k_isatty(int fd)
+{
+  return (fd >= 0 && fd <= 2) ? 1 : 0;
+}
+
+extern int ksh_register_libc_host_symbols(void);
+extern struct _reent *__getreent(void);
 
 static int k_fs_readdir_path(const char *path, int index, char *name_out, int name_out_len, uint16 *type_out,
                              uint32 *size_out)
@@ -120,27 +421,45 @@ static void tty_puts(const char *s)
 static void putc_console(int c)
 {
   char ch = (char)c;
-  if(xv6_write(1, &ch, 1) != 1)
+  int rc = xv6_write(1, &ch, 1);
+  if(rc < 0)
     tty_putc(c);
 }
 
 static void puts_console(const char *s)
 {
+  int n;
+  if(s == 0)
+    return;
+  n = (int)strlen(s);
+  if(n <= 0)
+    return;
+  if(xv6_stdio_is_default_out()){
+    (void)fwrite(s, 1, (size_t)n, stdout);
+    return;
+  }
+  if(xv6_write(1, s, (uint32)n) == n)
+    return;
   while(*s)
-    putc_console(*s++);
-}
-
-static void eputc_console(int c)
-{
-  char ch = (char)c;
-  if(xv6_write(2, &ch, 1) != 1)
-    hal_console_putc(c);
+    tty_putc(*s++);
 }
 
 static void eputs_console(const char *s)
 {
+  int n;
+  if(s == 0)
+    return;
+  n = (int)strlen(s);
+  if(n <= 0)
+    return;
+  if(xv6_stdio_is_default_out()){
+    (void)fwrite(s, 1, (size_t)n, stderr);
+    return;
+  }
+  if(xv6_write(2, s, (uint32)n) == n)
+    return;
   while(*s)
-    eputc_console(*s++);
+    hal_console_putc(*s++);
 }
 
 static void puts_line(const char *s)
@@ -648,11 +967,9 @@ static void enforce_job_limits(void)
 {
   int i;
   uint32 now = (uint32)k_ticks();
-  TaskHandle_t kill_tasks[KSH_MAX_JOBS];
   ksh_job_task_t *kill_ctx[KSH_MAX_JOBS];
   int nkill = 0;
 
-  memset(kill_tasks, 0, sizeof(kill_tasks));
   memset(kill_ctx, 0, sizeof(kill_ctx));
 
   if(g_jobs_lock)
@@ -661,11 +978,11 @@ static void enforce_job_limits(void)
     if(!g_jobs[i].used || g_jobs[i].done)
       continue;
     if(g_jobs[i].max_runtime_ms > 0 && ((uint32)(now - g_jobs[i].started_ms) * 10u) > g_jobs[i].max_runtime_ms){
-      if(nkill < KSH_MAX_JOBS){
-        kill_tasks[nkill] = g_jobs[i].task;
-        kill_ctx[nkill] = (ksh_job_task_t *)g_jobs[i].task_ctx;
-        nkill++;
-      }
+      TaskHandle_t h = g_jobs[i].task;
+      if(h)
+        vTaskDelete(h);
+      if(nkill < KSH_MAX_JOBS && g_jobs[i].task_ctx)
+        kill_ctx[nkill++] = (ksh_job_task_t *)g_jobs[i].task_ctx;
       g_jobs[i].done = 1;
       g_jobs[i].exit_code = 124;
       g_jobs[i].reason = JOB_REASON_TIMEOUT;
@@ -677,8 +994,6 @@ static void enforce_job_limits(void)
     (void)xSemaphoreGive(g_jobs_lock);
 
   for(i = 0; i < nkill; i++){
-    if(kill_tasks[i])
-      vTaskDelete(kill_tasks[i]);
     if(kill_ctx[i])
       free_job_ctx(kill_ctx[i]);
   }
@@ -715,6 +1030,7 @@ static int terminate_job_id(int id, int exit_code, int reason)
   int slot;
   TaskHandle_t h = 0;
   ksh_job_task_t *ctx = 0;
+  int rc = -1;
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -727,17 +1043,18 @@ static int terminate_job_id(int id, int exit_code, int reason)
     g_jobs[slot].reason = reason;
     g_jobs[slot].task = 0;
     g_jobs[slot].task_ctx = 0;
+    if(h)
+      vTaskDelete(h);
+    rc = 0;
   }
   if(g_jobs_lock)
     (void)xSemaphoreGive(g_jobs_lock);
 
-  if(slot < 0)
+  if(rc != 0)
     return -1;
-  if(h)
-    vTaskDelete(h);
   if(ctx)
     free_job_ctx(ctx);
-  return 0;
+  return rc;
 }
 
 static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctrl_c)
@@ -1592,16 +1909,32 @@ static void cmd_unset(int argc, char **argv)
 static void register_default_symbols(void)
 {
   static const elf_host_symbol_t syms[] = {
-    { "puts", (void *)puts },
-    { "printf", (void *)printf },
+    { "puts", (void *)k_host_puts },
+    { "printf", (void *)k_host_printf },
+    { "fprintf", (void *)k_host_fprintf },
+    { "vfprintf", (void *)vfprintf },
+    { "fputs", (void *)fputs },
+    { "fputc", (void *)fputc },
+    { "fopen", (void *)fopen },
+    { "freopen", (void *)freopen },
+    { "fclose", (void *)fclose },
+    { "fgets", (void *)fgets },
+    { "fgetc", (void *)fgetc },
+    { "getc", (void *)getc },
+    { "putchar", (void *)putchar },
+    { "fflush", (void *)fflush },
+    { "clearerr", (void *)clearerr },
+    { "fileno", (void *)fileno },
+    { "exit", (void *)exit },
+    { "abort", (void *)abort },
     { "malloc", (void *)malloc },
     { "calloc", (void *)calloc },
     { "realloc", (void *)realloc },
     { "free", (void *)free },
     { "memset", (void *)memset },
-    { "memcpy", (void *)memcpy },
-    { "strlen", (void *)strlen },
-    { "strcmp", (void *)strcmp },
+    { "memcpy", (void *)k_host_memcpy },
+    { "strlen", (void *)k_host_strlen },
+    { "strcmp", (void *)k_host_strcmp },
     { "usleep", (void *)usleep },
     { "k_ticks", (void *)k_ticks },
     { "k_puts", (void *)k_puts },
@@ -1620,9 +1953,27 @@ static void register_default_symbols(void)
     { "xv6_getcwd", (void *)xv6_getcwd },
     { "xv6_ptsname", (void *)xv6_ptsname },
     { "xv6_pipe", (void *)xv6_pipe },
+    { "open", (void *)k_open },
+    { "creat", (void *)k_creat },
+    { "read", (void *)k_read },
+    { "write", (void *)k_write },
+    { "close", (void *)k_close },
+    { "lseek", (void *)k_lseek },
+    { "stat", (void *)k_stat },
+    { "lstat", (void *)k_lstat },
+    { "fstat", (void *)k_fstat },
+    { "access", (void *)k_access },
+    { "mkdir", (void *)k_mkdir },
+    { "unlink", (void *)k_unlink },
+    { "chmod", (void *)k_chmod },
+    { "chdir", (void *)k_chdir },
+    { "getcwd", (void *)k_getcwd },
+    { "isatty", (void *)k_isatty },
+    { "__getreent", (void *)__getreent },
   };
 
   (void)elf_loader_register_host_symbols(syms, (int)(sizeof(syms) / sizeof(syms[0])));
+  (void)ksh_register_libc_host_symbols();
 }
 
 static int is_builtin_command(const char *cmd)
@@ -1732,6 +2083,9 @@ void ksh_run(void)
   char line[256];
   int len = 0;
 
+  if(__sync_lock_test_and_set(&g_ksh_started, 1) != 0)
+    return;
+
   elf_loader_init();
   g_jobs_lock = xSemaphoreCreateMutex();
   g_loader_lock = xSemaphoreCreateMutex();
@@ -1752,6 +2106,11 @@ void ksh_run(void)
     c = hal_console_getc();
     if(c < 0){
       hal_delay_ms(5);
+      continue;
+    }
+
+    if(c != 0x03 && c != '\r' && c != '\n' && c != '\b' && c != 0x7f && c != '\t' && (c < 0x20 || c > 0x7e)){
+      taskYIELD();
       continue;
     }
 
@@ -1814,5 +2173,6 @@ void ksh_run(void)
       line[len++] = (char)c;
       tty_putc(c);
     }
+    taskYIELD();
   }
 }

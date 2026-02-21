@@ -7,6 +7,9 @@
 #include "esp_flash_disk.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #define ELF_MAGIC 0x464c457fU
 #define ELFCLASS32 1
@@ -108,6 +111,8 @@ typedef struct {
   uint32 vaddr;
   uint32 memsz;
   uint8 *mem;
+  uint8 *shadow_mem;
+  uint8 is_exec;
 } elf_seg_t;
 
 typedef struct {
@@ -137,8 +142,70 @@ static const char *TAG = "xv6_elf";
 static elf_module_t g_modules[ELFLOADER_MAX_MODULES];
 static int g_module_used[ELFLOADER_MAX_MODULES];
 
-static elf_host_symbol_t g_host_syms[256];
+static elf_host_symbol_t g_host_syms[ELFLOADER_MAX_HOST_SYMBOLS];
 static int g_host_sym_count;
+
+#define ELF_CALL_CTX_MAX 8
+typedef struct {
+  TaskHandle_t task;
+  elf_module_t *mod;
+} elf_call_ctx_t;
+static elf_call_ctx_t g_call_ctx[ELF_CALL_CTX_MAX];
+static SemaphoreHandle_t g_call_ctx_mu;
+
+static void call_ctx_lock(void)
+{
+  if(g_call_ctx_mu == 0)
+    g_call_ctx_mu = xSemaphoreCreateMutex();
+  if(g_call_ctx_mu)
+    (void)xSemaphoreTake(g_call_ctx_mu, portMAX_DELAY);
+}
+
+static void call_ctx_unlock(void)
+{
+  if(g_call_ctx_mu)
+    (void)xSemaphoreGive(g_call_ctx_mu);
+}
+
+static void call_ctx_set_current(elf_module_t *mod)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int i;
+  int free_i = -1;
+
+  call_ctx_lock();
+  for(i = 0; i < ELF_CALL_CTX_MAX; i++){
+    if(g_call_ctx[i].task == self){
+      g_call_ctx[i].mod = mod;
+      call_ctx_unlock();
+      return;
+    }
+    if(g_call_ctx[i].task == 0 && free_i < 0)
+      free_i = i;
+  }
+  if(free_i >= 0){
+    g_call_ctx[free_i].task = self;
+    g_call_ctx[free_i].mod = mod;
+  }
+  call_ctx_unlock();
+}
+
+static elf_module_t *call_ctx_get_current(void)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int i;
+  elf_module_t *m = 0;
+
+  call_ctx_lock();
+  for(i = 0; i < ELF_CALL_CTX_MAX; i++){
+    if(g_call_ctx[i].task == self){
+      m = g_call_ctx[i].mod;
+      break;
+    }
+  }
+  call_ctx_unlock();
+  return m;
+}
 
 static int read_flash_image(uint32 sector, uint32 sector_count, uint8 **out, uint32 *out_size)
 {
@@ -187,6 +254,10 @@ static void module_reset(elf_module_t *m)
       free(m->segs[i].mem);
       m->segs[i].mem = 0;
     }
+    if(m->segs[i].shadow_mem){
+      free(m->segs[i].shadow_mem);
+      m->segs[i].shadow_mem = 0;
+    }
   }
   if(m->image){
     free(m->image);
@@ -218,29 +289,31 @@ static int parse_segments(elf_module_t *m, const elf32_ehdr_t *eh)
 
     if(ph->p_type != PT_LOAD)
       continue;
-    if(m->seg_count >= (int)(sizeof(m->segs) / sizeof(m->segs[0])))
+    if(m->seg_count >= (int)(sizeof(m->segs) / sizeof(m->segs[0]))){
+      ESP_LOGE(TAG, "too many PT_LOAD segments");
       return -1;
+    }
     if(ph->p_memsz == 0)
       continue;
-    if(ph->p_filesz > ph->p_memsz)
+    if(ph->p_filesz > ph->p_memsz){
+      ESP_LOGE(TAG, "bad segment sizes: filesz=%u memsz=%u", (unsigned)ph->p_filesz, (unsigned)ph->p_memsz);
       return -1;
-    if(ph->p_offset + ph->p_filesz > m->image_size)
+    }
+    if(ph->p_offset + ph->p_filesz > m->image_size){
+      ESP_LOGE(TAG, "segment out of image: off=0x%x filesz=0x%x img=0x%x", (unsigned)ph->p_offset,
+               (unsigned)ph->p_filesz, (unsigned)m->image_size);
       return -1;
+    }
 
-    uint32 caps = MALLOC_CAP_8BIT;
     if((ph->p_flags & PF_X) != 0){
-#ifdef MALLOC_CAP_EXEC
-      caps = MALLOC_CAP_EXEC;
-#else
-      caps = MALLOC_CAP_IRAM_8BIT;
-#endif
+      dst = (uint8 *)heap_caps_malloc(ph->p_memsz, MALLOC_CAP_EXEC);
+    } else {
+      dst = (uint8 *)heap_caps_malloc(ph->p_memsz, MALLOC_CAP_8BIT);
     }
-    dst = (uint8 *)heap_caps_malloc(ph->p_memsz, caps);
-    if(dst == 0 && (ph->p_flags & PF_X) != 0){
-      dst = (uint8 *)heap_caps_malloc(ph->p_memsz, MALLOC_CAP_IRAM_8BIT);
-    }
-    if(dst == 0)
+    if(dst == 0){
+      ESP_LOGE(TAG, "segment alloc failed: memsz=%u flags=0x%x", (unsigned)ph->p_memsz, (unsigned)ph->p_flags);
       return -1;
+    }
 
     memset(dst, 0, ph->p_memsz);
     memcpy(dst, m->image + ph->p_offset, ph->p_filesz);
@@ -248,6 +321,17 @@ static int parse_segments(elf_module_t *m, const elf32_ehdr_t *eh)
     m->segs[m->seg_count].vaddr = ph->p_vaddr;
     m->segs[m->seg_count].memsz = ph->p_memsz;
     m->segs[m->seg_count].mem = dst;
+    m->segs[m->seg_count].shadow_mem = 0;
+    m->segs[m->seg_count].is_exec = ((ph->p_flags & PF_X) != 0) ? 1 : 0;
+    if(m->segs[m->seg_count].is_exec){
+      m->segs[m->seg_count].shadow_mem = (uint8 *)heap_caps_malloc(ph->p_memsz, MALLOC_CAP_8BIT);
+      if(m->segs[m->seg_count].shadow_mem == 0){
+        ESP_LOGE(TAG, "shadow alloc failed: memsz=%u", (unsigned)ph->p_memsz);
+        free(dst);
+        return -1;
+      }
+      memcpy(m->segs[m->seg_count].shadow_mem, dst, ph->p_memsz);
+    }
     m->seg_count++;
   }
   return (m->seg_count > 0) ? 0 : -1;
@@ -328,6 +412,17 @@ static void *resolve_symbol(elf_module_t *m, const elf32_sym_t *sym, const char 
   return 0;
 }
 
+static int section_bounds_valid(const elf_module_t *m, const elf32_shdr_t *sh)
+{
+  if(m == 0 || sh == 0)
+    return 0;
+  if(sh->sh_offset > m->image_size)
+    return 0;
+  if(sh->sh_size > (m->image_size - sh->sh_offset))
+    return 0;
+  return 1;
+}
+
 static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf32_shdr_t *sym_sh, const elf32_shdr_t *str_sh)
 {
   int i;
@@ -339,9 +434,9 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
 
   if(sym_sh == 0 || str_sh == 0)
     return 0;
-  if(sym_sh->sh_offset + sym_sh->sh_size > m->image_size)
+  if(!section_bounds_valid(m, sym_sh))
     return -1;
-  if(str_sh->sh_offset + str_sh->sh_size > m->image_size)
+  if(!section_bounds_valid(m, str_sh))
     return -1;
 
   sym_sh_index = (uint32)(sym_sh - sh);
@@ -358,7 +453,7 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
       continue;
     if(sh[i].sh_link != sym_sh_index)
       continue;
-    if(sh[i].sh_offset + sh[i].sh_size > m->image_size)
+    if(!section_bounds_valid(m, &sh[i]))
       return -1;
     if(sh[i].sh_entsize != sizeof(elf32_rela_t) || sh[i].sh_entsize == 0)
       return -1;
@@ -449,6 +544,8 @@ static int collect_exports(elf_module_t *m, const elf32_shdr_t *sym_sh, const el
 
   if(sym_sh == 0 || str_sh == 0)
     return 0;
+  if(!section_bounds_valid(m, sym_sh) || !section_bounds_valid(m, str_sh))
+    return -1;
 
   symtab = (const elf32_sym_t *)(m->image + sym_sh->sh_offset);
   strtab = (const char *)(m->image + str_sh->sh_offset);
@@ -727,11 +824,32 @@ int elf_module_call_main(elf_module_t *mod, int argc, char **argv, int *retv)
   if(fn == 0)
     return -1;
 
+  call_ctx_set_current(mod);
   if(retv)
     *retv = fn(argc, argv);
   else
     (void)fn(argc, argv);
+  call_ctx_set_current(0);
   return 0;
+}
+
+const void *elf_loader_translate_ptr(const void *ptr)
+{
+  elf_module_t *m = call_ctx_get_current();
+  uintptr_t up = (uintptr_t)ptr;
+  int i;
+
+  if(ptr == 0 || m == 0)
+    return ptr;
+
+  for(i = 0; i < m->seg_count; i++){
+    uintptr_t start = (uintptr_t)m->segs[i].mem;
+    uintptr_t end = start + m->segs[i].memsz;
+    if(up >= start && up < end && m->segs[i].shadow_mem){
+      return m->segs[i].shadow_mem + (up - start);
+    }
+  }
+  return ptr;
 }
 
 int elf_module_info(elf_module_t *mod, uint16 *etype, uint16 *machine, uint32 *entry_vaddr, int *nsegs, int *nexports)

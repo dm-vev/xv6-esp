@@ -20,12 +20,26 @@ int xv6_dup(int fd);
 int xv6_read(int fd, void *buf, uint32 size);
 int xv6_write(int fd, const void *buf, uint32 size);
 int xv6_close(int fd);
+int xv6_lseek(int fd, int offset, int whence);
 int xv6_chdir(const char *path);
 int xv6_getcwd(char *out_path, int out_len);
 int xv6_ptsname(int master_fd, char *out_path, int out_len);
 int xv6_pipe(int *out_read_fd, int *out_write_fd);
+int xv6_access(const char *path, int mode);
+int xv6_chmod(const char *path, int mode);
+
+typedef struct {
+  uint32 ino;
+  uint32 size;
+  uint16 type;
+  uint16 nlink;
+} xv6_kstat_t;
+
+int xv6_stat_path(const char *path, xv6_kstat_t *st);
+int xv6_fstat(int fd, xv6_kstat_t *st);
 void xv6_stdio_set_fds(int in_fd, int out_fd, int err_fd);
 void xv6_stdio_reset_fds(void);
+int xv6_stdio_is_default_out(void);
 void xv6_task_ctx_cleanup(void);
 void xv6_vfs_reset(void);
 
