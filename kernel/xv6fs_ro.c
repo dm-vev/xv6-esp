@@ -33,7 +33,9 @@ typedef struct {
 #define VFD_FREE 0
 #define VFD_FILE 1
 #define VFD_DEV 2
+#define VFD_PIPE 3
 #define XV6_MAX_PTY 4
+#define XV6_MAX_PIPE 16
 
 #define DEV_ROLE_NONE 0
 #define DEV_ROLE_PTY_MASTER 1
@@ -67,6 +69,18 @@ typedef struct {
 } xv6_pty_t;
 
 static xv6_pty_t g_ptys[XV6_MAX_PTY];
+
+typedef struct {
+  int alloc;
+  int readers;
+  int writers;
+  uint8 data[512];
+  uint16 r;
+  uint16 w;
+  uint16 n;
+} xv6_pipe_t;
+
+static xv6_pipe_t g_pipes[XV6_MAX_PIPE];
 
 static int stdio_map_fd(int fd)
 {
@@ -193,6 +207,27 @@ static void pty_try_free(int id)
   if(g_ptys[id].alloc && !g_ptys[id].master_open && !g_ptys[id].slave_open && g_ptys[id].m2s_n == 0 &&
      g_ptys[id].s2m_n == 0)
     memset(&g_ptys[id], 0, sizeof(g_ptys[id]));
+}
+
+static int pipe_alloc_id(void)
+{
+  int i;
+  for(i = 0; i < XV6_MAX_PIPE; i++){
+    if(!g_pipes[i].alloc){
+      memset(&g_pipes[i], 0, sizeof(g_pipes[i]));
+      g_pipes[i].alloc = 1;
+      return i;
+    }
+  }
+  return -1;
+}
+
+static void pipe_try_free(int id)
+{
+  if(id < 0 || id >= XV6_MAX_PIPE)
+    return;
+  if(g_pipes[id].alloc && g_pipes[id].readers == 0 && g_pipes[id].writers == 0)
+    memset(&g_pipes[id], 0, sizeof(g_pipes[id]));
 }
 
 static int dev_prng_fill(void *buf, uint32 n)
@@ -1020,6 +1055,7 @@ void xv6_vfs_reset(void)
   vfs_lock();
   memset(g_fds, 0, sizeof(g_fds));
   memset(g_ptys, 0, sizeof(g_ptys));
+  memset(g_pipes, 0, sizeof(g_pipes));
 
   g_fds[0].used = 1;
   g_fds[0].kind = VFD_DEV;
@@ -1110,6 +1146,55 @@ fail_unlock:
   return -1;
 }
 
+int xv6_dup(int fd)
+{
+  int real_fd = stdio_map_fd(fd);
+  int nfd = -1;
+
+  if(real_fd < 0 || real_fd >= XV6_MAX_FD)
+    return -1;
+
+  vfs_lock();
+  if(!g_fds[real_fd].used)
+    goto fail;
+  nfd = vfs_alloc_fd();
+  if(nfd < 0)
+    goto fail;
+
+  g_fds[nfd] = g_fds[real_fd];
+  g_fds[nfd].used = 1;
+
+  if(g_fds[nfd].kind == VFD_PIPE){
+    int id = g_fds[nfd].dev_id;
+    if(id < 0 || id >= XV6_MAX_PIPE || !g_pipes[id].alloc)
+      goto fail_clear;
+    if((g_fds[nfd].flags & XV6_O_WRONLY) != 0)
+      g_pipes[id].writers++;
+    else
+      g_pipes[id].readers++;
+  } else if(g_fds[nfd].kind == VFD_DEV){
+    int id = g_fds[nfd].dev_id;
+    if(g_fds[nfd].dev_role == DEV_ROLE_PTY_MASTER){
+      if(id < 0 || id >= XV6_MAX_PTY || !g_ptys[id].alloc)
+        goto fail_clear;
+      g_ptys[id].master_open++;
+    } else if(g_fds[nfd].dev_role == DEV_ROLE_PTY_SLAVE){
+      if(id < 0 || id >= XV6_MAX_PTY || !g_ptys[id].alloc)
+        goto fail_clear;
+      g_ptys[id].slave_open++;
+    }
+  }
+
+  vfs_unlock();
+  return nfd;
+
+fail_clear:
+  memset(&g_fds[nfd], 0, sizeof(g_fds[nfd]));
+fail:
+  vfs_unlock();
+  return -1;
+}
+
 int xv6_read(int fd, void *buf, uint32 size)
 {
   int real_fd = stdio_map_fd(fd);
@@ -1129,6 +1214,38 @@ int xv6_read(int fd, void *buf, uint32 size)
       g_fds[real_fd].off += (uint32)rc;
     vfs_unlock();
     return rc;
+  }
+
+  if(g_fds[real_fd].kind == VFD_PIPE){
+    uint8 *out = (uint8 *)buf;
+    uint32 got = 0;
+    int pid = g_fds[real_fd].dev_id;
+    if(pid < 0 || pid >= XV6_MAX_PIPE || !g_pipes[pid].alloc)
+      goto fail;
+    while(got < size){
+      int n;
+      xv6_pipe_t *p = &g_pipes[pid];
+      if(!p->alloc)
+        goto fail;
+      if(p->n == 0){
+        if(p->writers == 0)
+          break;
+        if(got > 0)
+          break;
+        vfs_unlock();
+        hal_delay_ms(1);
+        vfs_lock();
+        if(real_fd < 0 || real_fd >= XV6_MAX_FD || !g_fds[real_fd].used || g_fds[real_fd].kind != VFD_PIPE)
+          goto fail;
+        continue;
+      }
+      n = pty_q_pop(p->data, &p->r, &p->n, sizeof(p->data), out + got, size - got);
+      if(n <= 0)
+        break;
+      got += (uint32)n;
+    }
+    vfs_unlock();
+    return (int)got;
   }
 
   if(read_inode(g_fds[real_fd].inum, &ip) != 0 || ip.type != T_FILE)
@@ -1169,6 +1286,41 @@ int xv6_write(int fd, const void *buf, uint32 size)
     return rc;
   }
 
+  if(g_fds[real_fd].kind == VFD_PIPE){
+    const uint8 *in = (const uint8 *)buf;
+    uint32 sent = 0;
+    int pid = g_fds[real_fd].dev_id;
+    if(pid < 0 || pid >= XV6_MAX_PIPE || !g_pipes[pid].alloc)
+      goto fail;
+    while(sent < size){
+      int n;
+      xv6_pipe_t *p = &g_pipes[pid];
+      if(!p->alloc)
+        goto fail;
+      if(p->readers == 0){
+        if(sent == 0)
+          goto fail;
+        break;
+      }
+      if(p->n >= sizeof(p->data)){
+        if(sent > 0)
+          break;
+        vfs_unlock();
+        hal_delay_ms(1);
+        vfs_lock();
+        if(real_fd < 0 || real_fd >= XV6_MAX_FD || !g_fds[real_fd].used || g_fds[real_fd].kind != VFD_PIPE)
+          goto fail;
+        continue;
+      }
+      n = pty_q_push(p->data, &p->w, &p->n, sizeof(p->data), in + sent, size - sent);
+      if(n <= 0)
+        break;
+      sent += (uint32)n;
+    }
+    vfs_unlock();
+    return (int)sent;
+  }
+
   if(read_inode(g_fds[real_fd].inum, &ip) != 0 || ip.type != T_FILE)
     goto fail;
   if(inode_write_range(&ip, g_fds[real_fd].off, buf, size) != 0)
@@ -1192,11 +1344,26 @@ int xv6_close(int fd)
   if(g_fds[fd].kind == VFD_DEV){
     int id = g_fds[fd].dev_id;
     if(g_fds[fd].dev_role == DEV_ROLE_PTY_MASTER && id >= 0 && id < XV6_MAX_PTY){
-      g_ptys[id].master_open = 0;
+      if(g_ptys[id].master_open > 0)
+        g_ptys[id].master_open--;
       pty_try_free(id);
     } else if(g_fds[fd].dev_role == DEV_ROLE_PTY_SLAVE && id >= 0 && id < XV6_MAX_PTY){
-      g_ptys[id].slave_open = 0;
+      if(g_ptys[id].slave_open > 0)
+        g_ptys[id].slave_open--;
       pty_try_free(id);
+    }
+  } else if(g_fds[fd].kind == VFD_PIPE){
+    int id = g_fds[fd].dev_id;
+    if(id >= 0 && id < XV6_MAX_PIPE && g_pipes[id].alloc){
+      if((g_fds[fd].flags & XV6_O_WRONLY) != 0)
+        g_pipes[id].writers--;
+      else
+        g_pipes[id].readers--;
+      if(g_pipes[id].writers < 0)
+        g_pipes[id].writers = 0;
+      if(g_pipes[id].readers < 0)
+        g_pipes[id].readers = 0;
+      pipe_try_free(id);
     }
   }
   memset(&g_fds[fd], 0, sizeof(g_fds[fd]));
@@ -1222,6 +1389,53 @@ int xv6_ptsname(int master_fd, char *out_path, int out_len)
   vfs_unlock();
   return 0;
 
+fail:
+  vfs_unlock();
+  return -1;
+}
+
+int xv6_pipe(int *out_read_fd, int *out_write_fd)
+{
+  int pipe_id;
+  int rfd, wfd;
+
+  if(out_read_fd == 0 || out_write_fd == 0 || !g_ready)
+    return -1;
+
+  vfs_lock();
+  pipe_id = pipe_alloc_id();
+  if(pipe_id < 0)
+    goto fail;
+
+  rfd = vfs_alloc_fd();
+  if(rfd < 0)
+    goto fail_pipe;
+  memset(&g_fds[rfd], 0, sizeof(g_fds[rfd]));
+  g_fds[rfd].used = 1;
+  g_fds[rfd].kind = VFD_PIPE;
+  g_fds[rfd].flags = XV6_O_RDONLY;
+  g_fds[rfd].dev_id = pipe_id;
+
+  wfd = vfs_alloc_fd();
+  if(wfd < 0){
+    memset(&g_fds[rfd], 0, sizeof(g_fds[rfd]));
+    goto fail_pipe;
+  }
+  memset(&g_fds[wfd], 0, sizeof(g_fds[wfd]));
+  g_fds[wfd].used = 1;
+  g_fds[wfd].kind = VFD_PIPE;
+  g_fds[wfd].flags = XV6_O_WRONLY;
+  g_fds[wfd].dev_id = pipe_id;
+
+  g_pipes[pipe_id].readers = 1;
+  g_pipes[pipe_id].writers = 1;
+  *out_read_fd = rfd;
+  *out_write_fd = wfd;
+  vfs_unlock();
+  return 0;
+
+fail_pipe:
+  memset(&g_pipes[pipe_id], 0, sizeof(g_pipes[pipe_id]));
 fail:
   vfs_unlock();
   return -1;

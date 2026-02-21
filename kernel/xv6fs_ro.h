@@ -16,10 +16,12 @@ int xv6fs_unlink_path(const char *path);
 
 // Tiny VFS-like FD API used by ELF usermode commands.
 int xv6_open(const char *path, int flags);
+int xv6_dup(int fd);
 int xv6_read(int fd, void *buf, uint32 size);
 int xv6_write(int fd, const void *buf, uint32 size);
 int xv6_close(int fd);
 int xv6_ptsname(int master_fd, char *out_path, int out_len);
+int xv6_pipe(int *out_read_fd, int *out_write_fd);
 void xv6_stdio_set_fds(int in_fd, int out_fd, int err_fd);
 void xv6_stdio_reset_fds(void);
 void xv6_vfs_reset(void);
