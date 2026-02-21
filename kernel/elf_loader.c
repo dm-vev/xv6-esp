@@ -28,6 +28,7 @@
 #define SHT_STRTAB 3
 #define SHT_RELA 4
 #define SHT_DYNSYM 11
+#define SHF_EXECINSTR 0x4
 
 #define STB_LOCAL 0
 #define STB_GLOBAL 1
@@ -179,9 +180,13 @@ static void call_ctx_set_current(elf_module_t *mod)
   call_ctx_lock();
   for(i = 0; i < ELF_CALL_CTX_MAX; i++){
     if(g_call_ctx[i].task == self){
-      g_call_ctx[i].mod = mod;
-      if(mod == 0)
+      if(mod == 0){
+        g_call_ctx[i].task = 0;
+        g_call_ctx[i].mod = 0;
         g_call_ctx[i].jb_valid = 0;
+      } else {
+        g_call_ctx[i].mod = mod;
+      }
       call_ctx_unlock();
       return;
     }
@@ -289,13 +294,28 @@ static void module_reset(elf_module_t *m)
   memset(m, 0, sizeof(*m));
 }
 
-static void *map_vaddr(elf_module_t *m, uint32 vaddr)
+static void *map_vaddr_exec(elf_module_t *m, uint32 vaddr)
 {
   int i;
   for(i = 0; i < m->seg_count; i++){
     uint32 start = m->segs[i].vaddr;
     uint32 end = start + m->segs[i].memsz;
     if(vaddr >= start && vaddr < end){
+      return m->segs[i].mem + (vaddr - start);
+    }
+  }
+  return 0;
+}
+
+static void *map_vaddr_data(elf_module_t *m, uint32 vaddr)
+{
+  int i;
+  for(i = 0; i < m->seg_count; i++){
+    uint32 start = m->segs[i].vaddr;
+    uint32 end = start + m->segs[i].memsz;
+    if(vaddr >= start && vaddr < end){
+      if(m->segs[i].is_exec && m->segs[i].shadow_mem)
+        return m->segs[i].shadow_mem + (vaddr - start);
       return m->segs[i].mem + (vaddr - start);
     }
   }
@@ -387,11 +407,37 @@ static int find_symtab_sections(const elf_module_t *m, const elf32_ehdr_t *eh, c
   return 0;
 }
 
+static int vaddr_is_exec_section(const elf_module_t *m, const elf32_ehdr_t *eh, uint32 vaddr)
+{
+  const elf32_shdr_t *sh;
+  int i;
+
+  if(m == 0 || eh == 0 || eh->e_shoff == 0 || eh->e_shnum == 0)
+    return 0;
+  sh = (const elf32_shdr_t *)(m->image + eh->e_shoff);
+  for(i = 0; i < eh->e_shnum; i++){
+    uint32 start;
+    uint32 end;
+    if((sh[i].sh_flags & SHF_EXECINSTR) == 0 || sh[i].sh_size == 0)
+      continue;
+    start = sh[i].sh_addr;
+    end = start + sh[i].sh_size;
+    if(vaddr >= start && vaddr < end)
+      return 1;
+  }
+  return 0;
+}
+
 static void *resolve_local_symbol(elf_module_t *m, const elf32_sym_t *sym)
 {
+  uint8 stt;
+
   if(sym->st_shndx == SHN_UNDEF)
     return 0;
-  return map_vaddr(m, sym->st_value);
+  stt = (uint8)(sym->st_info & 0x0f);
+  if(stt == STT_FUNC)
+    return map_vaddr_exec(m, sym->st_value);
+  return map_vaddr_data(m, sym->st_value);
 }
 
 static void *resolve_host_symbol(const char *name)
@@ -399,8 +445,9 @@ static void *resolve_host_symbol(const char *name)
   int i;
   for(i = g_host_sym_count - 1; i >= 0; i--){
     if(strcmp(name, g_host_syms[i].name) == 0){
-      if(g_host_syms[i].addr != 0)
+      if(g_host_syms[i].addr != 0){
         return g_host_syms[i].addr;
+      }
     }
   }
   return 0;
@@ -522,7 +569,7 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
       case R_XTENSA_PLT:
       case R_XTENSA_GLOB_DAT:
       case R_XTENSA_JMP_SLOT:
-        target = map_vaddr(m, r->r_offset);
+        target = map_vaddr_exec(m, r->r_offset);
         if(target == 0){
           ESP_LOGE(TAG, "reloc target map failed: off=0x%x type=%u", (unsigned)r->r_offset, (unsigned)rtype);
           return -1;
@@ -535,7 +582,7 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
         *(uint32 *)target = val;
         break;
       case R_XTENSA_RELATIVE:
-        target = map_vaddr(m, r->r_offset);
+        target = map_vaddr_exec(m, r->r_offset);
         if(target == 0){
           ESP_LOGE(TAG, "relative target map failed: off=0x%x", (unsigned)r->r_offset);
           return -1;
@@ -543,7 +590,16 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
         val = *(uint32 *)target;
         if(val == 0)
           val = (uint32)r->r_addend;
-        val = (uint32)(uintptr_t)map_vaddr(m, val);
+        {
+          void *mapped;
+          if(vaddr_is_exec_section(m, eh, val))
+            mapped = map_vaddr_exec(m, val);
+          else
+            mapped = map_vaddr_data(m, val);
+          if(mapped == 0)
+            mapped = map_vaddr_exec(m, val);
+          val = (uint32)(uintptr_t)mapped;
+        }
         if(val == 0){
           ESP_LOGE(TAG, "relative value map failed: val=0x%x add=0x%x", (unsigned)*(uint32 *)target,
                    (unsigned)r->r_addend);
@@ -593,7 +649,10 @@ static int collect_exports(elf_module_t *m, const elf32_shdr_t *sym_sh, const el
     if(name[0] == 0)
       continue;
 
-    addr = map_vaddr(m, symtab[i].st_value);
+    if(type == STT_FUNC)
+      addr = map_vaddr_exec(m, symtab[i].st_value);
+    else
+      addr = map_vaddr_data(m, symtab[i].st_value);
     if(addr == 0)
       continue;
 
@@ -748,7 +807,7 @@ static int elf_module_load_from_image(const char *name, const void *image, uint3
     }
   }
 
-  m->entry_addr = map_vaddr(m, m->entry_vaddr);
+  m->entry_addr = map_vaddr_exec(m, m->entry_vaddr);
   if(m->entry_vaddr != 0 && m->entry_addr == 0){
     ESP_LOGE(TAG, "entry map failed");
     fail_reason = "entry map";
@@ -896,6 +955,22 @@ const void *elf_loader_translate_ptr(const void *ptr)
     if(up >= start && up < end && m->segs[i].shadow_mem){
       return m->segs[i].shadow_mem + (up - start);
     }
+    if(up >= start && up < end)
+      return m->segs[i].mem + (up - start);
+  }
+
+  /*
+   * Some applets pass raw ELF virtual addresses to host ABI calls.
+   * Translate those too so string/argv pointers are always readable.
+   */
+  for(i = 0; i < m->seg_count; i++){
+    uintptr_t start = (uintptr_t)m->segs[i].vaddr;
+    uintptr_t end = start + m->segs[i].memsz;
+    if(up >= start && up < end && m->segs[i].shadow_mem){
+      return m->segs[i].shadow_mem + (up - start);
+    }
+    if(up >= start && up < end)
+      return m->segs[i].mem + (up - start);
   }
   return ptr;
 }
