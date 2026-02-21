@@ -8,7 +8,9 @@
 
 #include "elf_loader.h"
 #include "esp_flash_disk.h"
+#include "fs.h"
 #include "hal.h"
+#include "xv6fs_ro.h"
 
 static int k_ticks(void)
 {
@@ -25,6 +27,11 @@ static int k_puts(const char *s)
   hal_console_putc('\r');
   hal_console_putc('\n');
   return 0;
+}
+
+static int k_fs_readdir(int index, char *name_out, int name_out_len, uint32 *size_out)
+{
+  return xv6fs_ro_list(index, name_out, name_out_len, size_out);
 }
 
 static void putc_console(int c)
@@ -89,17 +96,6 @@ static void print_hex_u8(uint8 x)
   putc_console(hexd[x & 0x0f]);
 }
 
-static void print_hex_u32(uint32 x)
-{
-  const char hexd[] = "0123456789abcdef";
-  int i;
-  puts_console("0x");
-  for(i = 7; i >= 0; i--){
-    uint8 nib = (x >> (i * 4)) & 0x0f;
-    putc_console(hexd[nib]);
-  }
-}
-
 static int split(char *line, char **argv, int max_args)
 {
   int argc = 0;
@@ -146,17 +142,12 @@ static void cmd_help(void)
   puts_line("commands:");
   puts_line("  help");
   puts_line("  echo <text>");
+  puts_line("  ls");
   puts_line("  mem");
   puts_line("  ticks");
   puts_line("  diskinfo");
   puts_line("  diskread <sector>");
   puts_line("  diskwrite <sector> <byte0-255>");
-  puts_line("  elfload <name> <sector> <nsectors>");
-  puts_line("  elfunload <name>");
-  puts_line("  elfls");
-  puts_line("  elfinfo <name>");
-  puts_line("  elfrun <name> [arg0 arg1 ...]");
-  puts_line("  elfcall <name> <symbol>");
   puts_line("  reboot");
 }
 
@@ -215,101 +206,66 @@ static void cmd_diskwrite(uint32 sector, uint8 value)
   puts_line("diskwrite ok");
 }
 
-static void cmd_elfload(const char *name, uint32 sector, uint32 nsectors)
+static void cmd_fsls(void)
 {
-  elf_module_t *m = 0;
-  if(elf_module_load_from_flash(name, sector, nsectors, &m) != 0){
-    puts_line("elfload: failed");
-    return;
+  int i = 0;
+  char name[DIRSIZ + 1];
+  uint32 size = 0;
+
+  while(xv6fs_ro_list(i, name, sizeof(name), &size) == 0){
+    puts_console(name);
+    puts_console(" ");
+    print_u32(size);
+    puts_line("B");
+    i++;
   }
-  puts_line("elfload: ok");
+  if(i == 0)
+    puts_line("fsls: empty");
 }
 
-static void cmd_elfunload(const char *name)
+static int try_run_elf_command(int argc, char **argv)
 {
-  if(elf_module_unload(name) != 0){
-    puts_line("elfunload: not found");
-    return;
-  }
-  puts_line("elfunload: ok");
-}
-
-static void cmd_elfls(void)
-{
-  const char *names[ELFLOADER_MAX_MODULES];
-  int n = 0;
-  elf_module_list(names, ELFLOADER_MAX_MODULES, &n);
-  if(n == 0){
-    puts_line("elfls: empty");
-    return;
-  }
-  for(int i = 0; i < n; i++)
-    puts_line(names[i]);
-}
-
-static void cmd_elfinfo(const char *name)
-{
-  elf_module_t *m = elf_module_find(name);
-  uint16 etype;
-  uint16 machine;
-  uint32 entry;
-  int nsegs;
-  int nexp;
-
-  if(m == 0){
-    puts_line("elfinfo: module not found");
-    return;
-  }
-  if(elf_module_info(m, &etype, &machine, &entry, &nsegs, &nexp) != 0){
-    puts_line("elfinfo: error");
-    return;
-  }
-
-  puts_console("etype=");
-  print_u32(etype);
-  puts_console(" machine=");
-  print_u32(machine);
-  puts_console(" entry=");
-  print_hex_u32(entry);
-  puts_console(" segs=");
-  print_u32((uint32)nsegs);
-  puts_console(" exports=");
-  print_u32((uint32)nexp);
-  puts_line("");
-}
-
-static void cmd_elfrun(const char *name, int argc, char **argv)
-{
-  elf_module_t *m = elf_module_find(name);
+  elf_module_t *m;
+  void *image = 0;
+  uint32 image_size = 0;
   int retv = 0;
+  char alt_name[ELFLOADER_NAME_MAX];
+
+  if(argc <= 0 || argv == 0 || argv[0] == 0 || argv[0][0] == 0)
+    return -1;
+
+  m = elf_module_find(argv[0]);
   if(m == 0){
-    puts_line("elfrun: module not found");
-    return;
+    if(xv6fs_ro_read_file_alloc(argv[0], &image, &image_size) != 0){
+      size_t n = strlen(argv[0]);
+      if(n + 4 >= sizeof(alt_name))
+        return -1;
+      memcpy(alt_name, argv[0], n);
+      memcpy(alt_name + n, ".elf", 5);
+      if(xv6fs_ro_read_file_alloc(alt_name, &image, &image_size) != 0){
+        puts_line("exec: file not found");
+        return -1;
+      }
+    }
+    if(elf_module_load_from_bytes(argv[0], image, image_size, &m) != 0){
+      free(image);
+      puts_line("exec: elf load failed");
+      return -1;
+    }
+    free(image);
   }
+
   if(elf_module_call_main(m, argc, argv, &retv) != 0){
-    puts_line("elfrun: entry failed");
-    return;
+    puts_line("exec: entry call failed");
+    return -1;
   }
-  puts_console("elfrun: return=");
-  print_u32((uint32)retv);
-  puts_line("");
-}
-
-static void cmd_elfcall(const char *name, const char *symbol)
-{
-  elf_module_t *m = elf_module_find(name);
-  int retv = 0;
-  if(m == 0){
-    puts_line("elfcall: module not found");
-    return;
+  if(retv != 0){
+    puts_console(argv[0]);
+    puts_console(": exit=");
+    print_u32((uint32)retv);
+    puts_line("");
   }
-  if(elf_module_call0(m, symbol, &retv) != 0){
-    puts_line("elfcall: symbol failed");
-    return;
-  }
-  puts_console("elfcall: return=");
-  print_u32((uint32)retv);
-  puts_line("");
+  return 0;
 }
 
 static void register_default_symbols(void)
@@ -328,6 +284,7 @@ static void register_default_symbols(void)
     { "usleep", (void *)usleep },
     { "k_ticks", (void *)k_ticks },
     { "k_puts", (void *)k_puts },
+    { "xv6fs_readdir", (void *)k_fs_readdir },
   };
   (void)elf_loader_register_host_symbols(syms, (int)(sizeof(syms) / sizeof(syms[0])));
 }
@@ -369,10 +326,17 @@ void ksh_run(void)
         cmd_help();
       } else if(strcmp(argv[0], "echo") == 0){
         if(argc >= 2){
-          puts_line(argv[1]);
+          for(int i = 1; i < argc; i++){
+            puts_console(argv[i]);
+            if(i + 1 < argc)
+              putc_console(' ');
+          }
+          puts_line("");
         } else {
           puts_line("");
         }
+      } else if(strcmp(argv[0], "ls") == 0){
+        cmd_fsls();
       } else if(strcmp(argv[0], "mem") == 0){
         cmd_mem();
       } else if(strcmp(argv[0], "ticks") == 0){
@@ -393,41 +357,12 @@ void ksh_run(void)
           puts_line("usage: diskwrite <sector> <byte0-255>");
         else
           cmd_diskwrite(sector, (uint8)value);
-      } else if(strcmp(argv[0], "elfload") == 0){
-        uint32 sector = (argc >= 3) ? parse_u32(argv[2], &ok) : 0;
-        int ok2 = 0;
-        uint32 nsectors = (argc >= 4) ? parse_u32(argv[3], &ok2) : 0;
-        if(argc < 4 || !ok || !ok2 || nsectors == 0)
-          puts_line("usage: elfload <name> <sector> <nsectors>");
-        else
-          cmd_elfload(argv[1], sector, nsectors);
-      } else if(strcmp(argv[0], "elfunload") == 0){
-        if(argc < 2)
-          puts_line("usage: elfunload <name>");
-        else
-          cmd_elfunload(argv[1]);
-      } else if(strcmp(argv[0], "elfls") == 0){
-        cmd_elfls();
-      } else if(strcmp(argv[0], "elfinfo") == 0){
-        if(argc < 2)
-          puts_line("usage: elfinfo <name>");
-        else
-          cmd_elfinfo(argv[1]);
-      } else if(strcmp(argv[0], "elfrun") == 0){
-        if(argc < 2)
-          puts_line("usage: elfrun <name> [arg0 arg1 ...]");
-        else
-          cmd_elfrun(argv[1], argc - 1, &argv[1]);
-      } else if(strcmp(argv[0], "elfcall") == 0){
-        if(argc < 3)
-          puts_line("usage: elfcall <name> <symbol>");
-        else
-          cmd_elfcall(argv[1], argv[2]);
       } else if(strcmp(argv[0], "reboot") == 0){
         puts_line("rebooting...");
         hal_reboot();
       } else {
-        puts_line("unknown command");
+        if(try_run_elf_command(argc, argv) != 0)
+          puts_line("unknown command");
       }
 
       len = 0;
