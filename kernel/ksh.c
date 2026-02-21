@@ -162,6 +162,7 @@ static void cmd_help(void)
   puts_line("  help");
   puts_line("  <elf-command> [args]");
   puts_line("  <elf-command> [args] &");
+  puts_line("  ps");
   puts_line("  jobs");
   puts_line("  wait [jobid]");
   puts_line("  reboot");
@@ -280,6 +281,29 @@ static void cmd_jobs(void)
     (void)xSemaphoreGive(g_jobs_lock);
   if(!any)
     puts_line("jobs: empty");
+}
+
+static void cmd_ps(void)
+{
+  int i;
+  int any = 0;
+  puts_line("PID STATE CMD");
+  puts_line("0 RUNNING ksh");
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  for(i = 0; i < KSH_MAX_JOBS; i++){
+    if(!g_jobs[i].used)
+      continue;
+    print_u32((uint32)g_jobs[i].id);
+    putc_console(' ');
+    puts_console(g_jobs[i].done ? "DONE " : "RUN  ");
+    puts_line(g_jobs[i].cmd);
+    any = 1;
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+  if(!any)
+    puts_line("- NOJOBS -");
 }
 
 static void job_task(void *arg)
@@ -547,6 +571,8 @@ void ksh_run(void)
 
       if(strcmp(argv[0], "help") == 0){
         cmd_help();
+      } else if(strcmp(argv[0], "ps") == 0){
+        cmd_ps();
       } else if(strcmp(argv[0], "jobs") == 0){
         cmd_jobs();
       } else if(strcmp(argv[0], "wait") == 0){

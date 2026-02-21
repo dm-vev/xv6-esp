@@ -73,7 +73,7 @@ ESP QEMU smoke test:
 
 Includes PTY check via `ptydemo` (`/dev/ptmx` <-> dynamic `/dev/pts/N`).
 Also checks two-ELF PTY flow: `ptysend` -> `ptyrecv`.
-Shell supports background jobs: `cmd &`, `jobs`, `wait [jobid]`.
+Shell supports background jobs: `cmd &`, `ps`, `jobs`, `wait [jobid]`.
 
 The ESP build is intentionally separate from the original `make qemu`
 flow and does not replace the RISC-V path.

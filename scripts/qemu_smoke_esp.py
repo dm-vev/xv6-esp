@@ -160,6 +160,10 @@ def main() -> int:
         out = cmd(sock, "jobs")
         assert "sleep 400" in out
 
+        out = cmd(sock, "ps")
+        assert "PID STATE CMD" in out
+        assert "ksh" in out
+
         out = cmd(sock, "wait")
         assert "wait: done" in out
 
