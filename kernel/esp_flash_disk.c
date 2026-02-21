@@ -1,5 +1,8 @@
 #include "esp_flash_disk.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
@@ -73,12 +76,13 @@ int esp_flash_disk_read(uint32 sector, void *dst, uint32 sector_count)
 
 int esp_flash_disk_write(uint32 sector, const void *src, uint32 sector_count)
 {
-  esp_err_t err;
+  esp_err_t err = ESP_OK;
   uint32 off;
   uint32 len;
-  uint32 erase_base;
-  uint32 erase_len;
+  uint32 pos;
+  const uint8 *in;
   const uint32 erase_sz = XV6_FLASH_ERASE_SIZE;
+  uint8 *scratch = 0;
 
   if(g_part == 0 || src == 0)
     return -1;
@@ -91,16 +95,43 @@ int esp_flash_disk_write(uint32 sector, const void *src, uint32 sector_count)
 
   off = sector * XV6_FLASH_SECTOR_SIZE;
   len = sector_count * XV6_FLASH_SECTOR_SIZE;
-  erase_base = (off / erase_sz) * erase_sz;
-  erase_len = ((off + len - erase_base + erase_sz - 1) / erase_sz) * erase_sz;
+  in = (const uint8 *)src;
 
   if(xSemaphoreTake(g_disk_mu, portMAX_DELAY) != pdTRUE)
     return -1;
 
-  err = esp_partition_erase_range(g_part, erase_base, erase_len);
-  if(err == ESP_OK)
-    err = esp_partition_write(g_part, off, src, len);
+  scratch = malloc(erase_sz);
+  if(scratch == 0){
+    xSemaphoreGive(g_disk_mu);
+    return -1;
+  }
 
+  pos = off;
+  while(pos < off + len && err == ESP_OK){
+    uint32 blk_base = (pos / erase_sz) * erase_sz;
+    uint32 blk_end = blk_base + erase_sz;
+    uint32 wr_start = pos;
+    uint32 wr_end = off + len;
+    uint32 copy_len;
+    uint32 copy_off;
+
+    if(wr_end > blk_end)
+      wr_end = blk_end;
+    copy_off = wr_start - blk_base;
+    copy_len = wr_end - wr_start;
+
+    err = esp_partition_read(g_part, blk_base, scratch, erase_sz);
+    if(err != ESP_OK)
+      break;
+    memcpy(scratch + copy_off, in + (wr_start - off), copy_len);
+    err = esp_partition_erase_range(g_part, blk_base, erase_sz);
+    if(err != ESP_OK)
+      break;
+    err = esp_partition_write(g_part, blk_base, scratch, erase_sz);
+    pos = wr_end;
+  }
+
+  free(scratch);
   xSemaphoreGive(g_disk_mu);
   return (err == ESP_OK) ? 0 : -1;
 }

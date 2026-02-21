@@ -17,6 +17,7 @@ typedef struct elf_module elf_module_t;
 int elf_loader_init(void);
 int elf_loader_register_host_symbols(const elf_host_symbol_t *syms, int count);
 
+int elf_module_load_from_bytes(const char *name, const void *image, uint32 image_size, elf_module_t **out_mod);
 int elf_module_load_from_flash(const char *name, uint32 sector, uint32 sector_count, elf_module_t **out_mod);
 int elf_module_unload(const char *name);
 elf_module_t *elf_module_find(const char *name);

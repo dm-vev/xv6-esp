@@ -18,6 +18,7 @@
 #define EM_XTENSA 94
 
 #define PT_LOAD 1
+#define PF_X 0x1
 
 #define SHT_SYMTAB 2
 #define SHT_STRTAB 3
@@ -34,9 +35,18 @@
 
 #define R_XTENSA_NONE 0
 #define R_XTENSA_32 1
+#define R_XTENSA_RTLD 2
 #define R_XTENSA_GLOB_DAT 3
 #define R_XTENSA_JMP_SLOT 4
 #define R_XTENSA_RELATIVE 5
+#define R_XTENSA_PLT 6
+#define R_XTENSA_OP0 8
+#define R_XTENSA_OP1 9
+#define R_XTENSA_OP2 10
+#define R_XTENSA_ASM_EXPAND 11
+#define R_XTENSA_ASM_SIMPLIFY 12
+#define R_XTENSA_SLOT0_OP 20
+#define R_XTENSA_SLOT14_ALT 49
 
 typedef struct __attribute__((packed)) {
   uint8 e_ident[16];
@@ -153,6 +163,19 @@ static int read_flash_image(uint32 sector, uint32 sector_count, uint8 **out, uin
   return 0;
 }
 
+static int load_image_copy(const void *image, uint32 image_size, uint8 **out_copy)
+{
+  uint8 *copy;
+  if(image == 0 || out_copy == 0 || image_size == 0)
+    return -1;
+  copy = (uint8 *)heap_caps_malloc(image_size, MALLOC_CAP_8BIT);
+  if(copy == 0)
+    return -1;
+  memcpy(copy, image, image_size);
+  *out_copy = copy;
+  return 0;
+}
+
 static void module_reset(elf_module_t *m)
 {
   int i;
@@ -204,7 +227,18 @@ static int parse_segments(elf_module_t *m, const elf32_ehdr_t *eh)
     if(ph->p_offset + ph->p_filesz > m->image_size)
       return -1;
 
-    dst = (uint8 *)heap_caps_malloc(ph->p_memsz, MALLOC_CAP_8BIT);
+    uint32 caps = MALLOC_CAP_8BIT;
+    if((ph->p_flags & PF_X) != 0){
+#ifdef MALLOC_CAP_EXEC
+      caps = MALLOC_CAP_EXEC;
+#else
+      caps = MALLOC_CAP_IRAM_8BIT;
+#endif
+    }
+    dst = (uint8 *)heap_caps_malloc(ph->p_memsz, caps);
+    if(dst == 0 && (ph->p_flags & PF_X) != 0){
+      dst = (uint8 *)heap_caps_malloc(ph->p_memsz, MALLOC_CAP_IRAM_8BIT);
+    }
     if(dst == 0)
       return -1;
 
@@ -301,6 +335,7 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
   const elf32_sym_t *symtab;
   const char *strtab;
   uint32 nsyms;
+  uint32 sym_sh_index;
 
   if(sym_sh == 0 || str_sh == 0)
     return 0;
@@ -309,6 +344,7 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
   if(str_sh->sh_offset + str_sh->sh_size > m->image_size)
     return -1;
 
+  sym_sh_index = (uint32)(sym_sh - sh);
   symtab = (const elf32_sym_t *)(m->image + sym_sh->sh_offset);
   strtab = (const char *)(m->image + str_sh->sh_offset);
   nsyms = sym_sh->sh_size / sizeof(elf32_sym_t);
@@ -319,6 +355,8 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
     const elf32_rela_t *rela;
 
     if(sh[i].sh_type != SHT_RELA)
+      continue;
+    if(sh[i].sh_link != sym_sh_index)
       continue;
     if(sh[i].sh_offset + sh[i].sh_size > m->image_size)
       return -1;
@@ -334,27 +372,41 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
       uint8 rtype = ELF_R_TYPE(r->r_info);
       const elf32_sym_t *sym;
       const char *sym_name;
-      void *target;
+      void *target = 0;
       void *resolved;
       uint32 val;
 
       if(symi >= nsyms)
+      {
+        ESP_LOGE(TAG, "reloc sym index out of range: sym=%u nsyms=%u", (unsigned)symi, (unsigned)nsyms);
         return -1;
+      }
       sym = &symtab[symi];
       sym_name = (sym->st_name < str_sh->sh_size) ? (strtab + sym->st_name) : "";
-
-      target = map_vaddr(m, r->r_offset);
-      if(target == 0)
-        return -1;
 
       resolved = resolve_symbol(m, sym, sym_name);
 
       switch(rtype){
       case R_XTENSA_NONE:
         break;
+      case R_XTENSA_RTLD:
+      case R_XTENSA_ASM_EXPAND:
+      case R_XTENSA_ASM_SIMPLIFY:
+      case R_XTENSA_OP0:
+      case R_XTENSA_OP1:
+      case R_XTENSA_OP2:
+        break;
+      case R_XTENSA_SLOT0_OP ... R_XTENSA_SLOT14_ALT:
+        break;
       case R_XTENSA_32:
+      case R_XTENSA_PLT:
       case R_XTENSA_GLOB_DAT:
       case R_XTENSA_JMP_SLOT:
+        target = map_vaddr(m, r->r_offset);
+        if(target == 0){
+          ESP_LOGE(TAG, "reloc target map failed: off=0x%x type=%u", (unsigned)r->r_offset, (unsigned)rtype);
+          return -1;
+        }
         if(resolved == 0){
           ESP_LOGE(TAG, "unresolved symbol: %s", sym_name);
           return -1;
@@ -363,9 +415,20 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
         *(uint32 *)target = val;
         break;
       case R_XTENSA_RELATIVE:
-        val = (uint32)(uintptr_t)map_vaddr(m, r->r_addend);
-        if(val == 0)
+        target = map_vaddr(m, r->r_offset);
+        if(target == 0){
+          ESP_LOGE(TAG, "relative target map failed: off=0x%x", (unsigned)r->r_offset);
           return -1;
+        }
+        val = *(uint32 *)target;
+        if(val == 0)
+          val = (uint32)r->r_addend;
+        val = (uint32)(uintptr_t)map_vaddr(m, val);
+        if(val == 0){
+          ESP_LOGE(TAG, "relative value map failed: val=0x%x add=0x%x", (unsigned)*(uint32 *)target,
+                   (unsigned)r->r_addend);
+          return -1;
+        }
         *(uint32 *)target = val;
         break;
       default:
@@ -494,10 +557,11 @@ static elf_module_t *alloc_module_slot(const char *name)
   return 0;
 }
 
-int elf_module_load_from_flash(const char *name, uint32 sector, uint32 sector_count, elf_module_t **out_mod)
+static int elf_module_load_from_image(const char *name, const void *image, uint32 image_size, elf_module_t **out_mod)
 {
   elf_module_t *m;
   elf32_ehdr_t *eh;
+  const char *fail_reason = "unknown";
   const elf32_shdr_t *symtab_sh = 0;
   const elf32_shdr_t *strtab_sh = 0;
   const elf32_shdr_t *dynsym_sh = 0;
@@ -516,36 +580,56 @@ int elf_module_load_from_flash(const char *name, uint32 sector, uint32 sector_co
   if(m == 0)
     return -1;
 
-  if(read_flash_image(sector, sector_count, &m->image, &m->image_size) != 0)
+  if(load_image_copy(image, image_size, &m->image) != 0){
+    fail_reason = "image copy";
     goto fail;
+  }
+  m->image_size = image_size;
 
   eh = (elf32_ehdr_t *)m->image;
-  if(validate_elf_header(eh, m->image_size) != 0)
+  if(validate_elf_header(eh, m->image_size) != 0){
+    fail_reason = "header";
     goto fail;
+  }
 
   m->etype = eh->e_type;
   m->machine = eh->e_machine;
   m->entry_vaddr = eh->e_entry;
 
-  if(parse_segments(m, eh) != 0)
+  if(parse_segments(m, eh) != 0){
+    fail_reason = "segments";
     goto fail;
+  }
 
-  if(find_symtab_sections(m, eh, &symtab_sh, &strtab_sh, &dynsym_sh, &dynstr_sh) != 0)
+  if(find_symtab_sections(m, eh, &symtab_sh, &strtab_sh, &dynsym_sh, &dynstr_sh) != 0){
+    fail_reason = "symtab sections";
     goto fail;
+  }
 
-  if(apply_relocations(m, eh, symtab_sh, strtab_sh) != 0)
-    goto fail;
-  if(apply_relocations(m, eh, dynsym_sh, dynstr_sh) != 0)
-    goto fail;
-
-  if(collect_exports(m, symtab_sh, strtab_sh) != 0)
-    goto fail;
-  if(collect_exports(m, dynsym_sh, dynstr_sh) != 0)
-    goto fail;
+  if(dynsym_sh && dynstr_sh){
+    if(apply_relocations(m, eh, dynsym_sh, dynstr_sh) != 0){
+      fail_reason = "dynsym reloc";
+      goto fail;
+    }
+    if(collect_exports(m, dynsym_sh, dynstr_sh) != 0){
+      fail_reason = "dynsym exports";
+      goto fail;
+    }
+  } else {
+    if(apply_relocations(m, eh, symtab_sh, strtab_sh) != 0){
+      fail_reason = "symtab reloc";
+      goto fail;
+    }
+    if(collect_exports(m, symtab_sh, strtab_sh) != 0){
+      fail_reason = "symtab exports";
+      goto fail;
+    }
+  }
 
   m->entry_addr = map_vaddr(m, m->entry_vaddr);
-  if(m->entry_addr == 0){
+  if(m->entry_vaddr != 0 && m->entry_addr == 0){
     ESP_LOGE(TAG, "entry map failed");
+    fail_reason = "entry map";
     goto fail;
   }
 
@@ -553,6 +637,7 @@ int elf_module_load_from_flash(const char *name, uint32 sector, uint32 sector_co
   return 0;
 
 fail:
+  ESP_LOGE(TAG, "module '%s' load failed: %s", name, fail_reason);
   module_reset(m);
   {
     int i;
@@ -564,6 +649,24 @@ fail:
     }
   }
   return -1;
+}
+
+int elf_module_load_from_bytes(const char *name, const void *image, uint32 image_size, elf_module_t **out_mod)
+{
+  return elf_module_load_from_image(name, image, image_size, out_mod);
+}
+
+int elf_module_load_from_flash(const char *name, uint32 sector, uint32 sector_count, elf_module_t **out_mod)
+{
+  uint8 *image = 0;
+  uint32 image_size = 0;
+  int rc;
+
+  if(read_flash_image(sector, sector_count, &image, &image_size) != 0)
+    return -1;
+  rc = elf_module_load_from_image(name, image, image_size, out_mod);
+  free(image);
+  return rc;
 }
 
 int elf_module_unload(const char *name)
@@ -615,10 +718,15 @@ int elf_module_call_main(elf_module_t *mod, int argc, char **argv, int *retv)
   typedef int (*main_fn_t)(int argc, char **argv);
   main_fn_t fn;
 
-  if(mod == 0 || mod->entry_addr == 0)
+  if(mod == 0)
     return -1;
 
   fn = (main_fn_t)mod->entry_addr;
+  if(fn == 0)
+    fn = (main_fn_t)elf_module_find_symbol(mod, "main");
+  if(fn == 0)
+    return -1;
+
   if(retv)
     *retv = fn(argc, argv);
   else

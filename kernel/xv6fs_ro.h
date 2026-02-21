@@ -1,0 +1,16 @@
+#ifndef XV6_XV6FS_RO_H
+#define XV6_XV6FS_RO_H
+
+#include "types.h"
+
+int xv6fs_ro_init(void);
+int xv6fs_ro_flash_image(const uint8 *image, uint32 image_size);
+int xv6fs_ro_list(int index, char *name_out, int name_out_len, uint32 *size_out);
+int xv6fs_ro_read_file_alloc(const char *name, void **out_data, uint32 *out_size);
+int xv6fs_read_file_alloc_path(const char *path, void **out_data, uint32 *out_size);
+int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_len, uint16 *type_out,
+                    uint32 *size_out);
+int xv6fs_write_file_path(const char *path, const void *data, uint32 size);
+int xv6fs_mkdir_path(const char *path);
+
+#endif

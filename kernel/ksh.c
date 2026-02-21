@@ -8,13 +8,18 @@
 
 #include "elf_loader.h"
 #include "esp_flash_disk.h"
-#include "fs.h"
 #include "hal.h"
+#include "param.h"
 #include "xv6fs_ro.h"
 
 static int k_ticks(void)
 {
   return (int)hal_ticks();
+}
+
+static int k_free_heap(void)
+{
+  return (int)hal_free_heap_bytes();
 }
 
 static int k_puts(const char *s)
@@ -29,9 +34,10 @@ static int k_puts(const char *s)
   return 0;
 }
 
-static int k_fs_readdir(int index, char *name_out, int name_out_len, uint32 *size_out)
+static int k_fs_readdir_path(const char *path, int index, char *name_out, int name_out_len, uint16 *type_out,
+                             uint32 *size_out)
 {
-  return xv6fs_ro_list(index, name_out, name_out_len, size_out);
+  return xv6fs_list_path(path, index, name_out, name_out_len, type_out, size_out);
 }
 
 static void putc_console(int c)
@@ -89,13 +95,6 @@ static void print_u64(uint64 v)
     putc_console(tmp[--i]);
 }
 
-static void print_hex_u8(uint8 x)
-{
-  const char hexd[] = "0123456789abcdef";
-  putc_console(hexd[(x >> 4) & 0x0f]);
-  putc_console(hexd[x & 0x0f]);
-}
-
 static int split(char *line, char **argv, int max_args)
 {
   int argc = 0;
@@ -118,109 +117,12 @@ static int split(char *line, char **argv, int max_args)
   return argc;
 }
 
-static uint32 parse_u32(const char *s, int *ok)
-{
-  uint32 v = 0;
-  const char *p = s;
-
-  *ok = 0;
-  if(*p == 0)
-    return 0;
-
-  while(*p != 0){
-    if(*p < '0' || *p > '9')
-      return 0;
-    v = v * 10u + (uint32)(*p - '0');
-    p++;
-  }
-  *ok = 1;
-  return v;
-}
-
 static void cmd_help(void)
 {
   puts_line("commands:");
   puts_line("  help");
-  puts_line("  echo <text>");
-  puts_line("  ls");
-  puts_line("  mem");
-  puts_line("  ticks");
-  puts_line("  diskinfo");
-  puts_line("  diskread <sector>");
-  puts_line("  diskwrite <sector> <byte0-255>");
+  puts_line("  <elf-command> [args]");
   puts_line("  reboot");
-}
-
-static void cmd_mem(void)
-{
-  puts_console("free_heap=");
-  print_u64(hal_free_heap_bytes());
-  puts_line(" bytes");
-}
-
-static void cmd_ticks(void)
-{
-  puts_console("ticks=");
-  print_u64(hal_ticks());
-  puts_line("");
-}
-
-static void cmd_diskinfo(void)
-{
-  puts_console("disk sectors=");
-  print_u32(esp_flash_disk_num_sectors());
-  puts_line("");
-}
-
-static void cmd_diskread(uint32 sector)
-{
-  uint8 buf[XV6_FLASH_SECTOR_SIZE];
-  int rc = esp_flash_disk_read(sector, buf, 1);
-  if(rc != 0){
-    puts_line("diskread error");
-    return;
-  }
-
-  puts_console("sector ");
-  print_u32(sector);
-  puts_console(": ");
-  for(int i = 0; i < 16; i++){
-    print_hex_u8(buf[i]);
-    putc_console(' ');
-  }
-  puts_line("");
-}
-
-static void cmd_diskwrite(uint32 sector, uint8 value)
-{
-  uint8 buf[XV6_FLASH_SECTOR_SIZE];
-
-  for(uint32 i = 0; i < XV6_FLASH_SECTOR_SIZE; i++)
-    buf[i] = value;
-
-  if(esp_flash_disk_write(sector, buf, 1) != 0){
-    puts_line("diskwrite error");
-    return;
-  }
-
-  puts_line("diskwrite ok");
-}
-
-static void cmd_fsls(void)
-{
-  int i = 0;
-  char name[DIRSIZ + 1];
-  uint32 size = 0;
-
-  while(xv6fs_ro_list(i, name, sizeof(name), &size) == 0){
-    puts_console(name);
-    puts_console(" ");
-    print_u32(size);
-    puts_line("B");
-    i++;
-  }
-  if(i == 0)
-    puts_line("fsls: empty");
 }
 
 static int try_run_elf_command(int argc, char **argv)
@@ -229,23 +131,35 @@ static int try_run_elf_command(int argc, char **argv)
   void *image = 0;
   uint32 image_size = 0;
   int retv = 0;
-  char alt_name[ELFLOADER_NAME_MAX];
+  char pathbuf[MAXPATH];
+  const char *paths[] = { "/bin", "/usr/bin", "/" };
+  int pi;
 
   if(argc <= 0 || argv == 0 || argv[0] == 0 || argv[0][0] == 0)
     return -1;
 
   m = elf_module_find(argv[0]);
   if(m == 0){
-    if(xv6fs_ro_read_file_alloc(argv[0], &image, &image_size) != 0){
-      size_t n = strlen(argv[0]);
-      if(n + 4 >= sizeof(alt_name))
-        return -1;
-      memcpy(alt_name, argv[0], n);
-      memcpy(alt_name + n, ".elf", 5);
-      if(xv6fs_ro_read_file_alloc(alt_name, &image, &image_size) != 0){
-        puts_line("exec: file not found");
-        return -1;
+    if(strchr(argv[0], '/')){
+      if(xv6fs_read_file_alloc_path(argv[0], &image, &image_size) != 0){
+        if(snprintf(pathbuf, sizeof(pathbuf), "%s.elf", argv[0]) > 0)
+          (void)xv6fs_read_file_alloc_path(pathbuf, &image, &image_size);
       }
+    } else {
+      for(pi = 0; pi < (int)(sizeof(paths) / sizeof(paths[0])); pi++){
+        int n = snprintf(pathbuf, sizeof(pathbuf), "%s/%s", paths[pi], argv[0]);
+        if(n <= 0 || n >= (int)sizeof(pathbuf))
+          continue;
+        if(xv6fs_read_file_alloc_path(pathbuf, &image, &image_size) == 0)
+          break;
+        if(snprintf(pathbuf, sizeof(pathbuf), "%s/%s.elf", paths[pi], argv[0]) > 0 &&
+           xv6fs_read_file_alloc_path(pathbuf, &image, &image_size) == 0)
+          break;
+      }
+    }
+    if(image == 0){
+      puts_line("exec: command not found");
+      return -1;
     }
     if(elf_module_load_from_bytes(argv[0], image, image_size, &m) != 0){
       free(image);
@@ -284,7 +198,10 @@ static void register_default_symbols(void)
     { "usleep", (void *)usleep },
     { "k_ticks", (void *)k_ticks },
     { "k_puts", (void *)k_puts },
-    { "xv6fs_readdir", (void *)k_fs_readdir },
+    { "k_free_heap", (void *)k_free_heap },
+    { "xv6fs_readdir_path", (void *)k_fs_readdir_path },
+    { "xv6fs_write_file_path", (void *)xv6fs_write_file_path },
+    { "xv6fs_mkdir_path", (void *)xv6fs_mkdir_path },
   };
   (void)elf_loader_register_host_symbols(syms, (int)(sizeof(syms) / sizeof(syms[0])));
 }
@@ -311,7 +228,6 @@ void ksh_run(void)
     if(c == '\r' || c == '\n'){
       char *argv[16];
       int argc;
-      int ok;
       line[len] = 0;
       puts_line("");
 
@@ -324,39 +240,6 @@ void ksh_run(void)
 
       if(strcmp(argv[0], "help") == 0){
         cmd_help();
-      } else if(strcmp(argv[0], "echo") == 0){
-        if(argc >= 2){
-          for(int i = 1; i < argc; i++){
-            puts_console(argv[i]);
-            if(i + 1 < argc)
-              putc_console(' ');
-          }
-          puts_line("");
-        } else {
-          puts_line("");
-        }
-      } else if(strcmp(argv[0], "ls") == 0){
-        cmd_fsls();
-      } else if(strcmp(argv[0], "mem") == 0){
-        cmd_mem();
-      } else if(strcmp(argv[0], "ticks") == 0){
-        cmd_ticks();
-      } else if(strcmp(argv[0], "diskinfo") == 0){
-        cmd_diskinfo();
-      } else if(strcmp(argv[0], "diskread") == 0){
-        uint32 sector = (argc >= 2) ? parse_u32(argv[1], &ok) : 0;
-        if(argc < 2 || !ok)
-          puts_line("usage: diskread <sector>");
-        else
-          cmd_diskread(sector);
-      } else if(strcmp(argv[0], "diskwrite") == 0){
-        uint32 sector = (argc >= 2) ? parse_u32(argv[1], &ok) : 0;
-        int ok2 = 0;
-        uint32 value = (argc >= 3) ? parse_u32(argv[2], &ok2) : 0;
-        if(argc < 3 || !ok || !ok2 || value > 255u)
-          puts_line("usage: diskwrite <sector> <byte0-255>");
-        else
-          cmd_diskwrite(sector, (uint8)value);
       } else if(strcmp(argv[0], "reboot") == 0){
         puts_line("rebooting...");
         hal_reboot();
