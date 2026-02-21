@@ -1,13 +1,4 @@
-extern int printf(const char *fmt, ...);
-extern unsigned int strlen(const char *s);
-extern void *memcpy(void *dst, const void *src, unsigned int n);
-extern int xv6_open(const char *path, int flags);
-extern int xv6_write(int fd, const void *buf, unsigned int size);
-extern int xv6_close(int fd);
-
-#define O_WRONLY 0x0001
-#define O_CREAT  0x0200
-#define O_TRUNC  0x0400
+#include "xv6_user.h"
 
 int main(int argc, char **argv)
 {

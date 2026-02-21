@@ -1,7 +1,4 @@
-typedef unsigned int u32;
-
-extern int printf(const char *fmt, ...);
-extern int usleep(unsigned int usec);
+#include "xv6_user.h"
 
 static int parse_u32(const char *s, u32 *out)
 {

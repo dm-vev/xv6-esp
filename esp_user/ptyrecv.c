@@ -1,11 +1,4 @@
-typedef unsigned int u32;
-
-extern int printf(const char *fmt, ...);
-extern int xv6_open(const char *path, int flags);
-extern int xv6_read(int fd, void *buf, u32 size);
-extern int xv6_close(int fd);
-
-#define O_RDWR 0x0002
+#include "xv6_user.h"
 
 int main(int argc, char **argv)
 {

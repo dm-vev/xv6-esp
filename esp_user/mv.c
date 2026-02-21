@@ -1,16 +1,4 @@
-typedef unsigned int u32;
-
-extern int printf(const char *fmt, ...);
-extern int xv6_open(const char *path, int flags);
-extern int xv6_read(int fd, void *buf, u32 size);
-extern int xv6_write(int fd, const void *buf, u32 size);
-extern int xv6_close(int fd);
-extern int xv6fs_unlink_path(const char *path);
-
-#define O_RDONLY 0x0000
-#define O_WRONLY 0x0001
-#define O_CREAT  0x0200
-#define O_TRUNC  0x0400
+#include "xv6_user.h"
 
 int main(int argc, char **argv)
 {

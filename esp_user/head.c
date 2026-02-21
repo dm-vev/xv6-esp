@@ -1,12 +1,4 @@
-typedef unsigned int u32;
-
-extern int printf(const char *fmt, ...);
-extern int xv6_open(const char *path, int flags);
-extern int xv6_read(int fd, void *buf, u32 size);
-extern int xv6_write(int fd, const void *buf, u32 size);
-extern int xv6_close(int fd);
-
-#define O_RDONLY 0x0000
+#include "xv6_user.h"
 
 static u32 parse_u32(const char *s)
 {

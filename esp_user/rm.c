@@ -1,5 +1,4 @@
-extern int printf(const char *fmt, ...);
-extern int xv6fs_unlink_path(const char *path);
+#include "xv6_user.h"
 
 int main(int argc, char **argv)
 {

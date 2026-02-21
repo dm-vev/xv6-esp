@@ -1,5 +1,4 @@
-extern int printf(const char *fmt, ...);
-extern int k_free_heap(void);
+#include "xv6_user.h"
 
 int main(int argc, char **argv)
 {
