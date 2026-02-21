@@ -1,0 +1,2 @@
+Linux-like /dev skeleton for xv6-esp32s3 image.
+Device nodes are placeholders in this FS image.
