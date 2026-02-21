@@ -4,12 +4,26 @@ import socket
 import subprocess
 import sys
 import time
+import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
-IDF_EXPORT = "source /tmp/esp-idf/export.sh >/dev/null"
+
+
+def resolve_idf_export() -> str:
+    candidates = []
+    if os.environ.get("IDF_PATH"):
+        candidates.append(Path(os.environ["IDF_PATH"]))
+    candidates.extend((Path("/root/esp-idf"), Path("/tmp/esp-idf")))
+    for p in candidates:
+        if p and (p / "export.sh").exists():
+            return f"source {p}/export.sh >/dev/null"
+    raise RuntimeError("ESP-IDF not found. Set IDF_PATH or install to /root/esp-idf.")
+
+
+IDF_EXPORT = resolve_idf_export()
 
 
 def run(cmd: str) -> None:
@@ -144,7 +158,7 @@ def main() -> int:
             job_ids.append(m.group(1))
 
         out = cmd(sock, "ps")
-        assert "PID STATE CMD" in out
+        assert "PID STATE EXIT REASON" in out
         assert "ksh" in out
 
         out = cmd(sock, "wait")

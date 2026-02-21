@@ -1,0 +1,35 @@
+name: ESP32 QEMU
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-qemu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ESP-IDF
+        run: |
+          git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          cd "$HOME/esp-idf"
+          ./install.sh esp32s3
+
+      - name: Build
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: QEMU Smoke
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          python3 ./scripts/qemu_smoke_esp.py
+
+      - name: QEMU Stress
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          python3 ./scripts/qemu_stress_esp.py
