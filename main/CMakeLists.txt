@@ -30,6 +30,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   set(ESP_USER_RM "${ESP_USER_DIR}/rm")
   set(ESP_USER_HEAD "${ESP_USER_DIR}/head")
   set(ESP_USER_DD "${ESP_USER_DIR}/dd")
+  set(ESP_USER_CP "${ESP_USER_DIR}/cp")
+  set(ESP_USER_MV "${ESP_USER_DIR}/mv")
   set(FSROOT_STAMP "${CMAKE_BINARY_DIR}/fsroot_stage.stamp")
   file(GLOB_RECURSE FSROOT_SOURCE_FILES CONFIGURE_DEPENDS "${XV6FS_ROOT_DIR}/*")
   set(ESP_USER_FLAGS
@@ -133,6 +135,22 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   )
 
   add_custom_command(
+    OUTPUT ${ESP_USER_CP}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
+    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_CP} ${PROJECT_DIR}/esp_user/cp.c
+    DEPENDS ${PROJECT_DIR}/esp_user/cp.c
+    VERBATIM
+  )
+
+  add_custom_command(
+    OUTPUT ${ESP_USER_MV}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
+    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_MV} ${PROJECT_DIR}/esp_user/mv.c
+    DEPENDS ${PROJECT_DIR}/esp_user/mv.c
+    VERBATIM
+  )
+
+  add_custom_command(
     OUTPUT ${FSROOT_STAMP}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6FS_ROOT_DIR}
     COMMAND ${CMAKE_COMMAND} -E rm -rf ${FSROOT_STAGE}
@@ -148,9 +166,12 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_RM} ${FSROOT_BIN}/rm
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_HEAD} ${FSROOT_BIN}/head
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_DD} ${FSROOT_BIN}/dd
+    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_CP} ${FSROOT_BIN}/cp
+    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_MV} ${FSROOT_BIN}/mv
     COMMAND ${CMAKE_COMMAND} -E touch ${FSROOT_STAMP}
     DEPENDS ${ESP_USER_LS} ${ESP_USER_ECHO} ${ESP_USER_MEM} ${ESP_USER_TICKS} ${ESP_USER_MKDIR}
             ${ESP_USER_WRITE} ${ESP_USER_CAT} ${ESP_USER_RM} ${ESP_USER_HEAD} ${ESP_USER_DD}
+            ${ESP_USER_CP} ${ESP_USER_MV}
             ${FSROOT_SOURCE_FILES}
     VERBATIM
   )
@@ -173,4 +194,10 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
 
   esptool_py_flash_to_partition(flash "xv6fs" "${XV6FS_IMAGE}")
   add_dependencies(flash xv6fs_img_gen)
+
+  add_custom_target(qemu_smoke
+    COMMAND ${PROJECT_DIR}/scripts/qemu_smoke_esp.py
+    DEPENDS xv6fs_img_gen
+    USES_TERMINAL
+  )
 endif()

@@ -69,6 +69,7 @@ Filesystem image source:
 
 ESP QEMU smoke test:
 - `./scripts/qemu_smoke_esp.py`
+- `idf.py qemu_smoke`
 
 The ESP build is intentionally separate from the original `make qemu`
 flow and does not replace the RISC-V path.

@@ -144,6 +144,15 @@ def main() -> int:
         out = cmd(sock, "ls /tmp")
         assert "dd.bin" in out
 
+        out = cmd(sock, "cp /tmp/dd.bin /tmp/dd2.bin")
+        assert "xv6> " in out
+
+        out = cmd(sock, "mv /tmp/dd2.bin /tmp/dd3.bin")
+        assert "xv6> " in out
+
+        out = cmd(sock, "ls /tmp")
+        assert "dd3.bin" in out
+
         out = cmd(sock, "write /dev/full x")
         assert "write: failed: /dev/full" in out
 
