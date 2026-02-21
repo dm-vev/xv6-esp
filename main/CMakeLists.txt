@@ -166,4 +166,10 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     DEPENDS xv6fs_img_gen
     USES_TERMINAL
   )
+
+  add_custom_target(static_analysis
+    COMMAND ${PROJECT_DIR}/scripts/static_analysis.sh
+    DEPENDS xv6fs_img_gen
+    USES_TERMINAL
+  )
 endif()

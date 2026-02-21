@@ -16,3 +16,8 @@ kernel/kernel
 user/usys.S
 .gdbinit
 TAGS
+.ruff_cache/
+.semgrep/
+.mypy_cache/
+.pytest_cache/
+compile_commands.json

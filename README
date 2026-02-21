@@ -98,6 +98,24 @@ ESP QEMU smoke test:
 - `idf.py qemu_stress`
 - `./scripts/qemu_soak_esp.py`
 - `idf.py qemu_soak`
+- `./scripts/qemu_applets_esp.py`
+- `idf.py qemu_applets`
+- `./scripts/hil_applets_esp.py --port /dev/ttyACM0`
+- `idf.py hil_applets`
+
+Static analysis:
+- unified local runner: `./scripts/static_analysis.sh`
+- strict mode (CI-equivalent): `STRICT=1 BUILD_DIR=build ./scripts/static_analysis.sh`
+- CMake target: `idf.py static_analysis`
+- CI workflow: `.github/workflows/static-analysis.yml`
+
+Static toolset currently integrated:
+- `cppcheck` (C/C++)
+- `clang-tidy` (C/C++, via `build/compile_commands.json`)
+- `semgrep` (SAST, `--config auto`)
+- `ruff` (Python lint)
+- `bandit` (Python security checks)
+- `codespell` (typo scan)
 
 Includes PTY check via `ptydemo` (`/dev/ptmx` <-> dynamic `/dev/pts/N`).
 Also checks two-ELF PTY flow: `ptysend` -> `ptyrecv`.

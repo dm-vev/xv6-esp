@@ -1,0 +1,6 @@
+[codespell]
+skip = .git,build,.vscode,fs.img
+check-filenames = true
+check-hidden = true
+quiet-level = 2
+

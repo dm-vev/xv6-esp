@@ -1,0 +1,13 @@
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "N", "S"]
+ignore = [
+  "S603", # subprocess command by design in automation scripts
+  "S607", # partial path by design in automation scripts
+]
+
+[lint.per-file-ignores]
+"scripts/*.py" = ["S101"] # asserts are used for test orchestration
+
