@@ -1,5 +1,6 @@
 #include "ksh.h"
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,10 @@
 #define KSH_MAX_JOBS 32
 #define KSH_MAX_ARGS 32
 #define KSH_MAX_STAGES 8
+#define KSH_MAX_ENV 16
+#define KSH_ENV_KEY 24
+#define KSH_ENV_VAL 128
+#define KSH_BG_STACK 8192
 
 enum {
   JOB_REASON_NONE = 0,
@@ -49,6 +54,7 @@ typedef struct {
   int out_fd;
   int err_fd;
   int max_heap_kb;
+  char cwd[MAXPATH];
 } ksh_job_task_t;
 
 typedef struct {
@@ -57,12 +63,19 @@ typedef struct {
   int err_fd;
 } ksh_io_t;
 
+typedef struct {
+  int used;
+  char key[KSH_ENV_KEY];
+  char val[KSH_ENV_VAL];
+} ksh_env_t;
+
 static ksh_job_t g_jobs[KSH_MAX_JOBS];
 static int g_next_job_id = 1;
 static uint32 g_ulimit_ms = 0;
 static int g_ulimit_heap_kb = 0;
 static SemaphoreHandle_t g_jobs_lock;
 static SemaphoreHandle_t g_loader_lock;
+static ksh_env_t g_env[KSH_MAX_ENV];
 
 static int dispatch_command(int argc, char **argv, int run_bg);
 
@@ -93,9 +106,22 @@ static int k_fs_readdir_path(const char *path, int index, char *name_out, int na
   return xv6fs_list_path(path, index, name_out, name_out_len, type_out, size_out);
 }
 
-static void putc_console(int c)
+static void tty_putc(int c)
 {
   hal_console_putc(c);
+}
+
+static void tty_puts(const char *s)
+{
+  while(*s)
+    tty_putc(*s++);
+}
+
+static void putc_console(int c)
+{
+  char ch = (char)c;
+  if(xv6_write(1, &ch, 1) != 1)
+    tty_putc(c);
 }
 
 static void puts_console(const char *s)
@@ -104,10 +130,62 @@ static void puts_console(const char *s)
     putc_console(*s++);
 }
 
+static void eputc_console(int c)
+{
+  char ch = (char)c;
+  if(xv6_write(2, &ch, 1) != 1)
+    hal_console_putc(c);
+}
+
+static void eputs_console(const char *s)
+{
+  while(*s)
+    eputc_console(*s++);
+}
+
 static void puts_line(const char *s)
 {
   puts_console(s);
   puts_console("\r\n");
+}
+
+static void eputs_line(const char *s)
+{
+  eputs_console(s);
+  eputs_console("\r\n");
+}
+
+static void k_vprintf_fd(int fd, const char *fmt, va_list ap)
+{
+  char buf[256];
+  int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  if(n < 0)
+    return;
+  if(n >= (int)sizeof(buf))
+    n = (int)sizeof(buf) - 1;
+  if(fd == 2){
+    if(xv6_write(2, buf, (uint32)n) != n)
+      return;
+  } else {
+    if(xv6_write(1, buf, (uint32)n) != n)
+      return;
+  }
+}
+
+static void k_printf(const char *fmt, ...)
+{
+  va_list ap;
+  va_start(ap, fmt);
+  k_vprintf_fd(1, fmt, ap);
+  va_end(ap);
+}
+
+static void k_eprintf(const char *fmt, ...)
+{
+  va_list ap;
+  va_start(ap, fmt);
+  k_vprintf_fd(2, fmt, ap);
+  va_end(ap);
 }
 
 static void print_u32(uint32 v)
@@ -141,6 +219,78 @@ static int parse_u32_dec(const char *s, uint32 *out)
   }
   *out = v;
   return 0;
+}
+
+static int env_find_slot(const char *key)
+{
+  int i;
+  for(i = 0; i < KSH_MAX_ENV; i++){
+    if(g_env[i].used && strcmp(g_env[i].key, key) == 0)
+      return i;
+  }
+  return -1;
+}
+
+static const char *env_get(const char *key)
+{
+  int i = env_find_slot(key);
+  if(i >= 0)
+    return g_env[i].val;
+  return 0;
+}
+
+static int env_set(const char *key, const char *val)
+{
+  int i = env_find_slot(key);
+  int free_i = -1;
+  int j;
+
+  if(key == 0 || val == 0 || key[0] == 0 || strlen(key) >= KSH_ENV_KEY || strlen(val) >= KSH_ENV_VAL)
+    return -1;
+  for(j = 0; key[j]; j++){
+    if(!(key[j] == '_' || (key[j] >= '0' && key[j] <= '9') || (key[j] >= 'A' && key[j] <= 'Z') ||
+         (key[j] >= 'a' && key[j] <= 'z')))
+      return -1;
+  }
+
+  if(i < 0){
+    for(j = 0; j < KSH_MAX_ENV; j++){
+      if(!g_env[j].used){
+        free_i = j;
+        break;
+      }
+    }
+    if(free_i < 0)
+      return -1;
+    i = free_i;
+    memset(&g_env[i], 0, sizeof(g_env[i]));
+    g_env[i].used = 1;
+    strcpy(g_env[i].key, key);
+  }
+  strcpy(g_env[i].val, val);
+  return 0;
+}
+
+static void env_unset(const char *key)
+{
+  int i = env_find_slot(key);
+  if(i >= 0)
+    memset(&g_env[i], 0, sizeof(g_env[i]));
+}
+
+static void env_sync_pwd(void)
+{
+  char cwd[MAXPATH];
+  if(xv6_getcwd(cwd, sizeof(cwd)) == 0)
+    (void)env_set("PWD", cwd);
+}
+
+static void env_init_defaults(void)
+{
+  memset(g_env, 0, sizeof(g_env));
+  (void)env_set("PATH", "/bin:/usr/bin:.");
+  (void)env_set("HOME", "/");
+  env_sync_pwd();
 }
 
 static const char *job_reason_str(int reason)
@@ -285,6 +435,8 @@ static void cmd_help(void)
   puts_line("  <elf-command> [args] &");
   puts_line("  <a> | <b> | <c> ...");
   puts_line("  redirection: < > >> 2> 2>>");
+  puts_line("  cd [dir], pwd");
+  puts_line("  env, export NAME=VALUE, unset NAME");
   puts_line("  ps");
   puts_line("  jobs");
   puts_line("  fg <jobid>");
@@ -296,15 +448,103 @@ static void cmd_help(void)
   puts_line("  reboot");
 }
 
+static int try_read_exec_image(const char *cmd, void **out_image, uint32 *out_size, char *resolved, int resolved_len)
+{
+  char pathbuf[MAXPATH];
+  const char *path_env;
+  const char *p;
+
+  if(cmd == 0 || out_image == 0 || out_size == 0)
+    return -1;
+  *out_image = 0;
+  *out_size = 0;
+  if(resolved && resolved_len > 0)
+    resolved[0] = 0;
+
+  if(strchr(cmd, '/')){
+    if(xv6fs_read_file_alloc_path(cmd, out_image, out_size) == 0){
+      if(resolved && resolved_len > 0){
+        strncpy(resolved, cmd, resolved_len - 1);
+        resolved[resolved_len - 1] = 0;
+      }
+      return 0;
+    }
+    if(snprintf(pathbuf, sizeof(pathbuf), "%s.elf", cmd) > 0 && xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
+      if(resolved && resolved_len > 0){
+        strncpy(resolved, pathbuf, resolved_len - 1);
+        resolved[resolved_len - 1] = 0;
+      }
+      return 0;
+    }
+    return -1;
+  }
+
+  path_env = env_get("PATH");
+  if(path_env == 0 || path_env[0] == 0)
+    return -1;
+
+  p = path_env;
+  while(1){
+    const char *seg = p;
+    int seg_len = 0;
+    while(*p && *p != ':'){
+      p++;
+      seg_len++;
+    }
+
+    if(seg_len == 0){
+      if(snprintf(pathbuf, sizeof(pathbuf), "%s", cmd) > 0 && xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
+        if(resolved && resolved_len > 0){
+          strncpy(resolved, pathbuf, resolved_len - 1);
+          resolved[resolved_len - 1] = 0;
+        }
+        return 0;
+      }
+      if(snprintf(pathbuf, sizeof(pathbuf), "%s.elf", cmd) > 0 && xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
+        if(resolved && resolved_len > 0){
+          strncpy(resolved, pathbuf, resolved_len - 1);
+          resolved[resolved_len - 1] = 0;
+        }
+        return 0;
+      }
+    } else {
+      if(seg_len >= (int)sizeof(pathbuf))
+        seg_len = (int)sizeof(pathbuf) - 1;
+      memcpy(pathbuf, seg, (unsigned)seg_len);
+      pathbuf[seg_len] = 0;
+      if(snprintf(pathbuf + seg_len, sizeof(pathbuf) - (unsigned)seg_len, "/%s", cmd) > 0 &&
+         xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
+        if(resolved && resolved_len > 0){
+          strncpy(resolved, pathbuf, resolved_len - 1);
+          resolved[resolved_len - 1] = 0;
+        }
+        return 0;
+      }
+      if(snprintf(pathbuf + seg_len, sizeof(pathbuf) - (unsigned)seg_len, "/%s.elf", cmd) > 0 &&
+         xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
+        if(resolved && resolved_len > 0){
+          strncpy(resolved, pathbuf, resolved_len - 1);
+          resolved[resolved_len - 1] = 0;
+        }
+        return 0;
+      }
+    }
+
+    if(*p == 0)
+      break;
+    p++;
+  }
+
+  return -1;
+}
+
 static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int out_fd, int err_fd, int max_heap_kb)
 {
   elf_module_t *m;
   void *image = 0;
   uint32 image_size = 0;
   int retv = 0;
-  char pathbuf[MAXPATH];
-  const char *paths[] = { "/bin", "/usr/bin", "/" };
-  int pi;
+  char module_name[MAXPATH];
 
   if(argc <= 0 || argv == 0 || argv[0] == 0 || argv[0][0] == 0)
     return -1;
@@ -326,33 +566,18 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
 
   if(g_loader_lock)
     (void)xSemaphoreTake(g_loader_lock, portMAX_DELAY);
-  m = elf_module_find(argv[0]);
+  strncpy(module_name, argv[0], sizeof(module_name) - 1);
+  module_name[sizeof(module_name) - 1] = 0;
+  m = elf_module_find(module_name);
   if(m == 0){
-    if(strchr(argv[0], '/')){
-      if(xv6fs_read_file_alloc_path(argv[0], &image, &image_size) != 0){
-        if(snprintf(pathbuf, sizeof(pathbuf), "%s.elf", argv[0]) > 0)
-          (void)xv6fs_read_file_alloc_path(pathbuf, &image, &image_size);
-      }
-    } else {
-      for(pi = 0; pi < (int)(sizeof(paths) / sizeof(paths[0])); pi++){
-        int n = snprintf(pathbuf, sizeof(pathbuf), "%s/%s", paths[pi], argv[0]);
-        if(n <= 0 || n >= (int)sizeof(pathbuf))
-          continue;
-        if(xv6fs_read_file_alloc_path(pathbuf, &image, &image_size) == 0)
-          break;
-        if(snprintf(pathbuf, sizeof(pathbuf), "%s/%s.elf", paths[pi], argv[0]) > 0 &&
-           xv6fs_read_file_alloc_path(pathbuf, &image, &image_size) == 0)
-          break;
-      }
-    }
-    if(image == 0){
+    if(try_read_exec_image(argv[0], &image, &image_size, module_name, sizeof(module_name)) != 0 || image == 0){
       if(g_loader_lock)
         (void)xSemaphoreGive(g_loader_lock);
       xv6_stdio_reset_fds();
       puts_line("exec: command not found");
       return -1;
     }
-    if(elf_module_load_from_bytes(argv[0], image, image_size, &m) != 0){
+    if(elf_module_load_from_bytes(module_name, image, image_size, &m) != 0){
       free(image);
       if(g_loader_lock)
         (void)xSemaphoreGive(g_loader_lock);
@@ -464,6 +689,8 @@ static void job_task(void *arg)
   ksh_job_task_t *t = (ksh_job_task_t *)arg;
   int exit_code = 127;
 
+  if(t->cwd[0])
+    (void)xv6_chdir(t->cwd);
   (void)run_elf_command(t->argc, t->argv, &exit_code, t->in_fd, t->out_fd, t->err_fd, t->max_heap_kb);
 
   if(g_jobs_lock)
@@ -479,10 +706,41 @@ static void job_task(void *arg)
     (void)xSemaphoreGive(g_jobs_lock);
 
   free_job_ctx(t);
+  xv6_task_ctx_cleanup();
   vTaskDelete(NULL);
 }
 
-static int wait_job_id(int id, int *out_exit_code, int consume)
+static int terminate_job_id(int id, int exit_code, int reason)
+{
+  int slot;
+  TaskHandle_t h = 0;
+  ksh_job_task_t *ctx = 0;
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  slot = job_find_slot_by_id(id);
+  if(slot >= 0 && g_jobs[slot].used && !g_jobs[slot].done){
+    h = g_jobs[slot].task;
+    ctx = (ksh_job_task_t *)g_jobs[slot].task_ctx;
+    g_jobs[slot].done = 1;
+    g_jobs[slot].exit_code = exit_code;
+    g_jobs[slot].reason = reason;
+    g_jobs[slot].task = 0;
+    g_jobs[slot].task_ctx = 0;
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(slot < 0)
+    return -1;
+  if(h)
+    vTaskDelete(h);
+  if(ctx)
+    free_job_ctx(ctx);
+  return 0;
+}
+
+static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctrl_c)
 {
   while(1){
     int slot;
@@ -513,9 +771,35 @@ static int wait_job_id(int id, int *out_exit_code, int consume)
       return 0;
     }
 
+    if(allow_ctrl_c){
+      int c = hal_console_getc();
+      if(c == 0x03){
+        if(terminate_job_id(id, 130, JOB_REASON_KILLED) == 0){
+          puts_line("^C");
+          if(out_exit_code)
+            *out_exit_code = 130;
+          if(consume){
+            if(g_jobs_lock)
+              (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+            slot = job_find_slot_by_id(id);
+            if(slot >= 0)
+              memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
+            if(g_jobs_lock)
+              (void)xSemaphoreGive(g_jobs_lock);
+          }
+          return 0;
+        }
+      }
+    }
+
     enforce_job_limits();
     hal_delay_ms(10);
   }
+}
+
+static int wait_job_id(int id, int *out_exit_code, int consume)
+{
+  return wait_job_id_ex(id, out_exit_code, consume, 0);
 }
 
 static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int err_fd, int is_pipe, int quiet_start,
@@ -566,6 +850,8 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
   t->out_fd = out_fd;
   t->err_fd = err_fd;
   t->max_heap_kb = max_heap_kb;
+  if(xv6_getcwd(t->cwd, sizeof(t->cwd)) != 0)
+    strcpy(t->cwd, "/");
 
   if(t->in_fd >= 3){
     t->in_fd = xv6_dup(t->in_fd);
@@ -645,7 +931,7 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
   if(g_jobs_lock)
     (void)xSemaphoreGive(g_jobs_lock);
 
-  if(xTaskCreate(job_task, "xv6_bg", 6144, t, 5, &handle) != pdPASS){
+  if(xTaskCreate(job_task, "xv6_bg", KSH_BG_STACK, t, 5, &handle) != pdPASS){
     if(g_jobs_lock)
       (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
     memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
@@ -678,17 +964,13 @@ static int run_foreground_with_limits(int argc, char **argv, int in_fd, int out_
                                       uint32 max_runtime_ms)
 {
   int rc;
-  int exit_code = 0;
+  int job_id = -1;
+  int exit_code = 127;
 
-  if(max_runtime_ms == 0){
-    (void)run_elf_command(argc, argv, &exit_code, in_fd, out_fd, err_fd, max_heap_kb);
-    return exit_code == 0 ? 0 : -1;
-  }
-
-  rc = spawn_background_ex(argc, argv, in_fd, out_fd, err_fd, 0, 1, max_heap_kb, max_runtime_ms, &exit_code);
+  rc = spawn_background_ex(argc, argv, in_fd, out_fd, err_fd, 0, 1, max_heap_kb, max_runtime_ms, &job_id);
   if(rc != 0)
     return -1;
-  rc = wait_job_id(exit_code, &exit_code, 1);
+  rc = wait_job_id_ex(job_id, &exit_code, 1, 1);
   if(rc != 0)
     return -1;
   if(exit_code == 124){
@@ -1023,7 +1305,7 @@ static void cmd_jobs(void)
   for(i = 0; i < KSH_MAX_JOBS; i++){
     if(!g_jobs[i].used)
       continue;
-    printf("[%d] %s %s\r\n", g_jobs[i].id, g_jobs[i].done ? "done" : "running", g_jobs[i].cmd);
+    k_printf("[%d] %s %s\r\n", g_jobs[i].id, g_jobs[i].done ? "done" : "running", g_jobs[i].cmd);
     any = 1;
   }
   if(g_jobs_lock)
@@ -1038,8 +1320,8 @@ static void cmd_ps(void)
   int i;
   int any = 0;
 
-  puts_line("PID STATE EXIT REASON LIMIT(ms/kb) CMD");
-  puts_line("0 RUN - - - ksh");
+  k_printf("PID STATE EXIT REASON LIMIT(ms/kb) CMD\r\n");
+  k_printf("0 RUN - - - ksh\r\n");
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -1047,11 +1329,11 @@ static void cmd_ps(void)
     if(!g_jobs[i].used)
       continue;
     if(g_jobs[i].done){
-      printf("%d DONE %d %s %u/%d %s\r\n", g_jobs[i].id, g_jobs[i].exit_code, job_reason_str(g_jobs[i].reason),
-             (unsigned)g_jobs[i].max_runtime_ms, g_jobs[i].max_heap_kb, g_jobs[i].cmd);
+      k_printf("%d DONE %d %s %u/%d %s\r\n", g_jobs[i].id, g_jobs[i].exit_code, job_reason_str(g_jobs[i].reason),
+               (unsigned)g_jobs[i].max_runtime_ms, g_jobs[i].max_heap_kb, g_jobs[i].cmd);
     } else {
-      printf("%d RUN - - %u/%d %s\r\n", g_jobs[i].id, (unsigned)g_jobs[i].max_runtime_ms, g_jobs[i].max_heap_kb,
-             g_jobs[i].cmd);
+      k_printf("%d RUN - - %u/%d %s\r\n", g_jobs[i].id, (unsigned)g_jobs[i].max_runtime_ms, g_jobs[i].max_heap_kb,
+               g_jobs[i].cmd);
     }
     any = 1;
   }
@@ -1059,7 +1341,7 @@ static void cmd_ps(void)
     (void)xSemaphoreGive(g_jobs_lock);
 
   if(!any)
-    puts_line("- NOJOBS -");
+    k_printf("- NOJOBS -\r\n");
 }
 
 static void cmd_wait(int argc, char **argv)
@@ -1102,9 +1384,7 @@ static void cmd_wait(int argc, char **argv)
       puts_line("wait: no such job");
       return;
     }
-    puts_console("wait: done ");
-    print_u32((uint32)exit_code);
-    puts_line("");
+    k_printf("wait: done %u\r\n", (unsigned)exit_code);
     return;
   }
 
@@ -1114,39 +1394,17 @@ static void cmd_wait(int argc, char **argv)
 static void cmd_kill(int argc, char **argv)
 {
   uint32 id = 0;
-  int slot;
-  TaskHandle_t h = 0;
-  ksh_job_task_t *ctx = 0;
 
   if(argc != 2 || parse_u32_dec(argv[1], &id) != 0){
     puts_line("usage: kill <jobid>");
     return;
   }
 
-  if(g_jobs_lock)
-    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
-  slot = job_find_slot_by_id((int)id);
-  if(slot >= 0 && g_jobs[slot].used && !g_jobs[slot].done){
-    h = g_jobs[slot].task;
-    ctx = (ksh_job_task_t *)g_jobs[slot].task_ctx;
-    g_jobs[slot].done = 1;
-    g_jobs[slot].exit_code = 137;
-    g_jobs[slot].reason = JOB_REASON_KILLED;
-    g_jobs[slot].task = 0;
-    g_jobs[slot].task_ctx = 0;
-  }
-  if(g_jobs_lock)
-    (void)xSemaphoreGive(g_jobs_lock);
-
-  if(slot < 0){
+  if(terminate_job_id((int)id, 137, JOB_REASON_KILLED) != 0){
     puts_line("kill: no such job");
     return;
   }
 
-  if(h)
-    vTaskDelete(h);
-  if(ctx)
-    free_job_ctx(ctx);
   puts_line("kill: ok");
 }
 
@@ -1165,9 +1423,7 @@ static void cmd_fg(int argc, char **argv)
     return;
   }
 
-  puts_console("fg: done ");
-  print_u32((uint32)exit_code);
-  puts_line("");
+  k_printf("fg: done %u\r\n", (unsigned)exit_code);
 }
 
 static void cmd_ulimit(int argc, char **argv)
@@ -1175,17 +1431,17 @@ static void cmd_ulimit(int argc, char **argv)
   uint32 v = 0;
 
   if(argc == 1){
-    printf("ulimit: -t %u ms, -m %d kb\r\n", (unsigned)g_ulimit_ms, g_ulimit_heap_kb);
+    k_printf("ulimit: -t %u ms, -m %d kb\r\n", (unsigned)g_ulimit_ms, g_ulimit_heap_kb);
     return;
   }
 
   if(argc == 2){
     if(strcmp(argv[1], "-t") == 0){
-      printf("%u\r\n", (unsigned)g_ulimit_ms);
+      k_printf("%u\r\n", (unsigned)g_ulimit_ms);
       return;
     }
     if(strcmp(argv[1], "-m") == 0){
-      printf("%d\r\n", g_ulimit_heap_kb);
+      k_printf("%d\r\n", g_ulimit_heap_kb);
       return;
     }
     puts_line("usage: ulimit [-t ms] [-m kb]");
@@ -1240,10 +1496,96 @@ static void cmd_time(int argc, char **argv, int run_bg)
   (void)dispatch_command(argc - 1, argv + 1, run_bg);
   end = (uint32)k_ticks();
 
-  if(!run_bg){
-    puts_console("time: ");
-    print_u32((uint32)((end - start) * 10u));
-    puts_line(" ms");
+  if(!run_bg)
+    k_eprintf("time: %u ms\r\n", (unsigned)((end - start) * 10u));
+}
+
+static void cmd_pwd(void)
+{
+  char cwd[MAXPATH];
+  if(xv6_getcwd(cwd, sizeof(cwd)) != 0){
+    eputs_line("pwd: failed");
+    return;
+  }
+  puts_line(cwd);
+}
+
+static void cmd_cd(int argc, char **argv)
+{
+  const char *path = 0;
+
+  if(argc > 2){
+    eputs_line("usage: cd [dir]");
+    return;
+  }
+  if(argc == 2)
+    path = argv[1];
+  else
+    path = env_get("HOME");
+  if(path == 0 || path[0] == 0)
+    path = "/";
+  if(xv6_chdir(path) != 0){
+    eputs_console("cd: failed: ");
+    eputs_line(path);
+    return;
+  }
+  env_sync_pwd();
+}
+
+static void cmd_env(void)
+{
+  int i;
+  for(i = 0; i < KSH_MAX_ENV; i++){
+    if(!g_env[i].used)
+      continue;
+    k_printf("%s=%s\r\n", g_env[i].key, g_env[i].val);
+  }
+}
+
+static void cmd_export(int argc, char **argv)
+{
+  int i;
+
+  if(argc == 1){
+    cmd_env();
+    return;
+  }
+  for(i = 1; i < argc; i++){
+    char *eq = strchr(argv[i], '=');
+    if(eq){
+      char key[KSH_ENV_KEY];
+      int n = (int)(eq - argv[i]);
+      if(n <= 0 || n >= (int)sizeof(key)){
+        eputs_console("export: bad name: ");
+        eputs_line(argv[i]);
+        continue;
+      }
+      memcpy(key, argv[i], (unsigned)n);
+      key[n] = 0;
+      if(env_set(key, eq + 1) != 0){
+        eputs_console("export: bad assignment: ");
+        eputs_line(argv[i]);
+      }
+    } else {
+      if(env_set(argv[i], "") != 0){
+        eputs_console("export: bad name: ");
+        eputs_line(argv[i]);
+      }
+    }
+  }
+}
+
+static void cmd_unset(int argc, char **argv)
+{
+  int i;
+  if(argc < 2){
+    eputs_line("usage: unset NAME...");
+    return;
+  }
+  for(i = 1; i < argc; i++){
+    if(strcmp(argv[i], "PWD") == 0)
+      continue;
+    env_unset(argv[i]);
   }
 }
 
@@ -1270,9 +1612,12 @@ static void register_default_symbols(void)
     { "xv6fs_mkdir_path", (void *)xv6fs_mkdir_path },
     { "xv6fs_unlink_path", (void *)xv6fs_unlink_path },
     { "xv6_open", (void *)xv6_open },
+    { "xv6_dup", (void *)xv6_dup },
     { "xv6_read", (void *)xv6_read },
     { "xv6_write", (void *)xv6_write },
     { "xv6_close", (void *)xv6_close },
+    { "xv6_chdir", (void *)xv6_chdir },
+    { "xv6_getcwd", (void *)xv6_getcwd },
     { "xv6_ptsname", (void *)xv6_ptsname },
     { "xv6_pipe", (void *)xv6_pipe },
   };
@@ -1280,11 +1625,17 @@ static void register_default_symbols(void)
   (void)elf_loader_register_host_symbols(syms, (int)(sizeof(syms) / sizeof(syms[0])));
 }
 
-static int dispatch_command(int argc, char **argv, int run_bg)
+static int is_builtin_command(const char *cmd)
 {
-  if(argc <= 0)
-    return 0;
+  return (strcmp(cmd, "help") == 0 || strcmp(cmd, "reboot") == 0 || strcmp(cmd, "cd") == 0 ||
+          strcmp(cmd, "pwd") == 0 || strcmp(cmd, "env") == 0 || strcmp(cmd, "export") == 0 ||
+          strcmp(cmd, "unset") == 0 || strcmp(cmd, "ps") == 0 || strcmp(cmd, "jobs") == 0 ||
+          strcmp(cmd, "wait") == 0 || strcmp(cmd, "kill") == 0 || strcmp(cmd, "fg") == 0 ||
+          strcmp(cmd, "time") == 0 || strcmp(cmd, "ulimit") == 0 || strcmp(cmd, "limit") == 0);
+}
 
+static int dispatch_builtin_command(int argc, char **argv, int run_bg)
+{
   if(strcmp(argv[0], "help") == 0){
     cmd_help();
     return 0;
@@ -1292,6 +1643,26 @@ static int dispatch_command(int argc, char **argv, int run_bg)
   if(strcmp(argv[0], "reboot") == 0){
     puts_line("rebooting...");
     hal_reboot();
+    return 0;
+  }
+  if(strcmp(argv[0], "cd") == 0){
+    cmd_cd(argc, argv);
+    return 0;
+  }
+  if(strcmp(argv[0], "pwd") == 0){
+    cmd_pwd();
+    return 0;
+  }
+  if(strcmp(argv[0], "env") == 0){
+    cmd_env();
+    return 0;
+  }
+  if(strcmp(argv[0], "export") == 0){
+    cmd_export(argc, argv);
+    return 0;
+  }
+  if(strcmp(argv[0], "unset") == 0){
+    cmd_unset(argc, argv);
     return 0;
   }
   if(strcmp(argv[0], "ps") == 0){
@@ -1326,6 +1697,31 @@ static int dispatch_command(int argc, char **argv, int run_bg)
     cmd_limit(argc, argv, run_bg);
     return 0;
   }
+  return -1;
+}
+
+static int dispatch_command(int argc, char **argv, int run_bg)
+{
+  char *cmd_argv[KSH_MAX_ARGS];
+  int cmd_argc = 0;
+  ksh_io_t base_io;
+  ksh_io_t io;
+
+  if(argc <= 0)
+    return 0;
+
+  if(is_builtin_command(argv[0])){
+    base_io.in_fd = 0;
+    base_io.out_fd = 1;
+    base_io.err_fd = 2;
+    if(parse_exec_and_redir(argc, argv, &base_io, cmd_argv, KSH_MAX_ARGS, &cmd_argc, &io) != 0)
+      return 0;
+    xv6_stdio_set_fds(io.in_fd, io.out_fd, io.err_fd);
+    (void)dispatch_builtin_command(cmd_argc, cmd_argv, run_bg);
+    xv6_stdio_reset_fds();
+    close_io_custom_fds(&io, &base_io);
+    return 0;
+  }
 
   (void)execute_external(argc, argv, run_bg, g_ulimit_heap_kb, g_ulimit_ms);
   return 0;
@@ -1341,10 +1737,12 @@ void ksh_run(void)
   g_loader_lock = xSemaphoreCreateMutex();
   register_default_symbols();
   xv6_vfs_reset();
+  (void)xv6_chdir("/");
+  env_init_defaults();
 
   puts_line("xv6-esp32s3 ksh ready");
   cmd_help();
-  puts_console("xv6> ");
+  tty_puts("xv6> ");
 
   while(1){
     int c;
@@ -1354,6 +1752,13 @@ void ksh_run(void)
     c = hal_console_getc();
     if(c < 0){
       hal_delay_ms(5);
+      continue;
+    }
+
+    if(c == 0x03){
+      puts_line("^C");
+      len = 0;
+      tty_puts("xv6> ");
       continue;
     }
 
@@ -1368,12 +1773,12 @@ void ksh_run(void)
       argc = parse_line(line, argv, KSH_MAX_ARGS);
       if(argc < 0){
         puts_line("parse: unterminated quote");
-        puts_console("xv6> ");
+        tty_puts("xv6> ");
         len = 0;
         continue;
       }
       if(argc == 0){
-        puts_console("xv6> ");
+        tty_puts("xv6> ");
         len = 0;
         continue;
       }
@@ -1383,7 +1788,7 @@ void ksh_run(void)
         argc--;
         if(argc == 0){
           puts_line("syntax: command &");
-          puts_console("xv6> ");
+          tty_puts("xv6> ");
           len = 0;
           continue;
         }
@@ -1393,21 +1798,21 @@ void ksh_run(void)
         puts_line("unknown command");
 
       len = 0;
-      puts_console("xv6> ");
+      tty_puts("xv6> ");
       continue;
     }
 
     if(c == 0x7f || c == '\b'){
       if(len > 0){
         len--;
-        puts_console("\b \b");
+        tty_puts("\b \b");
       }
       continue;
     }
 
     if(len < (int)(sizeof(line) - 1)){
       line[len++] = (char)c;
-      putc_console(c);
+      tty_putc(c);
     }
   }
 }

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_flash_disk.h"
@@ -21,13 +22,15 @@ static int g_ready;
 static uint32 g_nbitmap;
 static uint32 g_data_start;
 static SemaphoreHandle_t g_vfs_lock;
-#define XV6_TLS_STDIO_IDX 0
+#define XV6_TLS_TASK_CTX_IDX 0
 
 typedef struct {
+  int stdio_active;
   int in_fd;
   int out_fd;
   int err_fd;
-} xv6_stdio_ctx_t;
+  char cwd[MAXPATH];
+} xv6_task_ctx_t;
 
 #define XV6_MAX_FD 32
 #define VFD_FREE 0
@@ -82,10 +85,41 @@ typedef struct {
 
 static xv6_pipe_t g_pipes[XV6_MAX_PIPE];
 
+static void tls_free_cb(int idx, void *ptr)
+{
+  (void)idx;
+  free(ptr);
+}
+
+static void tls_set_ptr(BaseType_t idx, void *ptr)
+{
+#if CONFIG_FREERTOS_TLSP_DELETION_CALLBACKS
+  vTaskSetThreadLocalStoragePointerAndDelCallback(NULL, idx, ptr, tls_free_cb);
+#else
+  vTaskSetThreadLocalStoragePointer(NULL, idx, ptr);
+#endif
+}
+
+static xv6_task_ctx_t *task_ctx_get(int create)
+{
+  xv6_task_ctx_t *ctx = (xv6_task_ctx_t *)pvTaskGetThreadLocalStoragePointer(NULL, XV6_TLS_TASK_CTX_IDX);
+  if(ctx == 0 && create){
+    ctx = (xv6_task_ctx_t *)calloc(1, sizeof(*ctx));
+    if(ctx){
+      ctx->in_fd = 0;
+      ctx->out_fd = 1;
+      ctx->err_fd = 2;
+      strcpy(ctx->cwd, "/");
+      tls_set_ptr(XV6_TLS_TASK_CTX_IDX, ctx);
+    }
+  }
+  return ctx;
+}
+
 static int stdio_map_fd(int fd)
 {
-  xv6_stdio_ctx_t *ctx = (xv6_stdio_ctx_t *)pvTaskGetThreadLocalStoragePointer(NULL, XV6_TLS_STDIO_IDX);
-  if(ctx == 0)
+  xv6_task_ctx_t *ctx = task_ctx_get(0);
+  if(ctx == 0 || !ctx->stdio_active)
     return fd;
   if(fd == 0)
     return ctx->in_fd;
@@ -94,6 +128,94 @@ static int stdio_map_fd(int fd)
   if(fd == 2)
     return ctx->err_fd;
   return fd;
+}
+
+static int path_resolve(const char *path, char *out, int out_len)
+{
+  const char *p;
+  const char *prefix = "/";
+  xv6_task_ctx_t *ctx;
+  int stack[32];
+  int nseg = 0;
+
+  if(path == 0 || out == 0 || out_len <= 1)
+    return -1;
+
+  ctx = task_ctx_get(1);
+  if(path[0] != '/'){
+    if(ctx && ctx->cwd[0])
+      prefix = ctx->cwd;
+    else
+      prefix = "/";
+  }
+
+  p = prefix;
+  while(*p){
+    while(*p == '/')
+      p++;
+    if(*p == 0)
+      break;
+    stack[nseg++] = (int)(p - prefix);
+    while(*p && *p != '/')
+      p++;
+    if(nseg >= (int)(sizeof(stack) / sizeof(stack[0])))
+      return -1;
+  }
+
+  p = path;
+  while(*p){
+    const char *seg;
+    int seg_len = 0;
+    while(*p == '/')
+      p++;
+    if(*p == 0)
+      break;
+    seg = p;
+    while(*p && *p != '/'){
+      p++;
+      seg_len++;
+    }
+    if(seg_len == 1 && seg[0] == '.')
+      continue;
+    if(seg_len == 2 && seg[0] == '.' && seg[1] == '.'){
+      if(nseg > 0)
+        nseg--;
+      continue;
+    }
+    if(nseg >= (int)(sizeof(stack) / sizeof(stack[0])))
+      return -1;
+    stack[nseg++] = (int)(seg - path) | 0x40000000;
+  }
+
+  {
+    int i;
+    int pos = 0;
+    out[pos++] = '/';
+    for(i = 0; i < nseg; i++){
+      const char *src;
+      int len = 0;
+      int idx = stack[i];
+      if((idx & 0x40000000) != 0){
+        src = path + (idx & 0x3fffffff);
+        while(src[len] && src[len] != '/')
+          len++;
+      } else {
+        src = prefix + idx;
+        while(src[len] && src[len] != '/')
+          len++;
+      }
+      if(len <= 0)
+        continue;
+      if(pos > 1)
+        out[pos++] = '/';
+      if(pos + len >= out_len)
+        return -1;
+      memcpy(out + pos, src, (unsigned)len);
+      pos += len;
+    }
+    out[pos] = 0;
+  }
+  return 0;
 }
 
 static void vfs_lock(void)
@@ -839,6 +961,7 @@ int xv6fs_ro_flash_image(const uint8 *image, uint32 image_size)
 
 int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_len, uint16 *type_out, uint32 *size_out)
 {
+  char abs_path[MAXPATH];
   uint32 dir_inum;
   struct dinode dir;
   uint32 off;
@@ -846,7 +969,9 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
 
   if(index < 0 || name_out == 0 || name_out_len <= 1 || !g_ready)
     return -1;
-  if(path_lookup(path, &dir_inum, &dir) != 0 || dir.type != T_DIR)
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0)
+    return -1;
+  if(path_lookup(abs_path, &dir_inum, &dir) != 0 || dir.type != T_DIR)
     return -1;
 
   for(off = 0; off + sizeof(struct dirent) <= dir.size; off += sizeof(struct dirent)){
@@ -879,15 +1004,18 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
 
 int xv6fs_read_file_alloc_path(const char *path, void **out_data, uint32 *out_size)
 {
+  char abs_path[MAXPATH];
   uint32 inum;
   struct dinode ip;
   void *buf;
 
   if(path == 0 || out_data == 0 || out_size == 0 || !g_ready)
     return -1;
-  if(is_dev_node(path))
-    return dev_read_alloc(path, out_data, out_size);
-  if(path_lookup(path, &inum, &ip) != 0 || ip.type != T_FILE)
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0)
+    return -1;
+  if(is_dev_node(abs_path))
+    return dev_read_alloc(abs_path, out_data, out_size);
+  if(path_lookup(abs_path, &inum, &ip) != 0 || ip.type != T_FILE)
     return -1;
 
   buf = malloc(ip.size ? ip.size : 1);
@@ -904,6 +1032,7 @@ int xv6fs_read_file_alloc_path(const char *path, void **out_data, uint32 *out_si
 
 int xv6fs_mkdir_path(const char *path)
 {
+  char abs_path[MAXPATH];
   uint32 pinum;
   uint32 inum;
   struct dinode pip;
@@ -913,9 +1042,11 @@ int xv6fs_mkdir_path(const char *path)
 
   if(path == 0 || !g_ready)
     return -1;
-  if(path_lookup(path, &inum, 0) == 0)
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0)
+    return -1;
+  if(path_lookup(abs_path, &inum, 0) == 0)
     return 0;
-  if(path_parent(path, &pinum, name) != 0)
+  if(path_parent(abs_path, &pinum, name) != 0)
     return -1;
   if(read_inode(pinum, &pip) != 0 || pip.type != T_DIR)
     return -1;
@@ -941,6 +1072,7 @@ int xv6fs_mkdir_path(const char *path)
 
 int xv6fs_write_file_path(const char *path, const void *data, uint32 size)
 {
+  char abs_path[MAXPATH];
   uint32 pinum, inum;
   char name[DIRSIZ + 1];
   struct dinode ip;
@@ -948,9 +1080,11 @@ int xv6fs_write_file_path(const char *path, const void *data, uint32 size)
 
   if(path == 0 || data == 0 || !g_ready)
     return -1;
-  if(is_dev_node(path))
-    return dev_write(path, data, size);
-  if(path_parent(path, &pinum, name) != 0)
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0)
+    return -1;
+  if(is_dev_node(abs_path))
+    return dev_write(abs_path, data, size);
+  if(path_parent(abs_path, &pinum, name) != 0)
     return -1;
 
   rc = dir_lookup_inum(pinum, name, &inum, &ip);
@@ -976,16 +1110,21 @@ int xv6fs_write_file_path(const char *path, const void *data, uint32 size)
 
 int xv6fs_unlink_path(const char *path)
 {
+  char abs_path[MAXPATH];
   uint32 pinum, inum, off;
   char name[DIRSIZ + 1];
   struct dirent de;
   struct dinode pip, ip;
 
-  if(path == 0 || !g_ready || strcmp(path, "/") == 0)
+  if(path == 0 || !g_ready)
     return -1;
-  if(is_dev_node(path))
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0)
     return -1;
-  if(path_parent(path, &pinum, name) != 0)
+  if(strcmp(abs_path, "/") == 0)
+    return -1;
+  if(is_dev_node(abs_path))
+    return -1;
+  if(path_parent(abs_path, &pinum, name) != 0)
     return -1;
   if(read_inode(pinum, &pip) != 0 || pip.type != T_DIR)
     return -1;
@@ -1050,6 +1189,7 @@ static int vfs_create_regular_file(const char *path, uint32 *out_inum)
 
 void xv6_vfs_reset(void)
 {
+  xv6_task_ctx_t *ctx;
   if(g_vfs_lock == 0)
     g_vfs_lock = xSemaphoreCreateMutex();
   vfs_lock();
@@ -1072,17 +1212,29 @@ void xv6_vfs_reset(void)
   g_fds[2].flags = XV6_O_WRONLY;
   strcpy(g_fds[2].path, "/dev/stderr");
   vfs_unlock();
+
+  ctx = task_ctx_get(1);
+  if(ctx){
+    ctx->stdio_active = 0;
+    ctx->in_fd = 0;
+    ctx->out_fd = 1;
+    ctx->err_fd = 2;
+    strcpy(ctx->cwd, "/");
+  }
 }
 
 int xv6_open(const char *path, int flags)
 {
   int fd;
+  char abs_path[MAXPATH];
   char canon[MAXPATH];
   int pty_id = -1;
   uint32 inum;
   struct dinode ip;
 
   if(!g_ready || path == 0 || path[0] == 0)
+    return -1;
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0)
     return -1;
   vfs_lock();
   fd = vfs_alloc_fd();
@@ -1093,8 +1245,8 @@ int xv6_open(const char *path, int flags)
   g_fds[fd].used = 1;
   g_fds[fd].flags = flags;
 
-  if(is_dev_node(path)){
-    if(dev_canonical_path(path, canon, sizeof(canon)) != 0)
+  if(is_dev_node(abs_path)){
+    if(dev_canonical_path(abs_path, canon, sizeof(canon)) != 0)
       goto fail;
     g_fds[fd].kind = VFD_DEV;
     strcpy(g_fds[fd].path, canon);
@@ -1116,10 +1268,10 @@ int xv6_open(const char *path, int flags)
     return fd;
   }
 
-  if(path_lookup(path, &inum, &ip) != 0){
+  if(path_lookup(abs_path, &inum, &ip) != 0){
     if((flags & XV6_O_CREAT) == 0)
       goto fail;
-    if(vfs_create_regular_file(path, &inum) != 0)
+    if(vfs_create_regular_file(abs_path, &inum) != 0)
       goto fail;
     if(read_inode(inum, &ip) != 0 || ip.type != T_FILE)
       goto fail;
@@ -1371,6 +1523,49 @@ int xv6_close(int fd)
   return 0;
 }
 
+int xv6_chdir(const char *path)
+{
+  char abs_path[MAXPATH];
+  uint32 inum;
+  struct dinode ip;
+  xv6_task_ctx_t *ctx;
+
+  if(path == 0 || !g_ready)
+    return -1;
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0)
+    return -1;
+  if(is_dev_node(abs_path))
+    return -1;
+
+  vfs_lock();
+  if(path_lookup(abs_path, &inum, &ip) != 0 || ip.type != T_DIR){
+    vfs_unlock();
+    return -1;
+  }
+  vfs_unlock();
+
+  ctx = task_ctx_get(1);
+  if(ctx == 0)
+    return -1;
+  strcpy(ctx->cwd, abs_path);
+  return 0;
+}
+
+int xv6_getcwd(char *out_path, int out_len)
+{
+  xv6_task_ctx_t *ctx;
+
+  if(out_path == 0 || out_len <= 1)
+    return -1;
+  ctx = task_ctx_get(1);
+  if(ctx == 0)
+    return -1;
+  if((int)strlen(ctx->cwd) >= out_len)
+    return -1;
+  strcpy(out_path, ctx->cwd);
+  return 0;
+}
+
 int xv6_ptsname(int master_fd, char *out_path, int out_len)
 {
   int id;
@@ -1443,13 +1638,10 @@ fail:
 
 void xv6_stdio_set_fds(int in_fd, int out_fd, int err_fd)
 {
-  xv6_stdio_ctx_t *ctx = (xv6_stdio_ctx_t *)pvTaskGetThreadLocalStoragePointer(NULL, XV6_TLS_STDIO_IDX);
-  if(ctx == 0){
-    ctx = (xv6_stdio_ctx_t *)malloc(sizeof(*ctx));
-    if(ctx == 0)
-      return;
-    vTaskSetThreadLocalStoragePointer(NULL, XV6_TLS_STDIO_IDX, ctx);
-  }
+  xv6_task_ctx_t *ctx = task_ctx_get(1);
+  if(ctx == 0)
+    return;
+  ctx->stdio_active = 1;
   ctx->in_fd = in_fd;
   ctx->out_fd = out_fd;
   ctx->err_fd = err_fd;
@@ -1457,10 +1649,21 @@ void xv6_stdio_set_fds(int in_fd, int out_fd, int err_fd)
 
 void xv6_stdio_reset_fds(void)
 {
-  xv6_stdio_ctx_t *ctx = (xv6_stdio_ctx_t *)pvTaskGetThreadLocalStoragePointer(NULL, XV6_TLS_STDIO_IDX);
+  xv6_task_ctx_t *ctx = task_ctx_get(0);
+  if(ctx){
+    ctx->stdio_active = 0;
+    ctx->in_fd = 0;
+    ctx->out_fd = 1;
+    ctx->err_fd = 2;
+  }
+}
+
+void xv6_task_ctx_cleanup(void)
+{
+  xv6_task_ctx_t *ctx = (xv6_task_ctx_t *)pvTaskGetThreadLocalStoragePointer(NULL, XV6_TLS_TASK_CTX_IDX);
   if(ctx){
     free(ctx);
-    vTaskSetThreadLocalStoragePointer(NULL, XV6_TLS_STDIO_IDX, 0);
+    tls_set_ptr(XV6_TLS_TASK_CTX_IDX, 0);
   }
 }
 

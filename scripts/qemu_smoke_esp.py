@@ -73,6 +73,13 @@ def cmd(sock: socket.socket, command: str) -> str:
     return out
 
 
+def send_ctrl_c(sock: socket.socket) -> str:
+    sock.sendall(b"\x03")
+    out = recv_until(sock, b"xv6> ", timeout_s=12.0).decode(errors="ignore")
+    print("^C\n" + out)
+    return out
+
+
 def generate_qemu_flash() -> None:
     merge = (
         f"{IDF_EXPORT} && "
@@ -184,6 +191,21 @@ def main() -> int:
         out = cmd(sock, "wait")
         assert "wait: done" in out
 
+        out = cmd(sock, "pwd")
+        assert "/" in out
+
+        out = cmd(sock, "cd /tmp")
+        assert "xv6> " in out
+
+        out = cmd(sock, "pwd")
+        assert "/tmp" in out
+
+        out = cmd(sock, "head -c 4 ../etc/motd")
+        assert "xv6-" in out
+
+        out = cmd(sock, "cd /")
+        assert "xv6> " in out
+
         out = cmd(sock, "head -c 8 /etc/motd | stdinhead 8")
         assert "xv6-esp" in out
 
@@ -205,6 +227,39 @@ def main() -> int:
         out = cmd(sock, "ls /tmp")
         assert "r.txt" in out
         assert "err.log" in out
+
+        out = cmd(sock, "cp /bin/head /tmp/myhead")
+        assert "xv6> " in out
+
+        out = cmd(sock, "export PATH=/tmp")
+        assert "xv6> " in out
+
+        out = cmd(sock, "myhead -c 4 /etc/motd")
+        assert "xv6-" in out
+
+        out = cmd(sock, "unset PATH")
+        assert "xv6> " in out
+
+        out = cmd(sock, "head -c 1 /etc/motd")
+        assert "command not found" in out
+
+        out = cmd(sock, "export PATH=/bin:/usr/bin:.")
+        assert "xv6> " in out
+
+        out = cmd(sock, "env")
+        assert "PATH=/bin:/usr/bin:." in out
+
+        out = cmd(sock, "ps > /tmp/ps.txt")
+        assert "xv6> " in out
+
+        out = cmd(sock, "head -c 3 /tmp/ps.txt")
+        assert "PID" in out
+
+        out = cmd(sock, "time head -c 1 /etc/motd 2> /tmp/time.err")
+        assert "x" in out
+
+        out = cmd(sock, "head -c 4 /tmp/time.err")
+        assert "time" in out
 
         out = cmd(sock, "ulimit -t 150")
         assert "xv6> " in out
@@ -236,6 +291,11 @@ def main() -> int:
 
         out = cmd(sock, f"wait {kill_id}")
         assert "wait: done 137" in out
+
+        sock.sendall(b"sleep 5000\n")
+        time.sleep(0.2)
+        out = send_ctrl_c(sock)
+        assert "^C" in out
 
         out = cmd(sock, "limit 100 1 sleep 500")
         assert "limit: timeout" in out
