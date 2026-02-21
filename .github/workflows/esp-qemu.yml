@@ -12,9 +12,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install ESP-IDF
+      - name: Cache ESP-IDF
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.espressif
+            ~/esp-idf
+          key: ${{ runner.os }}-espidf-v6.0-cache-v1
+
+      - name: Prepare ESP-IDF
         run: |
-          git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          if [ ! -d "$HOME/esp-idf/.git" ]; then
+            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          fi
           cd "$HOME/esp-idf"
           ./install.sh esp32s3
 
@@ -33,3 +43,8 @@ jobs:
         run: |
           source "$HOME/esp-idf/export.sh"
           python3 ./scripts/qemu_stress_esp.py
+
+      - name: QEMU Soak
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          python3 ./scripts/qemu_soak_esp.py
