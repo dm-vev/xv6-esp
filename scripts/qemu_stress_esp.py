@@ -52,9 +52,9 @@ def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> b
     raise RuntimeError(f"timeout waiting for marker {marker!r}")
 
 
-def cmd(sock: socket.socket, command: str) -> str:
+def cmd(sock: socket.socket, command: str, timeout_s: float = 12.0) -> str:
     sock.sendall((command + "\n").encode())
-    out = recv_until(sock, b"xv6> ", timeout_s=12.0).decode(errors="ignore")
+    out = recv_until(sock, b"xv6> ", timeout_s=timeout_s).decode(errors="ignore")
     print(f"$ {command}\n{out}")
     return out
 
@@ -136,29 +136,12 @@ def main() -> int:
         boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
         print(boot)
 
-        out = cmd(sock, "head -c 5 /etc/motd")
-        assert "xv6-e" in out
-
-        out = cmd(sock, "dd if=/dev/zero of=/tmp/dd.bin bs=16 count=2")
-        assert "32 bytes copied" in out
-
-        out = cmd(sock, "ls /tmp")
-        assert "dd.bin" in out
-
-        out = cmd(sock, "cp /tmp/dd.bin /tmp/dd2.bin")
-        assert "xv6> " in out
-
-        out = cmd(sock, "mv /tmp/dd2.bin /tmp/dd3.bin")
-        assert "xv6> " in out
-
-        out = cmd(sock, "ls /tmp")
-        assert "dd3.bin" in out
-
-        out = cmd(sock, "sleep 400 &")
-        assert "started" in out
-
-        out = cmd(sock, "jobs")
-        assert "sleep 400" in out
+        job_ids = []
+        for _ in range(20):
+            out = cmd(sock, "sleep 1200 &")
+            m = re.search(r"\[(\d+)\]\s+started", out)
+            assert m is not None
+            job_ids.append(m.group(1))
 
         out = cmd(sock, "ps")
         assert "PID STATE CMD" in out
@@ -167,51 +150,24 @@ def main() -> int:
         out = cmd(sock, "wait")
         assert "wait: done" in out
 
-        out = cmd(sock, "head -c 8 /etc/motd | stdinhead 8")
-        assert "xv6-esp" in out
+        out = cmd(sock, "jobs")
+        assert "jobs: empty" in out
 
-        out = cmd(sock, "sleep 800 &")
-        m = re.search(r"\[(\d+)\]\s+started", out)
-        assert m is not None
-        fg_id = m.group(1)
+        for _ in range(8):
+            out = cmd(sock, "ptysend stress")
+            m = re.search(r"/dev/pts/[0-9]+", out)
+            assert m is not None
+            out = cmd(sock, f"ptyrecv {m.group(0)}")
+            assert "stress" in out
 
-        out = cmd(sock, f"fg {fg_id}")
-        assert "fg: done 0" in out
-
-        out = cmd(sock, "sleep 2000 &")
-        m = re.search(r"\[(\d+)\]\s+started", out)
-        assert m is not None
-        kill_id = m.group(1)
-
-        out = cmd(sock, f"kill {kill_id}")
-        assert "kill: ok" in out
-
-        out = cmd(sock, f"wait {kill_id}")
-        assert "wait: done 137" in out
-
-        out = cmd(sock, "limit 100 1 sleep 500")
-        assert "limit: timeout" in out
-
-        out = cmd(sock, "ptydemo")
-        assert "slave:ping" in out
-        assert "master:pong" in out
-
-        out = cmd(sock, "ptysend hello-from-elf")
-        m = re.search(r"/dev/pts/[0-9]+", out)
-        assert m is not None
-        slave = m.group(0)
-
-        out = cmd(sock, f"ptyrecv {slave}")
-        assert "hello-from-elf" in out
-
-        out = cmd(sock, "dd if=/dev/zero of=/dev/full bs=4 count=1")
-        assert "dd: write failed" in out
+        out = cmd(sock, "ps")
+        assert "ksh" in out
     finally:
         if sock is not None:
             sock.close()
         stop_qemu(qemu_proc)
 
-    print("QEMU smoke test passed")
+    print("QEMU stress test passed")
     return 0
 
 

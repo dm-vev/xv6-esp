@@ -6,6 +6,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "esp_flash_disk.h"
 #include "esp_log.h"
 #include "fs.h"
@@ -20,6 +21,13 @@ static int g_ready;
 static uint32 g_nbitmap;
 static uint32 g_data_start;
 static SemaphoreHandle_t g_vfs_lock;
+#define XV6_TLS_STDIO_IDX 0
+
+typedef struct {
+  int in_fd;
+  int out_fd;
+  int err_fd;
+} xv6_stdio_ctx_t;
 
 #define XV6_MAX_FD 32
 #define VFD_FREE 0
@@ -59,6 +67,20 @@ typedef struct {
 } xv6_pty_t;
 
 static xv6_pty_t g_ptys[XV6_MAX_PTY];
+
+static int stdio_map_fd(int fd)
+{
+  xv6_stdio_ctx_t *ctx = (xv6_stdio_ctx_t *)pvTaskGetThreadLocalStoragePointer(NULL, XV6_TLS_STDIO_IDX);
+  if(ctx == 0)
+    return fd;
+  if(fd == 0)
+    return ctx->in_fd;
+  if(fd == 1)
+    return ctx->out_fd;
+  if(fd == 2)
+    return ctx->err_fd;
+  return fd;
+}
 
 static void vfs_lock(void)
 {
@@ -1090,36 +1112,37 @@ fail_unlock:
 
 int xv6_read(int fd, void *buf, uint32 size)
 {
+  int real_fd = stdio_map_fd(fd);
   struct dinode ip;
   uint32 nread;
   int rc;
 
-  if(fd < 0 || fd >= XV6_MAX_FD || !g_fds[fd].used || buf == 0)
+  if(real_fd < 0 || real_fd >= XV6_MAX_FD || !g_fds[real_fd].used || buf == 0)
     return -1;
   vfs_lock();
-  if((g_fds[fd].flags & XV6_O_WRONLY) == XV6_O_WRONLY)
+  if((g_fds[real_fd].flags & XV6_O_WRONLY) == XV6_O_WRONLY)
     goto fail;
 
-  if(g_fds[fd].kind == VFD_DEV){
-    rc = dev_read_fd(&g_fds[fd], buf, size);
+  if(g_fds[real_fd].kind == VFD_DEV){
+    rc = dev_read_fd(&g_fds[real_fd], buf, size);
     if(rc > 0)
-      g_fds[fd].off += (uint32)rc;
+      g_fds[real_fd].off += (uint32)rc;
     vfs_unlock();
     return rc;
   }
 
-  if(read_inode(g_fds[fd].inum, &ip) != 0 || ip.type != T_FILE)
+  if(read_inode(g_fds[real_fd].inum, &ip) != 0 || ip.type != T_FILE)
     goto fail;
-  if(g_fds[fd].off >= ip.size){
+  if(g_fds[real_fd].off >= ip.size){
     vfs_unlock();
     return 0;
   }
   nread = size;
-  if(g_fds[fd].off + nread > ip.size)
-    nread = ip.size - g_fds[fd].off;
-  if(nread > 0 && inode_read_range(&ip, g_fds[fd].off, buf, nread) != 0)
+  if(g_fds[real_fd].off + nread > ip.size)
+    nread = ip.size - g_fds[real_fd].off;
+  if(nread > 0 && inode_read_range(&ip, g_fds[real_fd].off, buf, nread) != 0)
     goto fail;
-  g_fds[fd].off += nread;
+  g_fds[real_fd].off += nread;
   vfs_unlock();
   return (int)nread;
 
@@ -1130,28 +1153,29 @@ fail:
 
 int xv6_write(int fd, const void *buf, uint32 size)
 {
+  int real_fd = stdio_map_fd(fd);
   struct dinode ip;
   int rc;
 
-  if(fd < 0 || fd >= XV6_MAX_FD || !g_fds[fd].used || buf == 0)
+  if(real_fd < 0 || real_fd >= XV6_MAX_FD || !g_fds[real_fd].used || buf == 0)
     return -1;
   vfs_lock();
-  if((g_fds[fd].flags & XV6_O_WRONLY) == 0 && (g_fds[fd].flags & XV6_O_RDWR) == 0)
+  if((g_fds[real_fd].flags & XV6_O_WRONLY) == 0 && (g_fds[real_fd].flags & XV6_O_RDWR) == 0)
     goto fail;
 
-  if(g_fds[fd].kind == VFD_DEV){
-    rc = dev_write_fd(&g_fds[fd], buf, size);
+  if(g_fds[real_fd].kind == VFD_DEV){
+    rc = dev_write_fd(&g_fds[real_fd], buf, size);
     vfs_unlock();
     return rc;
   }
 
-  if(read_inode(g_fds[fd].inum, &ip) != 0 || ip.type != T_FILE)
+  if(read_inode(g_fds[real_fd].inum, &ip) != 0 || ip.type != T_FILE)
     goto fail;
-  if(inode_write_range(&ip, g_fds[fd].off, buf, size) != 0)
+  if(inode_write_range(&ip, g_fds[real_fd].off, buf, size) != 0)
     goto fail;
-  if(write_inode(g_fds[fd].inum, &ip) != 0)
+  if(write_inode(g_fds[real_fd].inum, &ip) != 0)
     goto fail;
-  g_fds[fd].off += size;
+  g_fds[real_fd].off += size;
   vfs_unlock();
   return (int)size;
 
@@ -1201,6 +1225,29 @@ int xv6_ptsname(int master_fd, char *out_path, int out_len)
 fail:
   vfs_unlock();
   return -1;
+}
+
+void xv6_stdio_set_fds(int in_fd, int out_fd, int err_fd)
+{
+  xv6_stdio_ctx_t *ctx = (xv6_stdio_ctx_t *)pvTaskGetThreadLocalStoragePointer(NULL, XV6_TLS_STDIO_IDX);
+  if(ctx == 0){
+    ctx = (xv6_stdio_ctx_t *)malloc(sizeof(*ctx));
+    if(ctx == 0)
+      return;
+    vTaskSetThreadLocalStoragePointer(NULL, XV6_TLS_STDIO_IDX, ctx);
+  }
+  ctx->in_fd = in_fd;
+  ctx->out_fd = out_fd;
+  ctx->err_fd = err_fd;
+}
+
+void xv6_stdio_reset_fds(void)
+{
+  xv6_stdio_ctx_t *ctx = (xv6_stdio_ctx_t *)pvTaskGetThreadLocalStoragePointer(NULL, XV6_TLS_STDIO_IDX);
+  if(ctx){
+    free(ctx);
+    vTaskSetThreadLocalStoragePointer(NULL, XV6_TLS_STDIO_IDX, 0);
+  }
 }
 
 int xv6fs_ro_list(int index, char *name_out, int name_out_len, uint32 *size_out)

@@ -20,6 +20,8 @@ int xv6_read(int fd, void *buf, uint32 size);
 int xv6_write(int fd, const void *buf, uint32 size);
 int xv6_close(int fd);
 int xv6_ptsname(int master_fd, char *out_path, int out_len);
+void xv6_stdio_set_fds(int in_fd, int out_fd, int err_fd);
+void xv6_stdio_reset_fds(void);
 void xv6_vfs_reset(void);
 
 #define XV6_O_RDONLY 0x0000

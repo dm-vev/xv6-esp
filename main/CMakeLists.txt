@@ -36,6 +36,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   set(ESP_USER_PTYSEND "${ESP_USER_DIR}/ptysend")
   set(ESP_USER_PTYRECV "${ESP_USER_DIR}/ptyrecv")
   set(ESP_USER_SLEEP "${ESP_USER_DIR}/sleep")
+  set(ESP_USER_STDINHEAD "${ESP_USER_DIR}/stdinhead")
   set(FSROOT_STAMP "${CMAKE_BINARY_DIR}/fsroot_stage.stamp")
   file(GLOB_RECURSE FSROOT_SOURCE_FILES CONFIGURE_DEPENDS "${XV6FS_ROOT_DIR}/*")
   set(ESP_USER_FLAGS
@@ -187,6 +188,14 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   )
 
   add_custom_command(
+    OUTPUT ${ESP_USER_STDINHEAD}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${ESP_USER_DIR}
+    COMMAND ${CMAKE_C_COMPILER} ${ESP_USER_FLAGS} -o ${ESP_USER_STDINHEAD} ${PROJECT_DIR}/esp_user/stdinhead.c
+    DEPENDS ${PROJECT_DIR}/esp_user/stdinhead.c
+    VERBATIM
+  )
+
+  add_custom_command(
     OUTPUT ${FSROOT_STAMP}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${XV6FS_ROOT_DIR}
     COMMAND ${CMAKE_COMMAND} -E rm -rf ${FSROOT_STAGE}
@@ -208,11 +217,12 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_PTYSEND} ${FSROOT_BIN}/ptysend
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_PTYRECV} ${FSROOT_BIN}/ptyrecv
     COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_SLEEP} ${FSROOT_BIN}/sleep
+    COMMAND ${CMAKE_COMMAND} -E copy ${ESP_USER_STDINHEAD} ${FSROOT_BIN}/stdinhead
     COMMAND ${CMAKE_COMMAND} -E touch ${FSROOT_STAMP}
     DEPENDS ${ESP_USER_LS} ${ESP_USER_ECHO} ${ESP_USER_MEM} ${ESP_USER_TICKS} ${ESP_USER_MKDIR}
             ${ESP_USER_WRITE} ${ESP_USER_CAT} ${ESP_USER_RM} ${ESP_USER_HEAD} ${ESP_USER_DD}
             ${ESP_USER_CP} ${ESP_USER_MV} ${ESP_USER_PTYDEMO} ${ESP_USER_PTYSEND} ${ESP_USER_PTYRECV}
-            ${ESP_USER_SLEEP}
+            ${ESP_USER_SLEEP} ${ESP_USER_STDINHEAD}
             ${FSROOT_SOURCE_FILES}
     VERBATIM
   )
@@ -238,6 +248,12 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
 
   add_custom_target(qemu_smoke
     COMMAND ${PROJECT_DIR}/scripts/qemu_smoke_esp.py
+    DEPENDS xv6fs_img_gen
+    USES_TERMINAL
+  )
+
+  add_custom_target(qemu_stress
+    COMMAND ${PROJECT_DIR}/scripts/qemu_stress_esp.py
     DEPENDS xv6fs_img_gen
     USES_TERMINAL
   )
