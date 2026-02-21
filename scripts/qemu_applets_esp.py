@@ -83,6 +83,18 @@ def cmd(sock: socket.socket, command: str, timeout_s: float = 60.0) -> str:
     return out
 
 
+def prepare_shell_state(sock: socket.socket) -> None:
+    cleanup_cmds = (
+        "rm -f /tee.out /tee_auto.out /touch.out /touch2.out /touch_auto.out",
+        "rm -f /mv_echo /mv_cat /cp_echo /cp_cat /dd_echo /dd_cat",
+        "rmdir /tmp/integration/a",
+        "rmdir /tmp/integration/b",
+        "rmdir /tmp/integration/auto",
+    )
+    for c in cleanup_cmds:
+        _ = cmd(sock, c, timeout_s=20.0)
+
+
 def generate_qemu_flash() -> None:
     merge = (
         f"{IDF_EXPORT} && "
@@ -371,6 +383,7 @@ def main() -> int:
                 sock.sendall(b"\n")
                 _boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
                 cmd(sock, "export PATH=/bin:/usr/bin:.")
+                prepare_shell_state(sock)
                 out = cmd(sock, command, timeout_s=60.0)
                 assert_ok_output(applet, out)
             finally:

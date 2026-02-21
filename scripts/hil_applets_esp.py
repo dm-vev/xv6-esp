@@ -193,6 +193,18 @@ def cmd(ser: "serial.Serial", command: str, timeout_s: float = 90.0) -> str:
     return out
 
 
+def prepare_shell_state(ser: "serial.Serial") -> None:
+    cleanup_cmds = (
+        "rm -f /tee.out /tee_auto.out /touch.out /touch2.out /touch_auto.out",
+        "rm -f /mv_echo /mv_cat /cp_echo /cp_cat /dd_echo /dd_cat",
+        "rmdir /tmp/integration/a",
+        "rmdir /tmp/integration/b",
+        "rmdir /tmp/integration/auto",
+    )
+    for c in cleanup_cmds:
+        _ = cmd(ser, c, timeout_s=30.0)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", default=os.environ.get("APPLETS_PORT", ""))
@@ -220,6 +232,7 @@ def main() -> int:
         ser.write(b"\n")
         _boot = read_until(ser, b"xv6> ", 60.0)
         cmd(ser, "export PATH=/bin:/usr/bin:.")
+        prepare_shell_state(ser)
         for applet in applets:
             commands = build_applet_commands(applet, matrix)
             if not commands:
