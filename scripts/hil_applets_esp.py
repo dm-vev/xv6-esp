@@ -107,11 +107,18 @@ def build_flag_command(applet: str, fl: str) -> str | None:
 def test_matrix() -> dict[str, list[str]]:
     return {
         "basename": ["basename /bin/echo", "basename /bin/echo .x"],
-        "cat": ["cat -u /no_such_file", "cat -n /no_such_file"],
+        "cat": [
+            "cat -u /no_such_file",
+            "cat -n /no_such_file",
+            "cat /etc/rc",
+            "cat /home/README",
+        ],
         "cmp": ["cmp -s /no_such_file /no_such_file2", "cmp -l /no_such_file /no_such_file2"],
         "cp": ["cp -p", "cp -r"],
         "dd": ["dd if=/no_such_input of=/dd_echo bs=16 count=1", "dd conv=unknown if=/no_such_input of=/dd_cat"],
         "dirname": ["dirname /bin/echo", "dirname /bin"],
+        "dlhello": ["dlhello"],
+        "sh": ["sh -c \"echo sh-ok\""],
         "echo": ["echo -n hello", "echo world"],
         "head": ["head -2 /no_such_file"],
         "ls": ["ls /", "ls /bin"],
@@ -172,6 +179,8 @@ def assert_ok_output(applet: str, out: str) -> None:
         "module '",
         "unresolved symbol:",
         "jobs: spawn failed",
+        "cat: read error",
+        "cat: write error",
         "Guru Meditation Error",
         "panic'ed",
         "Backtrace:",

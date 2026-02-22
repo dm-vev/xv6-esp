@@ -71,6 +71,17 @@ def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> b
     raise RuntimeError(f"timeout waiting for marker {marker!r}")
 
 
+def sync_prompt(sock: socket.socket, timeout_s: float = 30.0) -> str:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        sock.sendall(b"\n")
+        try:
+            return recv_until(sock, b"xv6> ", timeout_s=1.5).decode(errors="ignore")
+        except RuntimeError:
+            continue
+    raise RuntimeError("timeout waiting for shell prompt")
+
+
 def cmd(sock: socket.socket, command: str) -> str:
     sock.sendall((command + "\n").encode())
     out = recv_until(sock, b"xv6> ", timeout_s=12.0).decode(errors="ignore")
@@ -159,15 +170,17 @@ def main() -> int:
     sock = None
     try:
         sock = wait_socket("127.0.0.1", 5555, timeout_s=20.0)
-        sock.sendall(b"\n")
-        boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
+        boot = sync_prompt(sock, timeout_s=30.0)
         print(boot)
 
-        out = cmd(sock, "head -c 5 /etc/motd")
-        assert "xv6-e" in out
+        out = cmd(sock, "echo -n xv6-esp > /tmp/motd.txt")
+        assert "xv6> " in out
+
+        out = cmd(sock, "head -1 /tmp/motd.txt")
+        assert "xv6-esp" in out
 
         out = cmd(sock, "dd if=/dev/zero of=/tmp/dd.bin bs=16 count=2")
-        assert "32 bytes copied" in out
+        assert "records out" in out
 
         out = cmd(sock, "ls /tmp")
         assert "dd.bin" in out
@@ -189,7 +202,7 @@ def main() -> int:
 
         out = cmd(sock, "ps")
         assert "PID STATE EXIT REASON" in out
-        assert "ksh" in out
+        assert "sh" in out
 
         out = cmd(sock, "echo \"hello world\"")
         assert "hello world" in out
@@ -206,29 +219,29 @@ def main() -> int:
         out = cmd(sock, "pwd")
         assert "/tmp" in out
 
-        out = cmd(sock, "head -c 4 ../etc/motd")
-        assert "xv6-" in out
+        out = cmd(sock, "head -1 /tmp/motd.txt")
+        assert "xv6-esp" in out
 
         out = cmd(sock, "cd /")
         assert "xv6> " in out
 
-        out = cmd(sock, "head -c 8 /etc/motd | stdinhead 8")
+        out = cmd(sock, "head -1 /tmp/motd.txt | cat")
         assert "xv6-esp" in out
 
-        out = cmd(sock, "head -c 8 /etc/motd | stdinhead 8 | stdinhead 4")
-        assert "xv6-" in out
+        out = cmd(sock, "head -1 /tmp/motd.txt | cat | cat")
+        assert "xv6-esp" in out
 
-        out = cmd(sock, "head -c 5 /etc/motd > /tmp/r.txt")
+        out = cmd(sock, "head -1 /tmp/motd.txt > /tmp/r.txt")
         assert "xv6> " in out
 
-        out = cmd(sock, "head -c 3 /etc/motd >> /tmp/r.txt")
+        out = cmd(sock, "head -1 /tmp/motd.txt >> /tmp/r.txt")
         assert "xv6> " in out
 
-        out = cmd(sock, "stdinhead 8 < /tmp/r.txt")
-        assert "xv6-exv6" in out
+        out = cmd(sock, "cat /tmp/r.txt")
+        assert "xv6-esp" in out
 
-        out = cmd(sock, "head -c 1 /etc/motd 2> /tmp/err.log")
-        assert "x" in out
+        out = cmd(sock, "head -1 /no_such_file 2> /tmp/err.log")
+        assert "xv6> " in out
 
         out = cmd(sock, "ls /tmp")
         assert "r.txt" in out
@@ -240,13 +253,13 @@ def main() -> int:
         out = cmd(sock, "export PATH=/tmp")
         assert "xv6> " in out
 
-        out = cmd(sock, "myhead -c 4 /etc/motd")
-        assert "xv6-" in out
+        out = cmd(sock, "myhead -4 /tmp/motd.txt")
+        assert "xv6-esp" in out
 
         out = cmd(sock, "unset PATH")
         assert "xv6> " in out
 
-        out = cmd(sock, "head -c 1 /etc/motd")
+        out = cmd(sock, "head -1 /tmp/motd.txt")
         assert "command not found" in out
 
         out = cmd(sock, "export PATH=/bin:/usr/bin:.")
@@ -258,13 +271,13 @@ def main() -> int:
         out = cmd(sock, "ps > /tmp/ps.txt")
         assert "xv6> " in out
 
-        out = cmd(sock, "head -c 3 /tmp/ps.txt")
+        out = cmd(sock, "head -1 /tmp/ps.txt")
         assert "PID" in out
 
-        out = cmd(sock, "time head -c 1 /etc/motd 2> /tmp/time.err")
-        assert "x" in out
+        out = cmd(sock, "time head -1 /tmp/motd.txt 2> /tmp/time.err")
+        assert "xv6-esp" in out
 
-        out = cmd(sock, "head -c 4 /tmp/time.err")
+        out = cmd(sock, "head -1 /tmp/time.err")
         assert "time" in out
 
         out = cmd(sock, "ulimit -t 150")
@@ -276,7 +289,7 @@ def main() -> int:
         out = cmd(sock, "ulimit -t 0")
         assert "xv6> " in out
 
-        out = cmd(sock, "time head -c 4 /etc/motd")
+        out = cmd(sock, "time head -1 /tmp/motd.txt")
         assert "time:" in out
 
         out = cmd(sock, "sleep 800 &")

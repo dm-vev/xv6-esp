@@ -22,7 +22,7 @@ def resolve_idf_export() -> str:
     candidates = []
     if os.environ.get("IDF_PATH"):
         candidates.append(Path(os.environ["IDF_PATH"]))
-    candidates.extend((Path("/root/esp-idf"), Path("/tmp/esp-idf")))
+    candidates.extend((Path("/root/esp-idf"), Path("/tmp/esp-idf"), Path("/home/tikhon/Документы/magnolia/esp-idf")))
     for p in candidates:
         if p and has_export_script(p):
             return f"source {p}/export.sh >/dev/null"
@@ -70,6 +70,17 @@ def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> b
         if marker in data:
             return bytes(data)
     raise RuntimeError(f"timeout waiting for marker {marker!r}")
+
+
+def sync_prompt(sock: socket.socket, timeout_s: float = 30.0) -> str:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        sock.sendall(b"\n")
+        try:
+            return recv_until(sock, b"xv6> ", timeout_s=1.5).decode(errors="ignore")
+        except RuntimeError:
+            continue
+    raise RuntimeError("timeout waiting for shell prompt")
 
 
 def cmd(sock: socket.socket, command: str, timeout_s: float = 60.0) -> str:
@@ -244,6 +255,8 @@ def assert_ok_output(applet: str, out: str) -> None:
         "module '",
         "unresolved symbol:",
         "jobs: spawn failed",
+        "cat: read error",
+        "cat: write error",
         "Guru Meditation Error",
         "panic'ed",
         "Backtrace:",
@@ -270,6 +283,8 @@ def test_matrix() -> dict[str, list[str]]:
         "cat": [
             "cat -u /no_such_file",
             "cat -n /no_such_file",
+            "cat /etc/rc",
+            "cat /home/README",
         ],
         "cmp": [
             "cmp -s /no_such_file /no_such_file2",
@@ -289,6 +304,9 @@ def test_matrix() -> dict[str, list[str]]:
         "dirname": [
             "dirname /bin/echo",
             "dirname /bin",
+        ],
+        "sh": [
+            "sh -c \"echo sh-ok\"",
         ],
         "echo": [
             "echo -n hello",
@@ -389,8 +407,7 @@ def main() -> int:
             sock = None
             try:
                 sock = wait_socket("127.0.0.1", 5555, timeout_s=20.0)
-                sock.sendall(b"\n")
-                _boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
+                _boot = sync_prompt(sock, timeout_s=30.0)
                 cmd(sock, "export PATH=/bin:/usr/bin:.")
                 prepare_shell_state(sock)
                 out = cmd(sock, command, timeout_s=60.0)
