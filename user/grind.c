@@ -277,16 +277,16 @@ go(int which_child)
       close(aa[0]);
       close(aa[1]);
       close(bb[1]);
-      char buf[4] = { 0, 0, 0, 0 };
-      read(bb[0], buf+0, 1);
-      read(bb[0], buf+1, 1);
-      read(bb[0], buf+2, 1);
+      char readbuf[4] = { 0, 0, 0, 0 };
+      read(bb[0], readbuf+0, 1);
+      read(bb[0], readbuf+1, 1);
+      read(bb[0], readbuf+2, 1);
       close(bb[0]);
       int st1, st2;
       wait(&st1);
       wait(&st2);
-      if(st1 != 0 || st2 != 0 || strcmp(buf, "hi\n") != 0){
-        printf("grind: exec pipeline failed %d %d \"%s\"\n", st1, st2, buf);
+      if(st1 != 0 || st2 != 0 || strcmp(readbuf, "hi\n") != 0){
+        printf("grind: exec pipeline failed %d %d \"%s\"\n", st1, st2, readbuf);
         exit(1);
       }
     }

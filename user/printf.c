@@ -120,6 +120,7 @@ fprintf(int fd, const char *fmt, ...)
 
   va_start(ap, fmt);
   vprintf(fd, fmt, ap);
+  va_end(ap);
 }
 
 void
@@ -129,4 +130,5 @@ printf(const char *fmt, ...)
 
   va_start(ap, fmt);
   vprintf(1, fmt, ap);
+  va_end(ap);
 }

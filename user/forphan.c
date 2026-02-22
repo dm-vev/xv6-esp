@@ -30,7 +30,7 @@ main(int argc, char **argv)
     exit(1);
   }
   if (open(ff, O_RDONLY) != -1) {
-    printf("%s: open successed\n", s);
+    printf("%s: open succeeded\n", s);
     exit(1);
   }
   printf("wait for kill and reclaim %d\n", st.ino);

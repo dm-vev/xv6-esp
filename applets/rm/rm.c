@@ -11,11 +11,11 @@
 
 extern int lstat(const char *path, struct stat *st);
 
-int fflg; /* -f force - supress error messages */
+int fflg; /* -f force - suppress error messages */
 int iflg; /* -i interrogate user on each file */
 int rflg; /* -r recurse */
 
-int errcode; /* true if errors occured */
+int errcode; /* true if errors occurred */
 
 static int rm(char arg[], int level);
 static int dotname(char *s);
@@ -76,7 +76,7 @@ char *pathp; /* current pointer to end of path */
 int pathsz;  /* size of path */
 
 /*
- * Return TRUE if sucessful. Recursive with -r (rflg)
+ * Return TRUE if successful. Recursive with -r (rflg)
  */
 int rm(char arg[], int level)
 {
@@ -162,8 +162,12 @@ int rm(char arg[], int level)
                     fprintf(stderr, "rm: internal synchronization error: %s, %s, %s\n", arg, cp,
                             dp->d_name);
                 }
-                strncpy(prevname, dp->d_name, sizeof(prevname) - 1);
-                prevname[sizeof(prevname) - 1] = '\0';
+                if (dp != NULL) {
+                    strncpy(prevname, dp->d_name, sizeof(prevname) - 1);
+                    prevname[sizeof(prevname) - 1] = '\0';
+                } else {
+                    prevname[0] = '\0';
+                }
             }
         }
         closedir(dirp);

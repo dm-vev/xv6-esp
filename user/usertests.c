@@ -265,9 +265,9 @@ rwsbrk(char *s)
     printf("open(rwsbrk) failed\n");
     exit(1);
   }
-  n = write(fd, (void*)(a+PGSIZE), 1024);
+  n = write(fd, (void *)(a + PGSIZE), 1024);
   if(n >= 0){
-    printf("write(fd, %p, 1024) returned %d, not -1\n", (void*)a+PGSIZE, n);
+    printf("write(fd, %p, 1024) returned %d, not -1\n", (void *)(a + PGSIZE), n);
     exit(1);
   }
   close(fd);
@@ -278,9 +278,9 @@ rwsbrk(char *s)
     printf("open(README) failed\n");
     exit(1);
   }
-  n = read(fd, (void*)(a+PGSIZE), 10);
+  n = read(fd, (void *)(a + PGSIZE), 10);
   if(n >= 0){
-    printf("read(fd, %p, 10) returned %d, not -1\n", (void*)a+PGSIZE, n);
+    printf("read(fd, %p, 10) returned %d, not -1\n", (void *)(a + PGSIZE), n);
     exit(1);
   }
   close(fd);
@@ -1057,9 +1057,7 @@ void
 mem(char *s)
 {
   void *m1, *m2;
-  int pid;
-
-  if((pid = fork()) == 0){
+  if(fork() == 0){
     m1 = 0;
     while((m2 = malloc(10001)) != 0){
       *(char**)m2 = m1;
@@ -2242,7 +2240,7 @@ void
 sbrkarg(char *s)
 {
   char *a;
-  int fd, n;
+  int fd;
 
   a = sbrk(PGSIZE);
   fd = open("sbrk", O_CREATE|O_WRONLY);
@@ -2251,7 +2249,7 @@ sbrkarg(char *s)
     printf("%s: open sbrk failed\n", s);
     exit(1);
   }
-  if ((n = write(fd, a, PGSIZE)) < 0) {
+  if(write(fd, a, PGSIZE) < 0) {
     printf("%s: write sbrk failed\n", s);
     exit(1);
   }
@@ -2705,7 +2703,7 @@ lazy_sbrk(char *s)
   char *p = sbrk(0);
   while ((uint64)p < MAXVA-(1<<30)) {
     p = sbrklazy(1<<30);
-    if (p < 0) {
+    if (p == SBRK_ERROR) {
       printf("sbrklazy(%d) returned %p\n", 1<<30, p);
       exit(1);
     }
@@ -2716,13 +2714,13 @@ lazy_sbrk(char *s)
   int n = TRAPFRAME-PGSIZE-(uint64)p;
 
   char *p1 = sbrklazy(n);
-  if (p1 < 0 || p1 != p) {
+  if (p1 == SBRK_ERROR || p1 != p) {
     printf("sbrklazy(%d) returned %p, not expected %p\n", n, p1, p);
     exit(1);
   }
 
   p = sbrk(PGSIZE);
-  if (p < 0 || (uint64)p != TRAPFRAME-PGSIZE) {
+  if (p == SBRK_ERROR || (uint64)p != TRAPFRAME-PGSIZE) {
     printf("sbrk(%d) returned %p, not expected TRAPFRAME-PGSIZE\n", PGSIZE, p);
     exit(1);
   }

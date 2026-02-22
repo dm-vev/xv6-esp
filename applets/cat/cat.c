@@ -174,7 +174,6 @@ int fastcat(int fd)
 {
     int    buffsize, n, nwritten, offset;
     char   *buff;
-    struct stat statbuff;
 
 #ifndef OPTSIZE
     if (obsize)

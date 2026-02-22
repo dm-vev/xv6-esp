@@ -44,13 +44,8 @@ static char *file1, *file2; /* file names */
  */
 static void error(char *filename)
 {
-    extern int errno;
-    int sverrno;
-
     if (!silent) {
-        sverrno = errno;
         (void)fprintf(stderr, "cmp: %s: ", filename);
-        errno = sverrno;
         perror((char *)NULL);
     }
     exit(ERR);

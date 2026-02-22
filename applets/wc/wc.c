@@ -20,7 +20,6 @@ int main(int argc, char **argv)
     int i, token;
     FILE *fp;
     int c;
-    char *p;
 
     while (argc > 1 && *argv[1] == '-') {
         switch (argv[1][1]) {
@@ -30,7 +29,6 @@ int main(int argc, char **argv)
             wd = argv[1] + 1;
             break;
         default:
-        usage:
             fprintf(stderr, "Usage: wc [-lwc] [files]\n");
             exit(1);
         }
@@ -39,7 +37,6 @@ int main(int argc, char **argv)
     }
 
     i = 1;
-    fp = stdin;
     do {
         if (argc > 1 && (fp = fopen(argv[i], "r")) == NULL) {
             perror(argv[i]);

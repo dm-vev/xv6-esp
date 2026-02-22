@@ -6,7 +6,6 @@ extern int xv6fs_readdir_path(const char *path, int index, char *name_out, int n
 static int list_path(const char *path)
 {
   int idx = 0;
-  int printed = 0;
   char name[64];
   unsigned short type = 0;
   unsigned int size = 0;
@@ -23,11 +22,10 @@ static int list_path(const char *path)
     if(rc == 1)
       break;
     puts(name);
-    printed = 1;
     idx++;
   }
 
-  return printed ? 0 : 0;
+  return 0;
 }
 
 int main(int argc, char **argv)

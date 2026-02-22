@@ -18,7 +18,6 @@ int main(int Argc, char *argv[])
 {
     int argc;
     char *name;
-    char *argp;
     int linecnt = 10;
     int around = 0;
 
@@ -53,7 +52,6 @@ int main(int Argc, char *argv[])
 
 void copyout(int cnt)
 {
-    int c;
     char lbuf[BUFSIZ];
 
     while (cnt > 0 && fgets(lbuf, sizeof lbuf, stdin) != 0) {
