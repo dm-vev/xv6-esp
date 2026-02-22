@@ -4,7 +4,7 @@
 
 #include "esp_flash_disk.h"
 #include "hal.h"
-#include "ksh.h"
+#include "shell_runtime.h"
 #include "xv6fs_ro.h"
 
 static const char *TAG = "xv6_boot";
@@ -22,5 +22,14 @@ void xv6_boot(void)
   if(xv6fs_ro_init() != 0)
     ESP_LOGE(TAG, "xv6fs mount failed");
 
-  ksh_run();
+  if(shell_runtime_init() != 0){
+    ESP_LOGE(TAG, "shell runtime init failed");
+    hal_reboot();
+    return;
+  }
+  if(shell_runtime_bootstrap("/bin/sh") != 0){
+    ESP_LOGE(TAG, "failed to bootstrap /bin/sh");
+    hal_reboot();
+    return;
+  }
 }

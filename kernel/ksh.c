@@ -1,4 +1,4 @@
-#include "ksh.h"
+#include "shell_runtime.h"
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -9,7 +9,9 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/times.h>
 #include <sys/time.h>
+#include <time.h>
 #include <sys/reent.h>
 #include <dirent.h>
 #include <signal.h>
@@ -81,12 +83,13 @@ static ksh_job_t g_jobs[KSH_MAX_JOBS];
 static int g_next_job_id = 1;
 static uint32 g_ulimit_ms = 0;
 static int g_ulimit_heap_kb = 0;
-static volatile int g_ksh_started = 0;
+static volatile int g_runtime_started = 0;
 static SemaphoreHandle_t g_jobs_lock;
 static SemaphoreHandle_t g_loader_lock;
 static ksh_env_t g_env[KSH_MAX_ENV];
 
 static int dispatch_command(int argc, char **argv, int run_bg);
+static int eval_line_inner(const char *line, int *exit_code);
 
 static void k_copy_cstr(char *dst, int dst_len, const char *src)
 {
@@ -124,6 +127,15 @@ static int k_puts(const char *s)
   return 0;
 }
 
+static int k_map_host_stdio_fd(int fd)
+{
+  /*
+   * Keep fd values untouched in syscall layer: host/newlib descriptor values
+   * may overlap numerically with valid xv6 fds.
+   */
+  return fd;
+}
+
 typedef struct ksh_stream ksh_stream_t;
 static ksh_stream_t *k_stream_from_file(FILE *f);
 static size_t k_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream);
@@ -134,6 +146,7 @@ static int k_read(int fd, void *buf, size_t size);
 static int k_write(int fd, const void *buf, size_t size);
 static int k_close(int fd);
 static off_t k_lseek(int fd, off_t offset, int whence);
+extern struct _reent *__getreent(void);
 
 static int k_host_printf(const char *fmt, ...)
 {
@@ -390,7 +403,9 @@ static int k_getchar(void)
 
 static char *k_fgets(char *s, int n, FILE *stream)
 {
+  char *orig = s;
   int i;
+  s = (char *)elf_loader_translate_ptr(s);
   if(s == 0 || n <= 0){
     errno = EINVAL;
     return 0;
@@ -408,7 +423,7 @@ static char *k_fgets(char *s, int n, FILE *stream)
   if(i == 0)
     return 0;
   s[i] = 0;
-  return s;
+  return orig;
 }
 
 static size_t k_fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
@@ -417,6 +432,9 @@ static size_t k_fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
   size_t want;
   int rc;
 
+  ptr = (void *)elf_loader_translate_ptr(ptr);
+  if(ptr == 0)
+    return 0;
   if(!s)
     return fread(ptr, size, nmemb, stream);
   if(size == 0 || nmemb == 0)
@@ -559,9 +577,17 @@ static int k_ungetc(int c, FILE *stream)
 static int k_fileno(FILE *stream)
 {
   ksh_stream_t *s = k_stream_from_file(stream);
+  int fd;
+  if(stream == stdin)
+    return 0;
+  if(stream == stdout)
+    return 1;
+  if(stream == stderr)
+    return 2;
   if(s)
     return s->fd;
-  return fileno(stream);
+  fd = fileno(stream);
+  return fd;
 }
 
 static void k_setbuf(FILE *stream, char *buf)
@@ -676,6 +702,12 @@ static int k_creat(const char *path, mode_t mode)
 
 static int k_read(int fd, void *buf, size_t size)
 {
+  fd = k_map_host_stdio_fd(fd);
+  buf = (void *)elf_loader_translate_ptr(buf);
+  if(buf == 0){
+    errno = EINVAL;
+    return -1;
+  }
   int rc = xv6_read(fd, buf, (uint32)size);
   if(rc < 0)
     errno = EIO;
@@ -684,6 +716,12 @@ static int k_read(int fd, void *buf, size_t size)
 
 static int k_write(int fd, const void *buf, size_t size)
 {
+  fd = k_map_host_stdio_fd(fd);
+  buf = elf_loader_translate_ptr(buf);
+  if(buf == 0){
+    errno = EINVAL;
+    return -1;
+  }
   int rc = xv6_write(fd, buf, (uint32)size);
   if(rc < 0)
     errno = EIO;
@@ -692,6 +730,7 @@ static int k_write(int fd, const void *buf, size_t size)
 
 static int k_close(int fd)
 {
+  fd = k_map_host_stdio_fd(fd);
   if(fd >= 0 && fd <= 2)
     return 0;
   if(xv6_close(fd) != 0){
@@ -703,6 +742,7 @@ static int k_close(int fd)
 
 static int k_dup(int fd)
 {
+  fd = k_map_host_stdio_fd(fd);
   int rc = xv6_dup(fd);
   if(rc < 0){
     errno = EBADF;
@@ -713,6 +753,8 @@ static int k_dup(int fd)
 
 static int k_dup2(int oldfd, int newfd)
 {
+  oldfd = k_map_host_stdio_fd(oldfd);
+  newfd = k_map_host_stdio_fd(newfd);
   if(oldfd == newfd)
     return newfd;
   if(newfd >= 0)
@@ -722,6 +764,7 @@ static int k_dup2(int oldfd, int newfd)
 
 static off_t k_lseek(int fd, off_t offset, int whence)
 {
+  fd = k_map_host_stdio_fd(fd);
   int rc = xv6_lseek(fd, (int)offset, whence);
   if(rc < 0){
     errno = EINVAL;
@@ -733,6 +776,8 @@ static off_t k_lseek(int fd, off_t offset, int whence)
 static int k_fstat(int fd, struct stat *st)
 {
   xv6_kstat_t kst;
+  fd = k_map_host_stdio_fd(fd);
+  st = (struct stat *)elf_loader_translate_ptr(st);
   if(st == 0){
     errno = EINVAL;
     return -1;
@@ -748,6 +793,7 @@ static int k_stat(const char *path, struct stat *st)
 {
   xv6_kstat_t kst;
   path = (const char *)elf_loader_translate_ptr(path);
+  st = (struct stat *)elf_loader_translate_ptr(st);
   if(path == 0 || st == 0){
     errno = EINVAL;
     return -1;
@@ -842,6 +888,8 @@ static int k_chdir(const char *path)
 
 static char *k_getcwd(char *buf, size_t size)
 {
+  char *orig = buf;
+  buf = (char *)elf_loader_translate_ptr(buf);
   if(buf == 0 || size == 0){
     errno = EINVAL;
     return 0;
@@ -850,11 +898,12 @@ static char *k_getcwd(char *buf, size_t size)
     errno = ERANGE;
     return 0;
   }
-  return buf;
+  return orig;
 }
 
 static int k_isatty(int fd)
 {
+  fd = k_map_host_stdio_fd(fd);
   return (fd >= 0 && fd <= 2) ? 1 : 0;
 }
 
@@ -883,15 +932,32 @@ static mode_t k_umask(mode_t mask)
   return old;
 }
 
+static int k_validate_open_fd(int fd)
+{
+  xv6_kstat_t st;
+  fd = k_map_host_stdio_fd(fd);
+  if(fd < 0){
+    errno = EBADF;
+    return -1;
+  }
+  if(xv6_fstat(fd, &st) != 0){
+    errno = EBADF;
+    return -1;
+  }
+  return fd;
+}
+
 static int k_fsync(int fd)
 {
-  (void)fd;
+  if(k_validate_open_fd(fd) < 0)
+    return -1;
   return 0;
 }
 
 static int k_fdatasync(int fd)
 {
-  (void)fd;
+  if(k_validate_open_fd(fd) < 0)
+    return -1;
   return 0;
 }
 
@@ -901,9 +967,11 @@ static void k_sync(void)
 
 static int k_ftruncate(int fd, off_t length)
 {
-  (void)fd;
+  if(k_validate_open_fd(fd) < 0)
+    return -1;
   (void)length;
-  return 0;
+  errno = ENOSYS;
+  return -1;
 }
 
 static int k_truncate(const char *path, off_t length)
@@ -1077,9 +1145,11 @@ static unsigned int k_sleep(unsigned int sec)
 
 static int k_fchmod(int fd, mode_t mode)
 {
-  (void)fd;
+  if(k_validate_open_fd(fd) < 0)
+    return -1;
   (void)mode;
-  return 0;
+  errno = ENOSYS;
+  return -1;
 }
 
 static int k_chown(const char *path, uid_t owner, gid_t group)
@@ -1101,10 +1171,12 @@ static int k_lchown(const char *path, uid_t owner, gid_t group)
 
 static int k_fchown(int fd, uid_t owner, gid_t group)
 {
-  (void)fd;
+  if(k_validate_open_fd(fd) < 0)
+    return -1;
   (void)owner;
   (void)group;
-  return 0;
+  errno = ENOSYS;
+  return -1;
 }
 
 static int k_optind = 1;
@@ -1204,66 +1276,158 @@ static int k_getopt(int argc, char *const argv_in[], const char *optstring_in)
   return '?';
 }
 
+static void k_reent_set_errno(struct _reent *r, int err)
+{
+  if(err <= 0)
+    err = EIO;
+  errno = err;
+  if(r)
+    r->_errno = err;
+}
+
+static int k_reent_finish_int(struct _reent *r, int rc)
+{
+  if(rc < 0){
+    k_reent_set_errno(r, errno);
+    return -1;
+  }
+  if(r)
+    r->_errno = 0;
+  return rc;
+}
+
+static _ssize_t k_reent_finish_ssize(struct _reent *r, int rc)
+{
+  if(rc < 0){
+    k_reent_set_errno(r, errno);
+    return (_ssize_t)-1;
+  }
+  if(r)
+    r->_errno = 0;
+  return (_ssize_t)rc;
+}
+
 static _off_t k__lseek_r(struct _reent *r, int fd, _off_t off, int whence)
 {
-  (void)r;
-  return (_off_t)k_lseek(fd, (off_t)off, whence);
+  off_t rc = k_lseek(fd, (off_t)off, whence);
+  if(rc < 0){
+    k_reent_set_errno(r, errno);
+    return (_off_t)-1;
+  }
+  if(r)
+    r->_errno = 0;
+  return (_off_t)rc;
 }
 
 static _ssize_t k__read_r(struct _reent *r, int fd, void *buf, size_t cnt)
 {
-  (void)r;
-  return (_ssize_t)k_read(fd, buf, cnt);
+  return k_reent_finish_ssize(r, k_read(fd, buf, cnt));
 }
 
 static _ssize_t k__write_r(struct _reent *r, int fd, const void *buf, size_t cnt)
 {
-  (void)r;
-  return (_ssize_t)k_write(fd, buf, cnt);
+  return k_reent_finish_ssize(r, k_write(fd, buf, cnt));
 }
 
 static int k__close_r(struct _reent *r, int fd)
 {
-  (void)r;
-  return k_close(fd);
+  return k_reent_finish_int(r, k_close(fd));
 }
 
 static int k__open_r(struct _reent *r, const char *path, int flags, int mode)
 {
-  (void)r;
-  return k_open(path, flags, mode);
+  return k_reent_finish_int(r, k_open(path, flags, mode));
 }
 
 static int k__fstat_r(struct _reent *r, int fd, struct stat *st)
 {
-  (void)r;
-  return k_fstat(fd, st);
+  return k_reent_finish_int(r, k_fstat(fd, st));
 }
 
 static int k__stat_r(struct _reent *r, const char *path, struct stat *st)
 {
-  (void)r;
-  return k_stat(path, st);
+  return k_reent_finish_int(r, k_stat(path, st));
+}
+
+static int k__lstat_r(struct _reent *r, const char *path, struct stat *st)
+{
+  return k_reent_finish_int(r, k_lstat(path, st));
 }
 
 static int k__isatty_r(struct _reent *r, int fd)
 {
-  (void)r;
-  return k_isatty(fd);
+  return k_reent_finish_int(r, k_isatty(fd));
 }
 
 static int k__unlink_r(struct _reent *r, const char *path)
 {
-  (void)r;
-  return k_unlink(path);
+  return k_reent_finish_int(r, k_unlink(path));
+}
+
+static int k__mkdir_r(struct _reent *r, const char *path, int mode)
+{
+  return k_reent_finish_int(r, k_mkdir(path, (mode_t)mode));
+}
+
+static int k__rmdir_r(struct _reent *r, const char *path)
+{
+  return k_reent_finish_int(r, k_rmdir(path));
+}
+
+static int k__rename_r(struct _reent *r, const char *oldpath, const char *newpath)
+{
+  return k_reent_finish_int(r, k_rename(oldpath, newpath));
+}
+
+static int k__link_r(struct _reent *r, const char *oldpath, const char *newpath)
+{
+  return k_reent_finish_int(r, k_link(oldpath, newpath));
+}
+
+static int k__gettimeofday_r(struct _reent *r, struct timeval *tp, void *tzp)
+{
+  uint32 ms;
+  struct timezone *tz = (struct timezone *)elf_loader_translate_ptr(tzp);
+
+  tp = (struct timeval *)elf_loader_translate_ptr(tp);
+
+  if(tp == 0){
+    k_reent_set_errno(r, EINVAL);
+    return -1;
+  }
+  ms = hal_ticks();
+  tp->tv_sec = (time_t)(ms / 1000U);
+  tp->tv_usec = (suseconds_t)((ms % 1000U) * 1000U);
+  if(tz){
+    tz->tz_minuteswest = 0;
+    tz->tz_dsttime = 0;
+  }
+  if(r)
+    r->_errno = 0;
+  return 0;
+}
+
+static clock_t k__times_r(struct _reent *r, struct tms *buf)
+{
+  clock_t now = (clock_t)hal_ticks();
+
+  buf = (struct tms *)elf_loader_translate_ptr(buf);
+  if(buf){
+    buf->tms_utime = now;
+    buf->tms_stime = 0;
+    buf->tms_cutime = 0;
+    buf->tms_cstime = 0;
+  }
+  if(r)
+    r->_errno = 0;
+  return now;
 }
 
 static int k__kill_r(struct _reent *r, int pid, int sig)
 {
-  (void)r;
   (void)pid;
   (void)sig;
-  errno = ENOSYS;
+  k_reent_set_errno(r, ENOSYS);
   return -1;
 }
 
@@ -1292,12 +1456,44 @@ static caddr_t k__sbrk_r(struct _reent *r, ptrdiff_t incr)
     used = 0;
   }
   if(arena == 0 || incr < 0 || used + (size_t)incr > cap){
-    errno = ENOMEM;
+    k_reent_set_errno(r, ENOMEM);
     return (caddr_t)-1;
   }
   old = used;
   used += (size_t)incr;
+  if(r)
+    r->_errno = 0;
   return (caddr_t)(arena + old);
+}
+
+static caddr_t k_sbrk(ptrdiff_t incr)
+{
+  return k__sbrk_r(__getreent(), incr);
+}
+
+static caddr_t k__sbrk(ptrdiff_t incr)
+{
+  return k__sbrk_r(__getreent(), incr);
+}
+
+static int k_gettimeofday(struct timeval *tp, void *tzp)
+{
+  return k__gettimeofday_r(__getreent(), tp, tzp);
+}
+
+static clock_t k_times(struct tms *buf)
+{
+  return k__times_r(__getreent(), buf);
+}
+
+static time_t k_time(time_t *out)
+{
+  struct timeval tv;
+  if(k_gettimeofday(&tv, 0) != 0)
+    return (time_t)-1;
+  if(out)
+    *out = tv.tv_sec;
+  return tv.tv_sec;
 }
 
 static void k_exit(int status)
@@ -1312,6 +1508,7 @@ static void k_abort(void)
 
 extern int ksh_register_libc_host_symbols(void);
 extern struct _reent *__getreent(void);
+extern char **environ;
 
 static int k_fs_readdir_path(const char *path, int index, char *name_out, int name_out_len, uint16 *type_out,
                              uint32 *size_out)
@@ -1827,6 +2024,65 @@ static void free_exec_argv(int argc, char **argv)
   free(argv);
 }
 
+static char **dup_exec_envp(int *out_count)
+{
+  char **envp;
+  int i;
+  int n = 0;
+
+  if(out_count)
+    *out_count = 0;
+  for(i = 0; i < KSH_MAX_ENV; i++){
+    if(g_env[i].used)
+      n++;
+  }
+
+  envp = (char **)calloc((size_t)n + 1u, sizeof(char *));
+  if(envp == 0)
+    return 0;
+
+  n = 0;
+  for(i = 0; i < KSH_MAX_ENV; i++){
+    int key_len;
+    int val_len;
+    int total_len;
+    char *kv;
+
+    if(!g_env[i].used)
+      continue;
+    key_len = (int)strlen(g_env[i].key);
+    val_len = (int)strlen(g_env[i].val);
+    total_len = key_len + 1 + val_len;
+    kv = (char *)malloc((size_t)total_len + 1u);
+    if(kv == 0){
+      int j;
+      for(j = 0; j < n; j++)
+        free(envp[j]);
+      free(envp);
+      return 0;
+    }
+    memcpy(kv, g_env[i].key, (size_t)key_len);
+    kv[key_len] = '=';
+    memcpy(kv + key_len + 1, g_env[i].val, (size_t)val_len);
+    kv[total_len] = 0;
+    envp[n++] = kv;
+  }
+  envp[n] = 0;
+  if(out_count)
+    *out_count = n;
+  return envp;
+}
+
+static void free_exec_envp(int envc, char **envp)
+{
+  int i;
+  if(envp == 0)
+    return;
+  for(i = 0; i < envc; i++)
+    free(envp[i]);
+  free(envp);
+}
+
 static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int out_fd, int err_fd, int max_heap_kb)
 {
   elf_module_t *m;
@@ -1835,9 +2091,14 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
   int retv = 0;
   int rc = -1;
   int loader_locked = 0;
+  int lock_released_for_exec = 0;
   char **exec_argv_owned = 0;
   char **exec_argv = 0;
+  char **exec_envp = 0;
+  int exec_envc = 0;
   char module_name[MAXPATH];
+  static int g_runtime_libs_ready = 0;
+  int module_loaded = 0;
 
   if(argc <= 0 || argv == 0 || argv[0] == 0 || argv[0][0] == 0)
     return -1;
@@ -1867,6 +2128,13 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
     return -1;
   }
   memcpy(exec_argv, exec_argv_owned, ((size_t)argc + 1u) * sizeof(char *));
+  exec_envp = dup_exec_envp(&exec_envc);
+  if(exec_envp == 0){
+    free(exec_argv);
+    free_exec_argv(argc, exec_argv_owned);
+    puts_line("exec: no memory");
+    return -1;
+  }
   k_optind = 1;
   k_opterr = 1;
   k_optopt = 0;
@@ -1880,6 +2148,26 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
     (void)xSemaphoreTake(g_loader_lock, portMAX_DELAY);
     loader_locked = 1;
   }
+  if(!g_runtime_libs_ready){
+    void *rt_img = 0;
+    uint32 rt_sz = 0;
+    elf_module_t *rt_mod = 0;
+    if(elf_module_find("libc") == 0){
+      if(xv6fs_read_file_alloc_path("/lib/libc.so", &rt_img, &rt_sz) == 0 && rt_img != 0){
+        if(elf_module_load_from_bytes("libc", rt_img, rt_sz, &rt_mod) != 0){
+          free(rt_img);
+          puts_line("exec: failed to load /lib/libc.so");
+          goto out;
+        }
+        (void)elf_module_set_global(rt_mod, 1);
+        free(rt_img);
+      } else {
+        puts_line("exec: missing /lib/libc.so");
+        goto out;
+      }
+    }
+    g_runtime_libs_ready = 1;
+  }
   strncpy(module_name, exec_argv[0], sizeof(module_name) - 1);
   module_name[sizeof(module_name) - 1] = 0;
   if(try_read_exec_image(exec_argv[0], &image, &image_size, module_name, sizeof(module_name)) != 0 || image == 0){
@@ -1891,9 +2179,17 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
     puts_line("exec: elf load failed");
     goto out;
   }
+  (void)elf_module_set_global(m, 0);
   free(image);
+  module_loaded = 1;
 
-  if(elf_module_call_main(m, argc, exec_argv, &retv) != 0){
+  if(loader_locked && g_loader_lock){
+    (void)xSemaphoreGive(g_loader_lock);
+    loader_locked = 0;
+    lock_released_for_exec = 1;
+  }
+
+  if(elf_module_call_main_ex(m, argc, exec_argv, exec_envp, &retv) != 0){
     puts_line("exec: entry call failed");
     if(exit_code)
       *exit_code = 126;
@@ -1911,9 +2207,17 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
   rc = 0;
 
 out:
+  if(lock_released_for_exec && g_loader_lock){
+    (void)xSemaphoreTake(g_loader_lock, portMAX_DELAY);
+    loader_locked = 1;
+  }
+  if(module_loaded){
+    (void)elf_module_unload(module_name);
+  }
   if(loader_locked && g_loader_lock)
     (void)xSemaphoreGive(g_loader_lock);
   xv6_stdio_reset_fds();
+  free_exec_envp(exec_envc, exec_envp);
   free(exec_argv);
   free_exec_argv(argc, exec_argv_owned);
   return rc;
@@ -2628,7 +2932,7 @@ static void cmd_ps(void)
   int any = 0;
 
   k_printf("PID STATE EXIT REASON LIMIT(ms/kb) CMD\r\n");
-  k_printf("0 RUN - - - ksh\r\n");
+  k_printf("0 RUN - - - sh\r\n");
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -2896,6 +3200,38 @@ static void cmd_unset(int argc, char **argv)
   }
 }
 
+static void cmd_source(int argc, char **argv)
+{
+  FILE *f;
+  char line[256];
+
+  if(argc != 2){
+    eputs_line("usage: . <file>");
+    return;
+  }
+
+  f = fopen(argv[1], "r");
+  if(f == 0){
+    eputs_console(".: cannot open: ");
+    eputs_line(argv[1]);
+    return;
+  }
+
+  while(fgets(line, sizeof(line), f) != 0){
+    int exit_code = 0;
+    if(eval_line_inner(line, &exit_code) != 0){
+      fclose(f);
+      return;
+    }
+    if(exit_code != 0){
+      fclose(f);
+      return;
+    }
+  }
+
+  fclose(f);
+}
+
 static void register_default_symbols(void)
 {
   static const elf_host_symbol_t syms[] = {
@@ -2910,8 +3246,10 @@ static void register_default_symbols(void)
     { "fputs", (void *)k_fputs },
     { "fputc", (void *)k_fputc },
     { "fopen", (void *)k_fopen },
+    { "__xv6_host_fopen", (void *)k_fopen },
     { "freopen", (void *)k_freopen },
     { "fclose", (void *)k_fclose },
+    { "__xv6_host_fclose", (void *)k_fclose },
     { "fgets", (void *)k_fgets },
     { "fgetc", (void *)k_fgetc },
     { "getc", (void *)k_getc },
@@ -2975,8 +3313,11 @@ static void register_default_symbols(void)
     { "dup2", (void *)k_dup2 },
     { "lseek", (void *)k_lseek },
     { "stat", (void *)k_stat },
+    { "__xv6_host_stat", (void *)k_stat },
     { "lstat", (void *)k_lstat },
+    { "__xv6_host_lstat", (void *)k_lstat },
     { "fstat", (void *)k_fstat },
+    { "__xv6_host_fstat", (void *)k_fstat },
     { "access", (void *)k_access },
     { "mkdir", (void *)k_mkdir },
     { "unlink", (void *)k_unlink },
@@ -3000,7 +3341,9 @@ static void register_default_symbols(void)
     { "mknod", (void *)k_mknod },
     { "mkfifo", (void *)k_mkfifo },
     { "signal", (void *)k_signal },
+    { "__xv6_host_signal", (void *)k_signal },
     { "sigaction", (void *)k_sigaction },
+    { "__xv6_host_sigaction", (void *)k_sigaction },
     { "sigprocmask", (void *)k_sigprocmask },
     { "sigemptyset", (void *)k_sigemptyset },
     { "sigfillset", (void *)k_sigfillset },
@@ -3016,21 +3359,43 @@ static void register_default_symbols(void)
     { "_lseek_r", (void *)k__lseek_r },
     { "_fstat_r", (void *)k__fstat_r },
     { "_stat_r", (void *)k__stat_r },
+    { "_lstat_r", (void *)k__lstat_r },
     { "_isatty_r", (void *)k__isatty_r },
     { "_unlink_r", (void *)k__unlink_r },
+    { "_mkdir_r", (void *)k__mkdir_r },
+    { "_rmdir_r", (void *)k__rmdir_r },
+    { "_rename_r", (void *)k__rename_r },
+    { "_link_r", (void *)k__link_r },
+    { "_gettimeofday_r", (void *)k__gettimeofday_r },
+    { "_times_r", (void *)k__times_r },
     { "_kill_r", (void *)k__kill_r },
     { "_getpid_r", (void *)k__getpid_r },
     { "_sbrk_r", (void *)k__sbrk_r },
+    { "_sbrk", (void *)k__sbrk },
+    { "sbrk", (void *)k_sbrk },
+    { "gettimeofday", (void *)k_gettimeofday },
+    { "__xv6_host_gettimeofday", (void *)k_gettimeofday },
+    { "times", (void *)k_times },
+    { "__xv6_host_times", (void *)k_times },
+    { "time", (void *)k_time },
+    { "__xv6_host_time", (void *)k_time },
     { "_exit", (void *)k__exit },
     { "fchmod", (void *)k_fchmod },
     { "chown", (void *)k_chown },
     { "lchown", (void *)k_lchown },
     { "fchown", (void *)k_fchown },
     { "getopt", (void *)k_getopt },
+    { "__xv6_host_getopt", (void *)k_getopt },
+    { "__xv6_host_opendir", (void *)opendir },
+    { "__xv6_host_readdir", (void *)readdir },
+    { "__xv6_host_closedir", (void *)closedir },
     { "dlopen", (void *)dlopen },
     { "dlsym", (void *)dlsym },
     { "dlclose", (void *)dlclose },
     { "dlerror", (void *)dlerror },
+    { "shrt_eval_line", (void *)shell_runtime_eval_line },
+    { "shrt_run_interactive", (void *)shell_runtime_run_interactive },
+    { "shrt_reboot", (void *)shell_runtime_reboot },
     { "dirfd", (void *)dirfd },
     { "optind", (void *)&k_optind },
     { "opterr", (void *)&k_opterr },
@@ -3038,6 +3403,8 @@ static void register_default_symbols(void)
     { "optarg", (void *)&k_optarg },
     { "optreset", (void *)&k_optreset },
     { "__getreent", (void *)__getreent },
+    { "environ", (void *)&environ },
+    { "__environ", (void *)&environ },
   };
 
   /*
@@ -3050,7 +3417,7 @@ static void register_default_symbols(void)
 
 static int is_builtin_command(const char *cmd)
 {
-  return (strcmp(cmd, "help") == 0 || strcmp(cmd, "reboot") == 0 || strcmp(cmd, "cd") == 0 ||
+  return (strcmp(cmd, "help") == 0 || strcmp(cmd, "reboot") == 0 || strcmp(cmd, ".") == 0 || strcmp(cmd, "cd") == 0 ||
           strcmp(cmd, "pwd") == 0 || strcmp(cmd, "env") == 0 || strcmp(cmd, "export") == 0 ||
           strcmp(cmd, "unset") == 0 || strcmp(cmd, "ps") == 0 || strcmp(cmd, "jobs") == 0 ||
           strcmp(cmd, "wait") == 0 || strcmp(cmd, "kill") == 0 || strcmp(cmd, "fg") == 0 ||
@@ -3066,6 +3433,10 @@ static int dispatch_builtin_command(int argc, char **argv, int run_bg)
   if(strcmp(argv[0], "reboot") == 0){
     puts_line("rebooting...");
     hal_reboot();
+    return 0;
+  }
+  if(strcmp(argv[0], ".") == 0){
+    cmd_source(argc, argv);
     return 0;
   }
   if(strcmp(argv[0], "cd") == 0){
@@ -3138,25 +3509,76 @@ static int dispatch_command(int argc, char **argv, int run_bg)
     base_io.out_fd = 1;
     base_io.err_fd = 2;
     if(parse_exec_and_redir(argc, argv, &base_io, cmd_argv, KSH_MAX_ARGS, &cmd_argc, &io) != 0)
-      return 0;
+      return -1;
     xv6_stdio_set_fds(io.in_fd, io.out_fd, io.err_fd);
-    (void)dispatch_builtin_command(cmd_argc, cmd_argv, run_bg);
-    xv6_stdio_reset_fds();
-    close_io_custom_fds(&io, &base_io);
+    {
+      int rc = dispatch_builtin_command(cmd_argc, cmd_argv, run_bg);
+      xv6_stdio_reset_fds();
+      close_io_custom_fds(&io, &base_io);
+      return rc;
+    }
+  }
+
+  return execute_external(argc, argv, run_bg, g_ulimit_heap_kb, g_ulimit_ms);
+}
+
+static int eval_line_inner(const char *line, int *exit_code)
+{
+  char buf[256];
+  char *argv[KSH_MAX_ARGS];
+  int argc;
+  int run_bg = 0;
+  size_t n;
+  int rc;
+
+  if(line == 0)
+    return -1;
+
+  n = strlen(line);
+  if(n >= sizeof(buf))
+    n = sizeof(buf) - 1u;
+  memcpy(buf, line, n);
+  buf[n] = 0;
+
+  while(n > 0 && (buf[n - 1] == '\r' || buf[n - 1] == '\n')){
+    buf[n - 1] = 0;
+    n--;
+  }
+
+  argc = parse_line(buf, argv, KSH_MAX_ARGS);
+  if(argc < 0){
+    puts_line("parse: unterminated quote");
+    if(exit_code)
+      *exit_code = 2;
+    return -1;
+  }
+  if(argc == 0){
+    if(exit_code)
+      *exit_code = 0;
     return 0;
   }
 
-  (void)execute_external(argc, argv, run_bg, g_ulimit_heap_kb, g_ulimit_ms);
-  return 0;
+  if(strcmp(argv[argc - 1], "&") == 0){
+    run_bg = 1;
+    argc--;
+    if(argc == 0){
+      puts_line("syntax: command &");
+      if(exit_code)
+        *exit_code = 2;
+      return -1;
+    }
+  }
+
+  rc = dispatch_command(argc, argv, run_bg);
+  if(exit_code)
+    *exit_code = (rc == 0) ? 0 : 1;
+  return rc;
 }
 
-void ksh_run(void)
+int shell_runtime_init(void)
 {
-  char line[256];
-  int len = 0;
-
-  if(__sync_lock_test_and_set(&g_ksh_started, 1) != 0)
-    return;
+  if(__sync_lock_test_and_set(&g_runtime_started, 1) != 0)
+    return 0;
 
   elf_loader_init();
   g_jobs_lock = xSemaphoreCreateMutex();
@@ -3165,12 +3587,44 @@ void ksh_run(void)
   xv6_vfs_reset();
   (void)xv6_chdir("/");
   env_init_defaults();
+  return 0;
+}
 
-  puts_line("xv6-esp32s3 ksh ready");
-  cmd_help();
+int shell_runtime_eval_line(const char *line, int *exit_code)
+{
+  if(shell_runtime_init() != 0)
+    return -1;
+  return eval_line_inner(line, exit_code);
+}
+
+int shell_runtime_bootstrap(const char *shell_path)
+{
+  char *argv[2];
+  int exit_code = 127;
+
+  if(shell_runtime_init() != 0)
+    return -1;
+
+  if(shell_path == 0 || shell_path[0] == 0)
+    shell_path = "/bin/sh";
+
+  argv[0] = (char *)shell_path;
+  argv[1] = 0;
+  return run_elf_command(1, argv, &exit_code, 0, 1, 2, 0);
+}
+
+void shell_runtime_reboot(void)
+{
+  hal_reboot();
+}
+
+int shell_runtime_run_interactive(void)
+{
+  char line[256];
+  int len = 0;
+
   tty_puts("xv6> ");
-
-  while(1){
+  for(;;){
     int c;
 
     enforce_job_limits();
@@ -3194,39 +3648,10 @@ void ksh_run(void)
     }
 
     if(c == '\r' || c == '\n'){
-      char *argv[KSH_MAX_ARGS];
-      int argc;
-      int run_bg = 0;
-
+      int exit_code = 0;
       line[len] = 0;
       puts_line("");
-
-      argc = parse_line(line, argv, KSH_MAX_ARGS);
-      if(argc < 0){
-        puts_line("parse: unterminated quote");
-        tty_puts("xv6> ");
-        len = 0;
-        continue;
-      }
-      if(argc == 0){
-        tty_puts("xv6> ");
-        len = 0;
-        continue;
-      }
-
-      if(strcmp(argv[argc - 1], "&") == 0){
-        run_bg = 1;
-        argc--;
-        if(argc == 0){
-          puts_line("syntax: command &");
-          tty_puts("xv6> ");
-          len = 0;
-          continue;
-        }
-      }
-
-      (void)dispatch_command(argc, argv, run_bg);
-
+      (void)eval_line_inner(line, &exit_code);
       len = 0;
       tty_puts("xv6> ");
       continue;

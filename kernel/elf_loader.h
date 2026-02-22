@@ -35,10 +35,12 @@ int elf_module_load_from_bytes(const char *name, const void *image, uint32 image
 int elf_module_load_from_flash(const char *name, uint32 sector, uint32 sector_count, elf_module_t **out_mod);
 int elf_module_unload(const char *name);
 elf_module_t *elf_module_find(const char *name);
+int elf_module_set_global(elf_module_t *mod, int global_visible);
 
 void *elf_module_find_symbol(elf_module_t *mod, const char *sym_name);
 int elf_module_call0(elf_module_t *mod, const char *sym_name, int *retv);
 int elf_module_call_main(elf_module_t *mod, int argc, char **argv, int *retv);
+int elf_module_call_main_ex(elf_module_t *mod, int argc, char **argv, char **envp, int *retv);
 
 int elf_module_info(elf_module_t *mod, uint16 *etype, uint16 *machine, uint32 *entry_vaddr, int *nsegs, int *nexports);
 void elf_module_list(const char **names, int max_names, int *out_count);

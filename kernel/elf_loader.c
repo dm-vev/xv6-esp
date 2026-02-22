@@ -138,6 +138,7 @@ struct elf_module {
 
   elf_export_t exports[ELFLOADER_MAX_EXPORTS];
   int export_count;
+  int global_visible;
 };
 
 static const char *TAG = "xv6_elf";
@@ -483,6 +484,11 @@ static void *resolve_local_symbol(elf_module_t *m, const elf32_sym_t *sym)
 static void *resolve_host_symbol(const char *name)
 {
   int i;
+  char alt[ELFLOADER_NAME_MAX + 2];
+
+  if(name == 0 || name[0] == 0)
+    return 0;
+
   for(i = g_host_sym_count - 1; i >= 0; i--){
     if(strcmp(name, g_host_syms[i].name) == 0){
       if(g_host_syms[i].addr != 0){
@@ -490,19 +496,111 @@ static void *resolve_host_symbol(const char *name)
       }
     }
   }
+
+  /* Be tolerant to toolchain symbol naming mismatches: foo vs _foo. */
+  if(name[0] == '_'){
+    const char *trimmed = name + 1;
+    for(i = g_host_sym_count - 1; i >= 0; i--){
+      if(strcmp(trimmed, g_host_syms[i].name) == 0 && g_host_syms[i].addr != 0)
+        return g_host_syms[i].addr;
+    }
+  } else {
+    alt[0] = '_';
+    strncpy(alt + 1, name, sizeof(alt) - 2);
+    alt[sizeof(alt) - 1] = 0;
+    for(i = g_host_sym_count - 1; i >= 0; i--){
+      if(strcmp(alt, g_host_syms[i].name) == 0 && g_host_syms[i].addr != 0)
+        return g_host_syms[i].addr;
+    }
+  }
   return 0;
 }
+
+static int section_bounds_valid(const elf_module_t *m, const elf32_shdr_t *sh);
+static void *module_lookup_symbol(elf_module_t *m, const char *name);
 
 static void *resolve_module_symbol(const char *name)
 {
   int mi;
   for(mi = 0; mi < ELFLOADER_MAX_MODULES; mi++){
+    void *addr;
     int ei;
     if(!g_module_used[mi])
       continue;
+    if(!g_modules[mi].global_visible)
+      continue;
+    addr = module_lookup_symbol(&g_modules[mi], name);
+    if(addr)
+      return addr;
     for(ei = 0; ei < g_modules[mi].export_count; ei++){
       if(strcmp(name, g_modules[mi].exports[ei].name) == 0)
         return g_modules[mi].exports[ei].addr;
+    }
+  }
+  return 0;
+}
+
+static void *module_lookup_symbol(elf_module_t *m, const char *name)
+{
+  const elf32_ehdr_t *eh;
+  const elf32_shdr_t *symtab_sh = 0;
+  const elf32_shdr_t *strtab_sh = 0;
+  const elf32_shdr_t *dynsym_sh = 0;
+  const elf32_shdr_t *dynstr_sh = 0;
+  const elf32_shdr_t *sym_sh[2];
+  const elf32_shdr_t *str_sh[2];
+  int si;
+
+  if(m == 0 || name == 0 || name[0] == 0 || m->image == 0 || m->image_size < sizeof(elf32_ehdr_t))
+    return 0;
+
+  eh = (const elf32_ehdr_t *)m->image;
+  if(eh->e_shoff == 0 || eh->e_shnum == 0 || eh->e_shoff >= m->image_size)
+    return 0;
+  find_symtab_sections(m, eh, &symtab_sh, &strtab_sh, &dynsym_sh, &dynstr_sh);
+
+  sym_sh[0] = dynsym_sh;
+  str_sh[0] = dynstr_sh;
+  sym_sh[1] = symtab_sh;
+  str_sh[1] = strtab_sh;
+
+  for(si = 0; si < 2; si++){
+    const elf32_sym_t *symtab;
+    const char *strtab;
+    uint32 nsyms;
+    uint32 i;
+
+    if(sym_sh[si] == 0 || str_sh[si] == 0)
+      continue;
+    if(!section_bounds_valid(m, sym_sh[si]) || !section_bounds_valid(m, str_sh[si]))
+      continue;
+    symtab = (const elf32_sym_t *)(m->image + sym_sh[si]->sh_offset);
+    strtab = (const char *)(m->image + str_sh[si]->sh_offset);
+    nsyms = sym_sh[si]->sh_size / sizeof(elf32_sym_t);
+
+    for(i = 0; i < nsyms; i++){
+      uint8 bind = symtab[i].st_info >> 4;
+      uint8 type = symtab[i].st_info & 0x0f;
+      const char *sym_name;
+      void *addr;
+
+      if(bind != STB_GLOBAL)
+        continue;
+      if(type != STT_FUNC && type != 1 /* STT_OBJECT */)
+        continue;
+      if(symtab[i].st_shndx == SHN_UNDEF)
+        continue;
+      if(symtab[i].st_name >= str_sh[si]->sh_size)
+        continue;
+      sym_name = strtab + symtab[i].st_name;
+      if(sym_name[0] == 0 || strcmp(sym_name, name) != 0)
+        continue;
+      if(type == STT_FUNC)
+        addr = map_vaddr_exec(m, symtab[i].st_value);
+      else
+        addr = map_vaddr_data(m, symtab[i].st_value);
+      if(addr)
+        return addr;
     }
   }
   return 0;
@@ -514,10 +612,10 @@ static void *resolve_symbol(elf_module_t *m, const elf32_sym_t *sym, const char 
   if(addr)
     return addr;
   if(sym_name && sym_name[0]){
-    addr = resolve_host_symbol(sym_name);
+    addr = resolve_module_symbol(sym_name);
     if(addr)
       return addr;
-    addr = resolve_module_symbol(sym_name);
+    addr = resolve_host_symbol(sym_name);
     if(addr)
       return addr;
   }
@@ -678,7 +776,7 @@ static int collect_exports(elf_module_t *m, const elf32_shdr_t *sym_sh, const el
     const char *name;
     void *addr;
 
-    if(bind != STB_GLOBAL || type != STT_FUNC)
+    if(bind != STB_GLOBAL || (type != STT_FUNC && type != 1 /* STT_OBJECT */))
       continue;
     if(symtab[i].st_name >= str_sh->sh_size)
       continue;
@@ -903,6 +1001,14 @@ int elf_module_unload(const char *name)
   return -1;
 }
 
+int elf_module_set_global(elf_module_t *mod, int global_visible)
+{
+  if(mod == 0)
+    return -1;
+  mod->global_visible = global_visible ? 1 : 0;
+  return 0;
+}
+
 void *elf_module_find_symbol(elf_module_t *mod, const char *sym_name)
 {
   int i;
@@ -912,7 +1018,7 @@ void *elf_module_find_symbol(elf_module_t *mod, const char *sym_name)
     if(strcmp(mod->exports[i].name, sym_name) == 0)
       return mod->exports[i].addr;
   }
-  return 0;
+  return module_lookup_symbol(mod, sym_name);
 }
 
 int elf_module_call0(elf_module_t *mod, const char *sym_name, int *retv)
@@ -932,9 +1038,9 @@ int elf_module_call0(elf_module_t *mod, const char *sym_name, int *retv)
   return 0;
 }
 
-int elf_module_call_main(elf_module_t *mod, int argc, char **argv, int *retv)
+int elf_module_call_main_ex(elf_module_t *mod, int argc, char **argv, char **envp, int *retv)
 {
-  typedef int (*main_fn_t)(int argc, char **argv);
+  typedef int (*main_fn_t)(int argc, char **argv, char **envp);
   main_fn_t fn;
   elf_call_ctx_t *slot;
   int jmp_rc;
@@ -955,18 +1061,23 @@ int elf_module_call_main(elf_module_t *mod, int argc, char **argv, int *retv)
     slot->jb_valid = 1;
     jmp_rc = setjmp(slot->jb);
     if(jmp_rc == 0){
-      app_rc = fn(argc, argv);
+      app_rc = fn(argc, argv, envp);
     } else {
       app_rc = jmp_rc - 1;
     }
     slot->jb_valid = 0;
   } else {
-    app_rc = fn(argc, argv);
+    app_rc = fn(argc, argv, envp);
   }
   if(retv)
     *retv = app_rc;
   call_ctx_set_current(0);
   return 0;
+}
+
+int elf_module_call_main(elf_module_t *mod, int argc, char **argv, int *retv)
+{
+  return elf_module_call_main_ex(mod, argc, argv, 0, retv);
 }
 
 void elf_loader_host_exit(int status)
@@ -1086,6 +1197,7 @@ void *dlopen(const char *file, int mode)
     return 0;
   }
   free(image);
+  (void)elf_module_set_global(mod, 1);
   set_dlerror(0);
   return mod;
 }
