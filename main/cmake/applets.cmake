@@ -119,7 +119,7 @@ function(xv6_register_applet)
 endfunction()
 
 function(xv6_emit_applet_build_graph)
-  cmake_parse_arguments(ARG "" "APPLET_OUT_DIR;FSROOT_ROOT_DIR;FSROOT_STAGE;FSROOT_STAMP;STAMP_DIR" "DEFAULT_CFLAGS;FSROOT_SOURCE_FILES" ${ARGN})
+  cmake_parse_arguments(ARG "" "APPLET_OUT_DIR;FSROOT_ROOT_DIR;FSROOT_STAGE;FSROOT_STAMP;STAMP_DIR" "DEFAULT_CFLAGS;FSROOT_SOURCE_FILES;EXTRA_RESOURCES" ${ARGN})
 
   if(NOT ARG_APPLET_OUT_DIR OR NOT ARG_FSROOT_ROOT_DIR OR NOT ARG_FSROOT_STAGE OR NOT ARG_FSROOT_STAMP)
     message(FATAL_ERROR "xv6_emit_applet_build_graph: required args missing")
@@ -245,10 +245,34 @@ function(xv6_emit_applet_build_graph)
     message(STATUS "applet enabled: ${_name} -> ${_install_path}")
   endforeach()
 
+  set(_extra_resource_commands)
+  set(_extra_resource_depends)
+  foreach(_resource_pair IN LISTS ARG_EXTRA_RESOURCES)
+    string(FIND "${_resource_pair}" ":" _sep_idx)
+    if(_sep_idx LESS 1)
+      message(FATAL_ERROR "xv6_emit_applet_build_graph: EXTRA_RESOURCES entry must be src:dst, got '${_resource_pair}'")
+    endif()
+    string(SUBSTRING "${_resource_pair}" 0 ${_sep_idx} _res_src)
+    math(EXPR _res_dst_start "${_sep_idx} + 1")
+    string(SUBSTRING "${_resource_pair}" ${_res_dst_start} -1 _res_dst)
+    string(SUBSTRING "${_res_dst}" 0 1 _res_dst_prefix)
+    if(NOT _res_dst_prefix STREQUAL "/")
+      message(FATAL_ERROR "xv6_emit_applet_build_graph: EXTRA_RESOURCES dst must start with '/': ${_res_dst}")
+    endif()
+    string(REGEX REPLACE "^/" "" _res_rel "${_res_dst}")
+    set(_res_abs "${ARG_FSROOT_STAGE}/${_res_rel}")
+    get_filename_component(_res_dir "${_res_abs}" DIRECTORY)
+    list(APPEND _extra_resource_commands COMMAND ${CMAKE_COMMAND} -E make_directory "${_res_dir}")
+    list(APPEND _extra_resource_commands COMMAND ${CMAKE_COMMAND} -E copy "${_res_src}" "${_res_abs}")
+    list(APPEND _extra_resource_depends "${_res_src}")
+  endforeach()
+
   add_custom_command(
     OUTPUT "${ARG_FSROOT_STAMP}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${ARG_FSROOT_STAGE}"
+    ${_extra_resource_commands}
     COMMAND ${CMAKE_COMMAND} -E touch "${ARG_FSROOT_STAMP}"
-    DEPENDS "${_base_stamp}" ${_stage_stamps}
+    DEPENDS "${_base_stamp}" ${_stage_stamps} ${_extra_resource_depends}
     VERBATIM
   )
 endfunction()

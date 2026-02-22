@@ -1,0 +1,1 @@
+# Keep /lib in fsroot so runtime-shared objects have a stable home.

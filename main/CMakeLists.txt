@@ -24,6 +24,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   set(MKFS_TOOL "${CMAKE_BINARY_DIR}/mkfs_host")
   set(LIBC_SYMBOLS_C "${CMAKE_BINARY_DIR}/generated/libc_host_symbols.c")
   set(XV6_LIBDEMO_SO "${CMAKE_BINARY_DIR}/shared/libdemo.so")
+  set(XV6_LIBDEMO_ARTIFACT "${CMAKE_BINARY_DIR}/lib/libdemo.so")
+  set(XV6_LIBC_SO "${CMAKE_BINARY_DIR}/lib/libc.so")
   set(LIBC_SYMBOLS_GEN "${PROJECT_DIR}/scripts/gen_libc_symbols.py")
   execute_process(
     COMMAND ${CMAKE_C_COMPILER} -print-file-name=libc.a
@@ -113,6 +115,35 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   )
   add_custom_target(xv6_libdemo_so DEPENDS ${XV6_LIBDEMO_SO})
 
+  add_custom_command(
+    OUTPUT ${XV6_LIBDEMO_ARTIFACT}
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/lib"
+    COMMAND ${CMAKE_COMMAND} -E copy ${XV6_LIBDEMO_SO} ${XV6_LIBDEMO_ARTIFACT}
+    DEPENDS xv6_libdemo_so
+    VERBATIM
+  )
+  add_custom_target(xv6_libdemo_artifact ALL DEPENDS ${XV6_LIBDEMO_ARTIFACT})
+
+  add_custom_command(
+    OUTPUT ${XV6_LIBC_SO}
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/lib"
+    COMMAND ${CMAKE_C_COMPILER}
+            -Os
+            -ffreestanding
+            -fno-builtin
+            -fno-stack-protector
+            -fPIC
+            -nostdlib
+            -shared
+            -Wl,--unresolved-symbols=ignore-all
+            -I${APPLET_INCLUDE_DIR}
+            -o ${XV6_LIBC_SO}
+            ${PROJECT_DIR}/applets/libc_shim/libc_shim.c
+    DEPENDS ${PROJECT_DIR}/applets/libc_shim/libc_shim.c
+    VERBATIM
+  )
+  add_custom_target(xv6_libc_so ALL DEPENDS ${XV6_LIBC_SO})
+
   file(GLOB APPLET_MANIFESTS CONFIGURE_DEPENDS "${APPLET_SRC_DIR}/*/applet.cmake")
   if(NOT APPLET_MANIFESTS)
     message(FATAL_ERROR "No applet manifests found in ${APPLET_SRC_DIR}")
@@ -137,6 +168,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     STAMP_DIR "${CMAKE_BINARY_DIR}/applet_stamps"
     DEFAULT_CFLAGS ${ESP_USER_FLAGS}
     FSROOT_SOURCE_FILES ${FSROOT_SOURCE_FILES}
+    EXTRA_RESOURCES "${XV6_LIBC_SO}:/lib/libc.so"
   )
 
   add_custom_command(
