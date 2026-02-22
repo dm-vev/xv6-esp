@@ -175,7 +175,7 @@ function(xv6_emit_applet_build_graph)
       continue()
     endif()
 
-    set(_applet_out "${ARG_APPLET_OUT_DIR}/${_name}")
+    set(_applet_out "${ARG_APPLET_OUT_DIR}/${_name}.so")
     get_filename_component(_applet_out_dir "${_applet_out}" DIRECTORY)
 
     add_custom_command(

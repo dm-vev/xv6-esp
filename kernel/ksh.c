@@ -85,8 +85,6 @@ static volatile int g_ksh_started = 0;
 static SemaphoreHandle_t g_jobs_lock;
 static SemaphoreHandle_t g_loader_lock;
 static ksh_env_t g_env[KSH_MAX_ENV];
-static char g_loaded_module[MAXPATH];
-static int g_loaded_module_valid = 0;
 
 static int dispatch_command(int argc, char **argv, int run_bg);
 
@@ -1702,6 +1700,13 @@ static int try_read_exec_image(const char *cmd, void **out_image, uint32 *out_si
       }
       return 0;
     }
+    if(snprintf(pathbuf, sizeof(pathbuf), "%s.so", cmd) > 0 && xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
+      if(resolved && resolved_len > 0){
+        strncpy(resolved, pathbuf, resolved_len - 1);
+        resolved[resolved_len - 1] = 0;
+      }
+      return 0;
+    }
     if(snprintf(pathbuf, sizeof(pathbuf), "%s.elf", cmd) > 0 && xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
       if(resolved && resolved_len > 0){
         strncpy(resolved, pathbuf, resolved_len - 1);
@@ -1733,6 +1738,13 @@ static int try_read_exec_image(const char *cmd, void **out_image, uint32 *out_si
         }
         return 0;
       }
+      if(snprintf(pathbuf, sizeof(pathbuf), "%s.so", cmd) > 0 && xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
+        if(resolved && resolved_len > 0){
+          strncpy(resolved, pathbuf, resolved_len - 1);
+          resolved[resolved_len - 1] = 0;
+        }
+        return 0;
+      }
       if(snprintf(pathbuf, sizeof(pathbuf), "%s.elf", cmd) > 0 && xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
         if(resolved && resolved_len > 0){
           strncpy(resolved, pathbuf, resolved_len - 1);
@@ -1746,6 +1758,14 @@ static int try_read_exec_image(const char *cmd, void **out_image, uint32 *out_si
       memcpy(pathbuf, seg, (unsigned)seg_len);
       pathbuf[seg_len] = 0;
       if(snprintf(pathbuf + seg_len, sizeof(pathbuf) - (unsigned)seg_len, "/%s", cmd) > 0 &&
+         xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
+        if(resolved && resolved_len > 0){
+          strncpy(resolved, pathbuf, resolved_len - 1);
+          resolved[resolved_len - 1] = 0;
+        }
+        return 0;
+      }
+      if(snprintf(pathbuf + seg_len, sizeof(pathbuf) - (unsigned)seg_len, "/%s.so", cmd) > 0 &&
          xv6fs_read_file_alloc_path(pathbuf, out_image, out_size) == 0){
         if(resolved && resolved_len > 0){
           strncpy(resolved, pathbuf, resolved_len - 1);
@@ -1866,20 +1886,10 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
     puts_line("exec: command not found");
     goto out;
   }
-  if(g_loaded_module_valid && strcmp(g_loaded_module, module_name) != 0){
-    (void)elf_module_unload(g_loaded_module);
-    g_loaded_module_valid = 0;
-    g_loaded_module[0] = 0;
-  }
   if(elf_module_load_from_bytes(module_name, image, image_size, &m) != 0){
     free(image);
     puts_line("exec: elf load failed");
     goto out;
-  }
-  if(!g_loaded_module_valid || strcmp(g_loaded_module, module_name) != 0){
-    strncpy(g_loaded_module, module_name, sizeof(g_loaded_module) - 1);
-    g_loaded_module[sizeof(g_loaded_module) - 1] = 0;
-    g_loaded_module_valid = 1;
   }
   free(image);
 
@@ -3017,6 +3027,10 @@ static void register_default_symbols(void)
     { "lchown", (void *)k_lchown },
     { "fchown", (void *)k_fchown },
     { "getopt", (void *)k_getopt },
+    { "dlopen", (void *)dlopen },
+    { "dlsym", (void *)dlsym },
+    { "dlclose", (void *)dlclose },
+    { "dlerror", (void *)dlerror },
     { "dirfd", (void *)dirfd },
     { "optind", (void *)&k_optind },
     { "opterr", (void *)&k_opterr },

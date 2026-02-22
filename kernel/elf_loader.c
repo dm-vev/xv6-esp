@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "xv6fs_ro.h"
 
 #define ELF_MAGIC 0x464c457fU
 #define ELFCLASS32 1
@@ -140,6 +141,8 @@ struct elf_module {
 };
 
 static const char *TAG = "xv6_elf";
+static char g_dlerror_msg[128];
+static int g_dlerror_set = 0;
 
 static elf_module_t g_modules[ELFLOADER_MAX_MODULES];
 static int g_module_used[ELFLOADER_MAX_MODULES];
@@ -256,6 +259,43 @@ static int read_flash_image(uint32 sector, uint32 sector_count, uint8 **out, uin
   *out = buf;
   *out_size = sz;
   return 0;
+}
+
+static void set_dlerror(const char *msg)
+{
+  if(msg && msg[0]){
+    strncpy(g_dlerror_msg, msg, sizeof(g_dlerror_msg) - 1);
+    g_dlerror_msg[sizeof(g_dlerror_msg) - 1] = 0;
+    g_dlerror_set = 1;
+  } else {
+    g_dlerror_msg[0] = 0;
+    g_dlerror_set = 0;
+  }
+}
+
+static const char *module_name_from_path(const char *path, char *out, int out_len)
+{
+  const char *base;
+  const char *dot;
+  int n;
+
+  if(path == 0 || out == 0 || out_len <= 1)
+    return 0;
+
+  base = strrchr(path, '/');
+  base = (base != 0) ? (base + 1) : path;
+  if(base[0] == 0)
+    return 0;
+
+  dot = strrchr(base, '.');
+  n = (dot && dot > base) ? (int)(dot - base) : (int)strlen(base);
+  if(n <= 0)
+    return 0;
+  if(n >= out_len)
+    n = out_len - 1;
+  memcpy(out, base, (unsigned)n);
+  out[n] = 0;
+  return out;
 }
 
 static int load_image_copy(const void *image, uint32 image_size, uint8 **out_copy)
@@ -1008,4 +1048,85 @@ void elf_module_list(const char **names, int max_names, int *out_count)
   }
   if(out_count)
     *out_count = n;
+}
+
+void *dlopen(const char *file, int mode)
+{
+  void *image = 0;
+  uint32 image_size = 0;
+  elf_module_t *mod = 0;
+  char namebuf[ELFLOADER_NAME_MAX];
+
+  (void)mode;
+
+  if(file == 0 || file[0] == 0){
+    set_dlerror("dlopen: bad file");
+    return 0;
+  }
+
+  if(module_name_from_path(file, namebuf, sizeof(namebuf)) == 0){
+    set_dlerror("dlopen: bad module name");
+    return 0;
+  }
+
+  mod = elf_module_find(namebuf);
+  if(mod){
+    set_dlerror(0);
+    return mod;
+  }
+
+  if(xv6fs_read_file_alloc_path(file, &image, &image_size) != 0 || image == 0){
+    set_dlerror("dlopen: file not found");
+    return 0;
+  }
+
+  if(elf_module_load_from_bytes(namebuf, image, image_size, &mod) != 0){
+    free(image);
+    set_dlerror("dlopen: load failed");
+    return 0;
+  }
+  free(image);
+  set_dlerror(0);
+  return mod;
+}
+
+void *dlsym(void *handle, const char *name)
+{
+  void *sym;
+  if(handle == 0 || name == 0 || name[0] == 0){
+    set_dlerror("dlsym: bad args");
+    return 0;
+  }
+  sym = elf_module_find_symbol((elf_module_t *)handle, name);
+  if(sym == 0){
+    set_dlerror("dlsym: symbol not found");
+    return 0;
+  }
+  set_dlerror(0);
+  return sym;
+}
+
+int dlclose(void *handle)
+{
+  elf_module_t *mod = (elf_module_t *)handle;
+  if(mod == 0){
+    set_dlerror("dlclose: bad handle");
+    return -1;
+  }
+  if(elf_module_unload(mod->name) != 0){
+    set_dlerror("dlclose: unload failed");
+    return -1;
+  }
+  set_dlerror(0);
+  return 0;
+}
+
+const char *dlerror(void)
+{
+  const char *msg;
+  if(!g_dlerror_set)
+    return 0;
+  msg = g_dlerror_msg;
+  g_dlerror_set = 0;
+  return msg;
 }
