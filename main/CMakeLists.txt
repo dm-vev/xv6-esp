@@ -23,6 +23,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   set(FSROOT_STAMP "${CMAKE_BINARY_DIR}/fsroot_stage.stamp")
   set(MKFS_TOOL "${CMAKE_BINARY_DIR}/mkfs_host")
   set(LIBC_SYMBOLS_C "${CMAKE_BINARY_DIR}/generated/libc_host_symbols.c")
+  set(XV6_LIBDEMO_SO "${CMAKE_BINARY_DIR}/shared/libdemo.so")
   set(LIBC_SYMBOLS_GEN "${PROJECT_DIR}/scripts/gen_libc_symbols.py")
   execute_process(
     COMMAND ${CMAKE_C_COMPILER} -print-file-name=libc.a
@@ -91,6 +92,26 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   target_sources(${COMPONENT_LIB} PRIVATE ${LIBC_SYMBOLS_C})
 
   include(${CMAKE_CURRENT_LIST_DIR}/cmake/applets.cmake)
+
+  add_custom_command(
+    OUTPUT ${XV6_LIBDEMO_SO}
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/shared"
+    COMMAND ${CMAKE_C_COMPILER}
+            -Os
+            -ffreestanding
+            -fno-builtin
+            -fno-stack-protector
+            -fPIC
+            -nostdlib
+            -I${APPLET_INCLUDE_DIR}
+            -Wl,-shared
+            -Wl,--unresolved-symbols=ignore-all
+            -o ${XV6_LIBDEMO_SO}
+            ${PROJECT_DIR}/applets/dlhello/libdemo.c
+    DEPENDS ${PROJECT_DIR}/applets/dlhello/libdemo.c
+    VERBATIM
+  )
+  add_custom_target(xv6_libdemo_so DEPENDS ${XV6_LIBDEMO_SO})
 
   file(GLOB APPLET_MANIFESTS CONFIGURE_DEPENDS "${APPLET_SRC_DIR}/*/applet.cmake")
   if(NOT APPLET_MANIFESTS)

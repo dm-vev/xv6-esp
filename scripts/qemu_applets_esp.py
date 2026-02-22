@@ -253,6 +253,13 @@ def assert_ok_output(applet: str, out: str) -> None:
         if marker in out:
             raise AssertionError(f"{applet}: detected failure marker '{marker}'")
 
+    must_have_markers = {
+        "dlhello": ("dlhello: libdemo sum=42",),
+    }
+    for marker in must_have_markers.get(applet, ()):
+        if marker not in out:
+            raise AssertionError(f"{applet}: expected output marker not found: '{marker}'")
+
 
 def test_matrix() -> dict[str, list[str]]:
     return {
@@ -275,6 +282,9 @@ def test_matrix() -> dict[str, list[str]]:
         "dd": [
             "dd if=/no_such_input of=/dd_echo bs=16 count=1",
             "dd conv=unknown if=/no_such_input of=/dd_cat",
+        ],
+        "dlhello": [
+            "dlhello",
         ],
         "dirname": [
             "dirname /bin/echo",

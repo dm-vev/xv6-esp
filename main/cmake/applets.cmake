@@ -90,7 +90,11 @@ function(xv6_register_applet)
       set(_resource_src_abs "${APP_MANIFEST_DIR}/${_resource_src}")
     endif()
     if(NOT EXISTS "${_resource_src_abs}")
-      message(FATAL_ERROR "xv6_register_applet(${APP_NAME}): resource source not found: ${_resource_src_abs}")
+      # Allow generated build artifacts (for example, shared objects produced by
+      # add_custom_command) to be declared as RESOURCES.
+      if(NOT IS_ABSOLUTE "${_resource_src_abs}")
+        message(FATAL_ERROR "xv6_register_applet(${APP_NAME}): resource source not found: ${_resource_src_abs}")
+      endif()
     endif()
 
     string(SUBSTRING "${_resource_dst}" 0 1 _resource_dst_prefix)
