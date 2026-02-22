@@ -21,3 +21,9 @@ TAGS
 .mypy_cache/
 .pytest_cache/
 compile_commands.json
+build/
+.venv_static/
+.tools/
+.vscode/
+sdkconfig
+sdkconfig.old
