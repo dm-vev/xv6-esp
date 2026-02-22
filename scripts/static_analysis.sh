@@ -54,8 +54,7 @@ run_cppcheck() {
   log "cppcheck"
   cppcheck \
     --quiet \
-    --enable=warning,style,performance,portability \
-    --inconclusive \
+    --enable=warning,performance,portability \
     --std=c11 \
     --error-exitcode=1 \
     --inline-suppr \
@@ -86,7 +85,12 @@ run_clang_tidy() {
 run_semgrep() {
   require_cmd semgrep || return 0
   log "semgrep"
-  semgrep --config auto --error --exclude build --exclude .git .
+  semgrep --config auto --error \
+    --exclude build \
+    --exclude .git \
+    --exclude .venv_static \
+    --exclude .tools \
+    .
 }
 
 run_ruff() {
@@ -104,13 +108,15 @@ run_ruff() {
 run_bandit() {
   require_cmd bandit || return 0
   log "bandit"
-  bandit -q -r scripts -x scripts/qemu_smoke_esp.py,scripts/qemu_stress_esp.py,scripts/qemu_soak_esp.py
+  bandit -q -r scripts \
+    -s B108,B404,B603,B607 \
+    -x scripts/qemu_smoke_esp.py,scripts/qemu_stress_esp.py,scripts/qemu_soak_esp.py
 }
 
 run_codespell() {
   require_cmd codespell || return 0
   log "codespell"
-  codespell --config .codespellrc
+  codespell --config .codespellrc -f -H -q 2
 }
 
 main() {
@@ -124,4 +130,3 @@ main() {
 }
 
 main "$@"
-

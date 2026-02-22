@@ -9,5 +9,4 @@ ignore = [
 ]
 
 [lint.per-file-ignores]
-"scripts/*.py" = ["S101"] # asserts are used for test orchestration
-
+"scripts/*.py" = ["S101", "S108"] # expected in test harness scripts

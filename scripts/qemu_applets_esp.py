@@ -7,7 +7,6 @@ import sys
 import time
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
 APPLETS_DIR = ROOT / "applets"
@@ -63,7 +62,7 @@ def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> b
     while time.time() < deadline:
         try:
             chunk = sock.recv(4096)
-        except socket.timeout:
+        except TimeoutError:
             continue
         if not chunk:
             continue

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
+import os
 import re
 import socket
 import subprocess
 import sys
 import time
-import os
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
@@ -62,7 +61,7 @@ def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> b
     while time.time() < deadline:
         try:
             chunk = sock.recv(4096)
-        except socket.timeout:
+        except TimeoutError:
             continue
         if not chunk:
             continue

@@ -1,6 +1,3 @@
 [codespell]
-skip = .git,build,.vscode,fs.img
-check-filenames = true
-check-hidden = true
-quiet-level = 2
-
+skip = .git,build,.vscode,.venv_static,.tools,fs.img,*.asm,*.sym
+ignore-words-list = iput,copyin,hart,stati,sie,inout,fo,inlin,ser,wronly,Mitake,Tung

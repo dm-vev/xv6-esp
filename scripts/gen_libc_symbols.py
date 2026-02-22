@@ -4,7 +4,6 @@ import re
 import subprocess
 from pathlib import Path
 
-
 VALID_C_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -49,7 +48,10 @@ def render(symbols: list[str], header_path: str) -> str:
     lines.append("int ksh_register_libc_host_symbols(void)")
     lines.append("{")
     lines.append("  return elf_loader_register_host_symbols(g_libc_host_syms,")
-    lines.append("                                          (int)(sizeof(g_libc_host_syms) / sizeof(g_libc_host_syms[0])));")
+    lines.append(
+        "                                          "
+        "(int)(sizeof(g_libc_host_syms) / sizeof(g_libc_host_syms[0])));"
+    )
     lines.append("}")
     lines.append("")
     return "\n".join(lines)
