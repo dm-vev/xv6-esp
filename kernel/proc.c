@@ -525,15 +525,15 @@ forkret(void)
     // We can invoke kexec() now that file system is initialized.
     // Put the return value (argc) of kexec into a0.
     p->trapframe->a0 = kexec("/init", (char *[]){ "/init", 0 });
-    if (p->trapframe->a0 == -1) {
+    if ((int64)p->trapframe->a0 == -1) {
       panic("exec");
     }
   }
 
-  // return to user space, mimicing usertrap()'s return.
+  // return to user space, mimicking usertrap()'s return.
   prepare_return();
   uint64 satp = MAKE_SATP(p->pagetable);
-  uint64 trampoline_userret = TRAMPOLINE + (userret - trampoline);
+  uint64 trampoline_userret = TRAMPOLINE + ((uint64)userret - (uint64)trampoline);
   ((void (*)(uint64))trampoline_userret)(satp);
 }
 

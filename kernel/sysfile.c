@@ -69,7 +69,6 @@ uint64
 sys_read(void)
 {
   struct file *f;
-  int n;
   uint64 p;
 
   argaddr(1, &p);
@@ -308,10 +307,9 @@ sys_open(void)
   int fd, omode;
   struct file *f;
   struct inode *ip;
-  int n;
 
   argint(1, &omode);
-  if((n = argstr(0, path, MAXPATH)) < 0)
+  if(argstr(0, path, MAXPATH) < 0)
     return -1;
 
   begin_op();
@@ -485,8 +483,8 @@ sys_pipe(void)
   argaddr(0, &fdarray);
   if(pipealloc(&rf, &wf) < 0)
     return -1;
-  fd0 = -1;
-  if((fd0 = fdalloc(rf)) < 0 || (fd1 = fdalloc(wf)) < 0){
+  fd0 = fdalloc(rf);
+  if(fd0 < 0 || (fd1 = fdalloc(wf)) < 0){
     if(fd0 >= 0)
       p->ofile[fd0] = 0;
     fileclose(rf);

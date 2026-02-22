@@ -320,7 +320,7 @@ static int parse_pts_id(const char *path, int *out_id)
   if(strncmp(path, "/dev/pts/", 9) != 0)
     return -1;
   p = path + 9;
-  if(*p == 0 || *p < '0' || *p > '9')
+  if(*p < '0' || *p > '9')
     return -1;
   while(*p >= '0' && *p <= '9'){
     v = v * 10 + (*p - '0');
@@ -524,7 +524,7 @@ static int dev_read_alloc(const char *path, void **out_data, uint32 *out_size)
   if(path == 0 || out_data == 0 || out_size == 0)
     return -1;
   *out_size = 256;
-  buf = (uint8 *)malloc(*out_size ? *out_size : 1);
+  buf = (uint8 *)malloc(*out_size);
   if(buf == 0)
     return -1;
   n = dev_read(path, 0, buf, *out_size);
@@ -896,7 +896,7 @@ static int path_parent(const char *path, uint32 *parent_inum, char *name_out)
   char elem[DIRSIZ + 1];
   char next[DIRSIZ + 1];
 
-  if(path == 0 || path[0] == 0 || path[0] != '/')
+  if(path == 0 || path[0] != '/')
     return -1;
   if(read_inode(ROOTINO, &ip) != 0)
     return -1;

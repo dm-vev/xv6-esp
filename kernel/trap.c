@@ -107,7 +107,7 @@ prepare_return(void)
   intr_off();
 
   // send syscalls, interrupts, and exceptions to uservec in trampoline.S
-  uint64 trampoline_uservec = TRAMPOLINE + (uservec - trampoline);
+  uint64 trampoline_uservec = TRAMPOLINE + ((uint64)uservec - (uint64)trampoline);
   w_stvec(trampoline_uservec);
 
   // set up trapframe values that uservec will need when
@@ -216,4 +216,3 @@ devintr()
     return 0;
   }
 }
-

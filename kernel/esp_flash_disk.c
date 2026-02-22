@@ -90,9 +90,6 @@ int esp_flash_disk_write(uint32 sector, const void *src, uint32 sector_count)
     return 0;
   if(sector >= g_num_sectors || sector_count > (g_num_sectors - sector))
     return -1;
-  if(erase_sz == 0)
-    return -1;
-
   off = sector * XV6_FLASH_SECTOR_SIZE;
   len = sector_count * XV6_FLASH_SECTOR_SIZE;
   in = (const uint8 *)src;

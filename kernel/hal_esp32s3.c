@@ -48,19 +48,16 @@ void hal_console_init(void)
 int hal_console_getc(void)
 {
   uint8 ch = 0;
-  int n = 0;
   size_t uart_avail = 0;
 
   if(uart_get_buffered_data_len(XV6_CONSOLE_UART, &uart_avail) == ESP_OK && uart_avail > 0){
-    n = uart_read_bytes(XV6_CONSOLE_UART, &ch, 1, 0);
-    if(n == 1)
+    if(uart_read_bytes(XV6_CONSOLE_UART, &ch, 1, 0) == 1)
       return (int)ch;
   }
 
 #if CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
   if(g_usb_serial_jtag_ready && usb_serial_jtag_is_connected()){
-    n = usb_serial_jtag_read_bytes(&ch, 1, 0);
-    if(n == 1)
+    if(usb_serial_jtag_read_bytes(&ch, 1, 0) == 1)
       return (int)ch;
   }
 #endif

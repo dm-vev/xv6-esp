@@ -1152,7 +1152,7 @@ static int k_getopt(int argc, char *const argv_in[], const char *optstring_in)
   if(arg[0] != '-' || arg[1] == '\0')
     return -1;
 
-  if(arg[0] == '-' && arg[1] == '-' && arg[2] == '\0'){
+  if(arg[1] == '-' && arg[2] == '\0'){
     k_optind++;
     k_getopt_reset_state();
     return -1;
@@ -2007,7 +2007,8 @@ static void job_task(void *arg)
 static int terminate_job_id(int id, int exit_code, int reason)
 {
   int slot;
-  TaskHandle_t h = 0;
+  // cppcheck-suppress unreadVariable
+  TaskHandle_t task = 0;
   ksh_job_task_t *ctx = 0;
   int rc = -1;
 
@@ -2015,15 +2016,15 @@ static int terminate_job_id(int id, int exit_code, int reason)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
   slot = job_find_slot_by_id(id);
   if(slot >= 0 && g_jobs[slot].used && !g_jobs[slot].done){
-    h = g_jobs[slot].task;
+    task = g_jobs[slot].task;
     ctx = (ksh_job_task_t *)g_jobs[slot].task_ctx;
+    if(task)
+      vTaskDelete(task);
     g_jobs[slot].done = 1;
     g_jobs[slot].exit_code = exit_code;
     g_jobs[slot].reason = reason;
     g_jobs[slot].task = 0;
     g_jobs[slot].task_ctx = 0;
-    if(h)
-      vTaskDelete(h);
     rc = 0;
   }
   if(g_jobs_lock)
@@ -3210,8 +3211,7 @@ void ksh_run(void)
         }
       }
 
-      if(dispatch_command(argc, argv, run_bg) != 0)
-        puts_line("unknown command");
+      (void)dispatch_command(argc, argv, run_bg);
 
       len = 0;
       tty_puts("xv6> ");

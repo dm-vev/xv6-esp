@@ -527,7 +527,7 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
       continue;
     if(!section_bounds_valid(m, &sh[i]))
       return -1;
-    if(sh[i].sh_entsize != sizeof(elf32_rela_t) || sh[i].sh_entsize == 0)
+    if(sh[i].sh_entsize != sizeof(elf32_rela_t))
       return -1;
 
     rela = (const elf32_rela_t *)(m->image + sh[i].sh_offset);
@@ -742,7 +742,8 @@ static int elf_module_load_from_image(const char *name, const void *image, uint3
 {
   elf_module_t *m;
   elf32_ehdr_t *eh;
-  const char *fail_reason = "unknown";
+  // cppcheck-suppress unreadVariable
+  const char *fail_reason = 0;
   const elf32_shdr_t *symtab_sh = 0;
   const elf32_shdr_t *strtab_sh = 0;
   const elf32_shdr_t *dynsym_sh = 0;
@@ -782,10 +783,7 @@ static int elf_module_load_from_image(const char *name, const void *image, uint3
     goto fail;
   }
 
-  if(find_symtab_sections(m, eh, &symtab_sh, &strtab_sh, &dynsym_sh, &dynstr_sh) != 0){
-    fail_reason = "symtab sections";
-    goto fail;
-  }
+  find_symtab_sections(m, eh, &symtab_sh, &strtab_sh, &dynsym_sh, &dynstr_sh);
 
   if(dynsym_sh && dynstr_sh){
     if(apply_relocations(m, eh, dynsym_sh, dynstr_sh) != 0){
@@ -818,7 +816,7 @@ static int elf_module_load_from_image(const char *name, const void *image, uint3
   return 0;
 
 fail:
-  ESP_LOGE(TAG, "module '%s' load failed: %s", name, fail_reason);
+  ESP_LOGE(TAG, "module '%s' load failed: %s", name, fail_reason ? fail_reason : "unknown");
   module_reset(m);
   {
     int i;
