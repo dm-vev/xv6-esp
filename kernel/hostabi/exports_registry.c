@@ -1,3 +1,16 @@
+/**
+ * @file exports_registry.c
+ * @brief Implementation of host ABI symbol export registry
+ *
+ * This file implements the symbol export system that manages core kernel symbols
+ * and module-provided symbols. It provides symbol resolution with support for:
+ * - Core symbols (lowest priority, always available)
+ * - Extension symbols (add new functionality)
+ * - Override symbols (replace core implementations)
+ *
+ * The registry uses priority-based resolution where higher priority symbols
+ * are preferred when multiple symbols with the same name exist.
+ */
 #include "hostabi/hostabi_exports.h"
 
 #include <string.h>
@@ -7,24 +20,36 @@
 
 #define HOSTABI_MODSYM_MAX 128
 
+/**
+ * @brief Internal structure for module-level symbol entries
+ *
+ * Stores metadata for each registered module symbol including ownership,
+ * priority, sequence number, kind, and address.
+ */
 typedef struct {
-  int used;
-  int module_id;
-  int priority;
-  int seq;
-  hostabi_symbol_kind_t kind;
-  char name[ELFLOADER_NAME_MAX];
-  void *addr;
+  int used;       /**< Whether this slot is in use */
+  int module_id;  /**< ID of the owning module */
+  int priority;   /**< Resolution priority (higher = preferred) */
+  int seq;        /**< Sequence number for tie-breaking */
+  hostabi_symbol_kind_t kind; /**< Symbol kind (extension/override) */
+  char name[ELFLOADER_NAME_MAX]; /**< Symbol name */
+  void *addr;     /**< Symbol address */
 } hostabi_modsym_t;
 
-static const elf_host_symbol_t *g_core_syms;
-static int g_core_count;
-static hostabi_modsym_t g_mod_syms[HOSTABI_MODSYM_MAX];
-static int g_seq = 1;
-static SemaphoreHandle_t g_mu;
+static const elf_host_symbol_t *g_core_syms; /**< Core symbol table */
+static int g_core_count;                       /**< Number of core symbols */
+static hostabi_modsym_t g_mod_syms[HOSTABI_MODSYM_MAX]; /**< Module symbols */
+static int g_seq = 1;                          /**< Global sequence counter */
+static SemaphoreHandle_t g_mu;                 /**< Export registry lock */
 
 extern int ksh_register_libc_host_symbols(void);
 
+/**
+ * @brief Acquire the export registry lock
+ *
+ * Creates the mutex on first call if needed, then acquires it.
+ * Uses a lazy initialization pattern to avoid static initialization order issues.
+ */
 static void exports_lock(void)
 {
   if(g_mu == 0)
@@ -33,12 +58,24 @@ static void exports_lock(void)
     (void)xSemaphoreTake(g_mu, portMAX_DELAY);
 }
 
+/**
+ * @brief Release the export registry lock
+ */
 static void exports_unlock(void)
 {
   if(g_mu)
     (void)xSemaphoreGive(g_mu);
 }
 
+/**
+ * @brief Safely copy a string with bounds checking
+ * @param dst Destination buffer
+ * @param dst_len Size of destination buffer
+ * @param src Source string (can be NULL)
+ *
+ * Copies at most dst_len-1 characters and always null-terminates.
+ * Treats NULL src as empty string.
+ */
 static void copy_name(char *dst, int dst_len, const char *src)
 {
   if(dst == 0 || dst_len <= 0)
@@ -49,6 +86,15 @@ static void copy_name(char *dst, int dst_len, const char *src)
   dst[dst_len - 1] = 0;
 }
 
+/**
+ * @brief Compare two module symbols for sorting
+ * @param a First symbol
+ * @param b Second symbol
+ * @return -1 if a < b, 1 if a > b, 0 if equal
+ *
+ * Comparison is by priority first (higher priority first), then by
+ * sequence number (higher sequence first).
+ */
 static int modsym_cmp(const hostabi_modsym_t *a, const hostabi_modsym_t *b)
 {
   if(a->priority != b->priority)
@@ -58,6 +104,14 @@ static int modsym_cmp(const hostabi_modsym_t *a, const hostabi_modsym_t *b)
   return 0;
 }
 
+/**
+ * @brief Check if core symbols contain a name
+ * @param name Symbol name to search for
+ * @return 1 if found, 0 if not
+ *
+ * Searches backwards through core symbols to find a matching name.
+ * The backwards iteration means newer entries are checked first.
+ */
 static int core_has_name_locked(const char *name)
 {
   int i;
@@ -72,6 +126,16 @@ static int core_has_name_locked(const char *name)
   return 0;
 }
 
+/**
+ * @brief Check if staged symbols contain a name
+ * @param staged Array of staged symbols
+ * @param n Number of staged symbols
+ * @param name Symbol name to search for
+ * @return 1 if found, 0 if not
+ *
+ * Searches backwards through staged symbols to find a matching name.
+ * Used to detect duplicate extensions during symbol registration.
+ */
 static int staged_has_name(const elf_host_symbol_t *staged, int n, const char *name)
 {
   int i;
@@ -80,12 +144,27 @@ static int staged_has_name(const elf_host_symbol_t *staged, int n, const char *n
     return 0;
 
   for(i = n - 1; i >= 0; i--){
-    if(staged[i].name && strcmp(staged[i].name, name) == 0)
+    if(staged[i].name && strcmp(staged[i].name, staged[i].name) == 0)
       return 1;
   }
   return 0;
 }
 
+/**
+ * @brief Rebuild the ELF loader's host symbol table
+ * @return 0 on success, -1 on failure
+ *
+ * This is the core function that synchronizes the internal module symbol
+ * list with the ELF loader's symbol table. It:
+ * 1. Resets the ELF loader's table
+ * 2. Re-registers libc symbols
+ * 3. Re-registers core symbols
+ * 4. Sorts module symbols by priority
+ * 5. Filters out extensions
+ * 6. duplicate Registers remaining symbols with ELF loader
+ *
+ * Must be called while holding the export lock.
+ */
 static int rebuild_locked(void)
 {
   int idx[HOSTABI_MODSYM_MAX];
@@ -103,12 +182,14 @@ static int rebuild_locked(void)
   if(g_core_syms && g_core_count > 0 && elf_loader_register_host_symbols(g_core_syms, g_core_count) != 0)
     return -1;
 
+  /* Collect indices of all used module symbol slots */
   for(i = 0; i < HOSTABI_MODSYM_MAX; i++){
     if(!g_mod_syms[i].used)
       continue;
     idx[n++] = i;
   }
 
+  /* Sort symbols by priority using insertion sort */
   for(i = 1; i < n; i++){
     int k = i;
     while(k > 0 && modsym_cmp(&g_mod_syms[idx[k - 1]], &g_mod_syms[idx[k]]) > 0){
@@ -119,6 +200,7 @@ static int rebuild_locked(void)
     }
   }
 
+  /* Build staged list, skipping duplicate extensions */
   for(i = 0; i < n; i++){
     const hostabi_modsym_t *ms = &g_mod_syms[idx[i]];
     if(ms->kind == HOSTABI_SYMBOL_EXTENSION &&
@@ -130,6 +212,7 @@ static int rebuild_locked(void)
     staged_count++;
   }
 
+  /* Register staged symbols with ELF loader */
   for(i = 0; i < staged_count; i++){
     if(elf_loader_register_host_symbols(&staged[i], 1) != 0)
       return -1;
@@ -138,6 +221,12 @@ static int rebuild_locked(void)
   return 0;
 }
 
+/**
+ * @brief Initialize the export registry
+ * @return 0 always
+ *
+ * Performs lazy initialization of the registry lock. Safe to call multiple times.
+ */
 int hostabi_exports_init(void)
 {
   exports_lock();
@@ -145,6 +234,17 @@ int hostabi_exports_init(void)
   return 0;
 }
 
+/**
+ * @brief Define the core symbol table
+ * @param syms Array of core symbol entries
+ * @param count Number of symbols
+ * @return 0 on success, -1 on failure
+ *
+ * Sets the core symbol table and triggers a rebuild. Core symbols are
+ * the base set of symbols always available in the system.
+ * @pre syms != NULL && count > 0 && count <= ELFLOADER_MAX_HOST_SYMBOLS
+ * @pre Each symbol must have non-null name and address
+ */
 int hostabi_export_define_core(const elf_host_symbol_t *syms, int count)
 {
   int i;
@@ -155,6 +255,7 @@ int hostabi_export_define_core(const elf_host_symbol_t *syms, int count)
 
   exports_lock();
 
+  /* Validate all symbols before accepting */
   for(i = 0; i < count; i++){
     if(syms[i].name == 0 || syms[i].name[0] == 0 || syms[i].addr == 0){
       exports_unlock();
@@ -169,11 +270,26 @@ int hostabi_export_define_core(const elf_host_symbol_t *syms, int count)
   return rc;
 }
 
+/**
+ * @brief Register core symbols (alias)
+ * @see hostabi_export_define_core
+ */
 int hostabi_register_exports(const elf_host_symbol_t *syms, int count)
 {
   return hostabi_export_define_core(syms, count);
 }
 
+/**
+ * @brief Add module symbols to the registry
+ * @param syms Array of module symbol entries
+ * @param count Number of symbols
+ * @return 0 on success, -1 on failure
+ *
+ * Registers symbols from a loadable module. Each symbol is assigned a
+ * sequence number for tie-breaking when priorities are equal.
+ * @pre syms != NULL && count > 0
+ * @post On failure, all added symbols are rolled back
+ */
 int hostabi_export_add_module(const hostabi_module_symbol_t *syms, int count)
 {
   int i;
@@ -185,6 +301,7 @@ int hostabi_export_add_module(const hostabi_module_symbol_t *syms, int count)
 
   exports_lock();
 
+  /* Allocate slots and populate symbol data */
   for(i = 0; i < count; i++){
     int slot = -1;
     int j;
@@ -193,6 +310,7 @@ int hostabi_export_add_module(const hostabi_module_symbol_t *syms, int count)
       break;
     }
 
+    /* Find free slot */
     for(j = 0; j < HOSTABI_MODSYM_MAX; j++){
       if(!g_mod_syms[j].used){
         slot = j;
@@ -214,6 +332,7 @@ int hostabi_export_add_module(const hostabi_module_symbol_t *syms, int count)
     added[added_count++] = slot;
   }
 
+  /* If any symbol failed validation, rollback and fail */
   if(i != count || rebuild_locked() != 0){
     int j;
     for(j = 0; j < added_count; j++)
@@ -227,6 +346,15 @@ int hostabi_export_add_module(const hostabi_module_symbol_t *syms, int count)
   return 0;
 }
 
+/**
+ * @brief Remove all symbols from a module
+ * @param module_id ID of module to remove
+ * @return 0 on success, -1 on failure
+ *
+ * Removes all symbols that were registered by the specified module.
+ * If rebuild fails, restores the previous state.
+ * @pre module_id > 0
+ */
 int hostabi_export_remove_module(int module_id)
 {
   int i;
@@ -237,7 +365,9 @@ int hostabi_export_remove_module(int module_id)
     return -1;
 
   exports_lock();
+  /* Save current state for rollback */
   memcpy(prev, g_mod_syms, sizeof(prev));
+  /* Mark all symbols from this module as unused */
   for(i = 0; i < HOSTABI_MODSYM_MAX; i++){
     if(g_mod_syms[i].used && g_mod_syms[i].module_id == module_id){
       memset(&g_mod_syms[i], 0, sizeof(g_mod_syms[i]));
@@ -245,6 +375,7 @@ int hostabi_export_remove_module(int module_id)
     }
   }
 
+  /* Rebuild and rollback on failure */
   if(changed && rebuild_locked() != 0){
     memcpy(g_mod_syms, prev, sizeof(g_mod_syms));
     (void)rebuild_locked();
@@ -256,6 +387,19 @@ int hostabi_export_remove_module(int module_id)
   return 0;
 }
 
+/**
+ * @brief Resolve a symbol by name
+ * @param name Symbol name to resolve
+ * @return Symbol address, or NULL if not found
+ *
+ * Resolution priority:
+ * 1. Highest-priority OVERRIDE symbol
+ * 2. Core symbol (if exists)
+ * 3. Highest-priority EXTENSION symbol
+ *
+ * This ensures overrides take precedence, core symbols provide defaults,
+ * and extensions add new functionality without conflicts.
+ */
 const void *hostabi_export_resolve(const char *name)
 {
   int i;
@@ -272,6 +416,7 @@ const void *hostabi_export_resolve(const char *name)
 
   exports_lock();
 
+  /* Find best override and best extension */
   for(i = 0; i < HOSTABI_MODSYM_MAX; i++){
     if(!g_mod_syms[i].used || g_mod_syms[i].addr == 0)
       continue;
@@ -295,6 +440,7 @@ const void *hostabi_export_resolve(const char *name)
     }
   }
 
+  /* Check core symbols (search backwards for newest first) */
   for(i = g_core_count - 1; i >= 0; i--){
     if(g_core_syms && g_core_syms[i].addr != 0 && strcmp(name, g_core_syms[i].name) == 0){
       core_addr = g_core_syms[i].addr;
@@ -302,6 +448,7 @@ const void *hostabi_export_resolve(const char *name)
     }
   }
 
+  /* Return in priority order */
   if(best_override != 0){
     exports_unlock();
     return best_override;

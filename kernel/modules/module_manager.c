@@ -13,6 +13,34 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+/**
+ * @file module_manager.c
+ * @brief Kernel module manager implementation
+ *
+ * This file implements the kernel module loading and management system.
+ * It provides:
+ * - ELF module loading via elf_loader
+ * - Module lifecycle management (load/unload/reload)
+ * - Symbol export to host ABI
+ * - Module reference counting
+ * - Manifest-based autoloading
+ * - Signature verification (if enabled)
+ *
+ * Architecture:
+ * - Slot-based module tracking (max 16 modules)
+ * - Per-module lifecycle functions (init/fini)
+ * - Integration with hostabi for symbol export
+ * - Thread-safe operations via mutex
+ *
+ * Module lifecycle:
+ * 1. Load ELF from path
+ * 2. Call module describe function
+ * 3. Verify ABI version compatibility
+ * 4. Register exported symbols
+ * 5. Call module init function (if any)
+ * 6. On unload: call fini, unregister symbols, unload ELF
+ */
+
 #define KMOD_MAX_TRACKED 16
 #define KMOD_ERR_MAX 160
 #define KMOD_SIG_MAGIC "XV6SIG1"

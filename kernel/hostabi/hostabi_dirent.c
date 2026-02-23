@@ -1,3 +1,12 @@
+/**
+ * @file hostabi_dirent.c
+ * @brief Implementation of POSIX directory entry operations
+ *
+ * This file implements directory streaming operations for reading directory
+ * contents. Uses xv6's path-based iteration (xv6fs_list_path) internally,
+ * making it robust even when the underlying filesystem doesn't support
+ * directory file descriptors.
+ */
 #include "hostabi/hostabi_dirent.h"
 
 #include <errno.h>
@@ -28,14 +37,30 @@
 #define XV6_KSTAT_T_DEVICE 3
 #define HOSTABI_DIR_MAGIC 0x48445231u
 
+/**
+ * @brief Internal directory handle structure
+ *
+ * Stores state for iterating through a directory, including:
+ * - Magic number for validation
+ * - File descriptor (may be -1 if not used)
+ * - Current index in directory
+ * - Original path for iteration
+ * - Current dirent buffer
+ */
 typedef struct {
-  uint32 magic;
-  int fd;
-  int index;
-  char path[MAXPATH];
-  struct dirent ent;
+  uint32 magic;        /**< Validation magic (HOSTABI_DIR_MAGIC) */
+  int fd;             /**< Directory fd (may be -1) */
+  int index;          /**< Current entry index */
+  char path[MAXPATH]; /**< Original directory path */
+  struct dirent ent;  /**< Current directory entry */
 } hostabi_dir_t;
 
+/**
+ * @brief Safe string copy with bounds checking
+ * @param dst Destination buffer
+ * @param dst_len Size of destination
+ * @param src Source string (can be NULL)
+ */
 static void copy_cstr(char *dst, int dst_len, const char *src)
 {
   if(dst == 0 || dst_len <= 0)
@@ -46,6 +71,17 @@ static void copy_cstr(char *dst, int dst_len, const char *src)
   dst[dst_len - 1] = 0;
 }
 
+/**
+ * @brief Convert xv6 stat type to dirent type
+ * @param type xv6 stat type
+ * @return dirent d_type value
+ *
+ * Maps:
+ * - XV6_KSTAT_T_DIR -> DT_DIR
+ * - XV6_KSTAT_T_FILE -> DT_REG
+ * - XV6_KSTAT_T_DEVICE -> DT_CHR
+ * - otherwise -> DT_UNKNOWN
+ */
 static int dirent_type_from_xv6(uint16 type)
 {
   if(type == XV6_KSTAT_T_DIR)
@@ -57,6 +93,15 @@ static int dirent_type_from_xv6(uint16 type)
   return DT_UNKNOWN;
 }
 
+/**
+ * @brief Open a directory
+ * @param path Directory path
+ * @return DIR pointer on success, NULL on failure
+ *
+ * Validates that path is a directory, then attempts to open it.
+ * If the filesystem doesn't support directory fds, continues anyway
+ * since iteration is path-based.
+ */
 DIR *hostabi_opendir(const char *path)
 {
   hostabi_dir_t *d;
@@ -81,11 +126,6 @@ DIR *hostabi_opendir(const char *path)
 
   fd = hostabi_posix_fs_open_mode(path, O_RDONLY, 0);
   if(fd < 0){
-    /*
-     * Directory iteration is path-based (xv6fs_list_path) and does not
-     * require a live fd. Keep opendir() functional even when the backend
-     * cannot open directory fds.
-     */
     fd = -1;
   }
 
@@ -104,6 +144,15 @@ DIR *hostabi_opendir(const char *path)
   return (DIR *)d;
 }
 
+/**
+ * @brief Read next directory entry
+ * @param dirp Directory stream
+ * @return dirent on success, NULL on EOF or error
+ *
+ * Calls xv6fs_list_path with the stored path and current index,
+ * then increments the index. Returns NULL on EOF (xv6fs_list_path
+ * returns non-zero) with errno cleared.
+ */
 struct dirent *hostabi_readdir(DIR *dirp)
 {
   hostabi_dir_t *d = (hostabi_dir_t *)dirp;
@@ -128,6 +177,13 @@ struct dirent *hostabi_readdir(DIR *dirp)
   return &d->ent;
 }
 
+/**
+ * @brief Close a directory
+ * @param dirp Directory stream
+ * @return 0 on success, -1 on failure
+ *
+ * Validates the handle, clears magic, closes fd if open, and frees memory.
+ */
 int hostabi_closedir(DIR *dirp)
 {
   hostabi_dir_t *d = (hostabi_dir_t *)dirp;
@@ -142,6 +198,12 @@ int hostabi_closedir(DIR *dirp)
   return 0;
 }
 
+/**
+ * @brief Rewind directory to beginning
+ * @param dirp Directory stream
+ *
+ * Resets the index to zero and seeks the fd back to start if present.
+ */
 void hostabi_rewinddir(DIR *dirp)
 {
   hostabi_dir_t *d = (hostabi_dir_t *)dirp;
@@ -149,9 +211,16 @@ void hostabi_rewinddir(DIR *dirp)
     return;
   d->index = 0;
   if(d->fd >= 0)
-    (void)hostabi_posix_fs_lseek(d->fd, 0, 0 /* SEEK_SET */);
+    (void)hostabi_posix_fs_lseek(d->fd, 0, 0);
 }
 
+/**
+ * @brief Get fd for directory stream
+ * @param dirp Directory stream
+ * @return File descriptor on success, -1 on failure
+ *
+ * Returns the underlying fd if it was successfully opened.
+ */
 int hostabi_dirfd(DIR *dirp)
 {
   hostabi_dir_t *d = (hostabi_dir_t *)dirp;
@@ -166,6 +235,13 @@ int hostabi_dirfd(DIR *dirp)
   return d->fd;
 }
 
+/**
+ * @brief Open directory from fd
+ * @param fd File descriptor
+ * @return NULL (not implemented)
+ *
+ * Not implemented - returns NULL with errno = ENOSYS.
+ */
 DIR *hostabi_fdopendir(int fd)
 {
   (void)fd;

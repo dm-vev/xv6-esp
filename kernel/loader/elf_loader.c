@@ -13,6 +13,29 @@
 #include "freertos/task.h"
 #include "vfs/xv6fs_ro.h"
 
+/**
+ * @file elf_loader.c
+ * @brief ELF loader and dynamic linker implementation
+ *
+ * This file implements a minimal ELF dynamic loader for xv6 on ESP32. It provides:
+ * - ELF32 parsing (supports both Xtensa and RISC-V)
+ * - Dynamic linking with relocations
+ * - Symbol resolution from host symbol table
+ * - dlopen/dlsym/dlclose POSIX interface
+ * - Module lifecycle management
+ *
+ * The loader supports:
+ * - ET_EXEC and ET_DYN (position-independent) ELF types
+ * - PT_LOAD segments for memory mapping
+ * - SHT_RELA relocation sections
+ * - SHT_DYNSYM dynamic symbol tables
+ *
+ * Memory layout:
+ * - Each module gets its own heap allocation for code/data
+ * - Symbols are resolved via global host symbol table
+ * - Deep binding option for local-first symbol resolution
+ */
+
 #define ELF_MAGIC 0x464c457fU
 #define ELFCLASS32 1
 #define ELFDATA2LSB 1

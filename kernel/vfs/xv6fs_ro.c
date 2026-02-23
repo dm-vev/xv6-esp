@@ -18,6 +18,28 @@
 #include "core/param.h"
 #include "fs/stat.h"
 
+/**
+ * @file xv6fs_ro.c
+ * @brief Read-only xv6 virtual file system implementation
+ *
+ * This file implements a lightweight VFS layer for xv6 on ESP32. It provides:
+ * - Flash-based read-only filesystem with directory iteration
+ * - File descriptor abstraction for user programs
+ * - PTY (pseudo-terminal) support for shell
+ * - Pipe support for inter-process communication
+ * - Task context management for FreeRTOS integration
+ *
+ * Architecture:
+ * - Superblock and inode reading from flash storage
+ * - File descriptor table per-task
+ * - Device abstraction for /dev/xxx special files
+ * - PTY master/slave pair management
+ * - Circular buffer pipes
+ *
+ * The VFS is designed to be minimal while providing POSIX-like API
+ * for user programs running under xv6.
+ */
+
 static const char *TAG = "xv6fs";
 
 static struct superblock g_sb;
