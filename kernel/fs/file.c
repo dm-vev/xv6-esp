@@ -1,6 +1,10 @@
-//
-// Support functions for system calls that involve file descriptors.
-//
+/**
+ * @file file.c
+ * @brief File descriptor support functions implementation.
+ *
+ * Provides file allocation, duplication, closing, and I/O operations
+ * for the file descriptor based system calls.
+ */
 
 #include "core/types.h"
 #include "arch/riscv.h"
@@ -13,19 +17,41 @@
 #include "fs/stat.h"
 #include "core/proc.h"
 
+/**
+ * @brief Global device switch table.
+ */
 struct devsw devsw[NDEV];
+
+/**
+ * @brief File table containing all open files.
+ */
 struct {
   struct spinlock lock;
   struct file file[NFILE];
 } ftable;
 
+/**
+ * @brief Initializes the file table.
+ *
+ * @post File table lock is initialized.
+ *
+ * @return None.
+ */
 void
 fileinit(void)
 {
   initlock(&ftable.lock, "ftable");
 }
 
-// Allocate a file structure.
+/**
+ * @brief Allocates a free file structure.
+ *
+ * Searches the file table for an unused entry with ref == 0.
+ *
+ * @post Returned file has ref set to 1.
+ *
+ * @return Pointer to allocated file on success, NULL on failure.
+ */
 struct file*
 filealloc(void)
 {
@@ -43,7 +69,17 @@ filealloc(void)
   return 0;
 }
 
-// Increment ref count for file f.
+/**
+ * @brief Increments the reference count for a file.
+ *
+ * @param f File to duplicate.
+ *
+ * @post f->ref is incremented by 1.
+ *
+ * @return Pointer to the file.
+ *
+ * @error Panics if ref count is less than 1.
+ */
 struct file*
 filedup(struct file *f)
 {
@@ -55,7 +91,19 @@ filedup(struct file *f)
   return f;
 }
 
-// Close file f.  (Decrement ref count, close when reaches 0.)
+/**
+ * @brief Closes a file, decrementing reference count.
+ *
+ * @param f File to close.
+ *
+ * @post If ref reaches 0, underlying resource is released.
+ * @post For pipes: pipe is closed.
+ * @post For inodes/devices: inode reference is released via iput().
+ *
+ * @return None.
+ *
+ * @error Panics if ref count is less than 1.
+ */
 void
 fileclose(struct file *f)
 {
@@ -82,8 +130,18 @@ fileclose(struct file *f)
   }
 }
 
-// Get metadata about file f.
-// addr is a user virtual address, pointing to a struct stat.
+/**
+ * @brief Gets metadata about an open file.
+ *
+ * @param f   Open file to query.
+ * @param addr User virtual address to store struct stat.
+ *
+ * @pre File must be FD_INODE or FD_DEVICE type.
+ *
+ * @post stat structure copied to user memory.
+ *
+ * @return 0 on success, -1 on failure.
+ */
 int
 filestat(struct file *f, uint64 addr)
 {
@@ -101,8 +159,22 @@ filestat(struct file *f, uint64 addr)
   return -1;
 }
 
-// Read from file f.
-// addr is a user virtual address.
+/**
+ * @brief Reads from an open file.
+ *
+ * @param f    Open file to read from.
+ * @param addr User buffer address.
+ * @param n    Number of bytes to read.
+ *
+ * @pre File must be readable.
+ *
+ * @post File offset advanced by number of bytes read.
+ *
+ * @return Number of bytes read on success, -1 on error.
+ *
+ * @error Returns -1 if file is not readable.
+ * @error Returns -1 for invalid device.
+ */
 int
 fileread(struct file *f, uint64 addr, int n)
 {
@@ -129,8 +201,25 @@ fileread(struct file *f, uint64 addr, int n)
   return r;
 }
 
-// Write to file f.
-// addr is a user virtual address.
+/**
+ * @brief Writes to an open file.
+ *
+ * @param f    Open file to write to.
+ * @param addr User buffer address.
+ * @param n    Number of bytes to write.
+ *
+ * @pre File must be writable.
+ *
+ * @post File offset advanced by number of bytes written.
+ *
+ * @return Number of bytes written on success, -1 on error.
+ *
+ * @error Returns -1 if file is not writable.
+ * @error Returns -1 for invalid device.
+ *
+ * @note Splits large writes into multiple transactions to avoid
+ *       exceeding the logging subsystem's maximum transaction size.
+ */
 int
 filewrite(struct file *f, uint64 addr, int n)
 {
@@ -177,4 +266,3 @@ filewrite(struct file *f, uint64 addr, int n)
 
   return ret;
 }
-

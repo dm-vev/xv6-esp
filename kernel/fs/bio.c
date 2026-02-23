@@ -1,18 +1,20 @@
-// Buffer cache.
-//
-// The buffer cache is a linked list of buf structures holding
-// cached copies of disk block contents.  Caching disk blocks
-// in memory reduces the number of disk reads and also provides
-// a synchronization point for disk blocks used by multiple processes.
-//
-// Interface:
-// * To get a buffer for a particular disk block, call bread.
-// * After changing buffer data, call bwrite to write it to disk.
-// * When done with the buffer, call brelse.
-// * Do not use the buffer after calling brelse.
-// * Only one process at a time can use a buffer,
-//     so do not keep them longer than necessary.
-
+/**
+ * @file bio.c
+ * @brief Buffer cache implementation.
+ *
+ * The buffer cache is a linked list of buf structures holding
+ * cached copies of disk block contents. Caching disk blocks
+ * in memory reduces the number of disk reads and also provides
+ * a synchronization point for disk blocks used by multiple processes.
+ *
+ * Interface:
+ * * To get a buffer for a particular disk block, call bread().
+ * * After changing buffer data, call bwrite() to write it to disk.
+ * * When done with the buffer, call brelse().
+ * * Do not use the buffer after calling brelse().
+ * * Only one process at a time can use a buffer,
+ *     so do not keep them longer than necessary.
+ */
 
 #include "core/types.h"
 #include "core/param.h"
@@ -23,16 +25,32 @@
 #include "fs/fs.h"
 #include "fs/buf.h"
 
+/**
+ * @brief Buffer cache structure.
+ */
 struct {
+  /** @brief Lock protecting cache structure. */
   struct spinlock lock;
+  /** @brief Array of buffer structures. */
   struct buf buf[NBUF];
 
   // Linked list of all buffers, through prev/next.
   // Sorted by how recently the buffer was used.
   // head.next is most recent, head.prev is least.
+  /** @brief LRU list head (sentinel). */
   struct buf head;
 } bcache;
 
+/**
+ * @brief Initializes the buffer cache.
+ *
+ * Sets up the LRU linked list and initializes locks.
+ *
+ * @post All buffers linked in LRU list.
+ * @post Each buffer has a sleep lock initialized.
+ *
+ * @return None.
+ */
 void
 binit(void)
 {
@@ -52,9 +70,22 @@ binit(void)
   }
 }
 
-// Look through buffer cache for block on device dev.
-// If not found, allocate a buffer.
-// In either case, return locked buffer.
+/**
+ * @brief Gets a buffer for a specific disk block.
+ *
+ * Looks through buffer cache for block on device dev.
+ * If not found, allocates a buffer using LRU replacement.
+ *
+ * @param dev     Device number.
+ * @param blockno Block number on device.
+ *
+ * @post Returned buffer is locked.
+ * @post Buffer reference count incremented.
+ *
+ * @return Pointer to locked buffer.
+ *
+ * @error Panics if no buffers available.
+ */
 static struct buf*
 bget(uint dev, uint blockno)
 {
@@ -88,7 +119,17 @@ bget(uint dev, uint blockno)
   panic("bget: no buffers");
 }
 
-// Return a locked buf with the contents of the indicated block.
+/**
+ * @brief Returns a locked buffer with disk block contents.
+ *
+ * @param dev     Device number.
+ * @param blockno Block number on device.
+ *
+ * @post Returned buffer is locked.
+ * @post If not valid, reads data from disk.
+ *
+ * @return Pointer to locked buffer.
+ */
 struct buf*
 bread(uint dev, uint blockno)
 {
@@ -102,7 +143,19 @@ bread(uint dev, uint blockno)
   return b;
 }
 
-// Write b's contents to disk.  Must be locked.
+/**
+ * @brief Writes buffer contents to disk.
+ *
+ * @param b Buffer to write.
+ *
+ * @pre Buffer must be locked.
+ *
+ * @post Data written to disk synchronously.
+ *
+ * @return None.
+ *
+ * @error Panics if buffer is not locked.
+ */
 void
 bwrite(struct buf *b)
 {
@@ -111,8 +164,20 @@ bwrite(struct buf *b)
   virtio_disk_rw(b, 1);
 }
 
-// Release a locked buffer.
-// Move to the head of the most-recently-used list.
+/**
+ * @brief Releases a locked buffer.
+ *
+ * @param b Buffer to release.
+ *
+ * @pre Buffer must be locked.
+ *
+ * @post Buffer lock released.
+ * @post If refcnt is 0, buffer moved to front of LRU list.
+ *
+ * @return None.
+ *
+ * @error Panics if buffer is not locked.
+ */
 void
 brelse(struct buf *b)
 {
@@ -136,6 +201,15 @@ brelse(struct buf *b)
   release(&bcache.lock);
 }
 
+/**
+ * @brief Pins a buffer in cache (prevents eviction).
+ *
+ * @param b Buffer to pin.
+ *
+ * @post Buffer refcnt incremented.
+ *
+ * @return None.
+ */
 void
 bpin(struct buf *b) {
   acquire(&bcache.lock);
@@ -143,11 +217,18 @@ bpin(struct buf *b) {
   release(&bcache.lock);
 }
 
+/**
+ * @brief Unpins a buffer in cache (allows eviction).
+ *
+ * @param b Buffer to unpin.
+ *
+ * @post Buffer refcnt decremented.
+ *
+ * @return None.
+ */
 void
 bunpin(struct buf *b) {
   acquire(&bcache.lock);
   b->refcnt--;
   release(&bcache.lock);
 }
-
-

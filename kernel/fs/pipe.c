@@ -1,3 +1,8 @@
+/**
+ * @file pipe.c
+ * @brief Pipe implementation for inter-process communication.
+ */
+
 #include "core/types.h"
 #include "arch/riscv.h"
 #include "core/defs.h"
@@ -8,17 +13,43 @@
 #include "core/sleeplock.h"
 #include "fs/file.h"
 
+/** @brief Size of pipe buffer in bytes. */
 #define PIPESIZE 512
 
+/**
+ * @brief Pipe structure.
+ *
+ * Circular buffer for passing data between processes.
+ */
 struct pipe {
+  /** @brief Lock protecting pipe data. */
   struct spinlock lock;
+  /** @brief Data buffer. */
   char data[PIPESIZE];
-  uint nread;     // number of bytes read
-  uint nwrite;    // number of bytes written
-  int readopen;   // read fd is still open
-  int writeopen;  // write fd is still open
+  /** @brief Number of bytes read. */
+  uint nread;
+  /** @brief Number of bytes written. */
+  uint nwrite;
+  /** @brief Whether read end is open. */
+  int readopen;
+  /** @brief Whether write end is open. */
+  int writeopen;
 };
 
+/**
+ * @brief Allocates a new pipe.
+ *
+ * Creates a pipe with two file structures for reading and writing.
+ *
+ * @param f0 Pointer to store read end file pointer.
+ * @param f1 Pointer to store write end file pointer.
+ *
+ * @post Two file structures allocated and configured.
+ *
+ * @return 0 on success, -1 on failure.
+ *
+ * @error Frees all allocated resources on failure.
+ */
 int
 pipealloc(struct file **f0, struct file **f1)
 {
@@ -55,6 +86,17 @@ pipealloc(struct file **f0, struct file **f1)
   return -1;
 }
 
+/**
+ * @brief Closes one end of a pipe.
+ *
+ * @param pi       Pipe to close.
+ * @param writable If non-zero, close write end; else close read end.
+ *
+ * @post If both ends closed, pipe buffer is freed.
+ * @post Waiters are woken up.
+ *
+ * @return None.
+ */
 void
 pipeclose(struct pipe *pi, int writable)
 {
@@ -73,6 +115,21 @@ pipeclose(struct pipe *pi, int writable)
     release(&pi->lock);
 }
 
+/**
+ * @brief Writes data to a pipe.
+ *
+ * @param pi   Pipe to write to.
+ * @param addr User buffer address.
+ * @param n    Number of bytes to write.
+ *
+ * @post Data copied to pipe buffer.
+ * @post Writers are woken up when buffer has space.
+ *
+ * @return Number of bytes written on success.
+ * @return -1 if read end closed or process killed.
+ *
+ * @error Returns -1 if reader closed while waiting.
+ */
 int
 pipewrite(struct pipe *pi, uint64 addr, int n)
 {
@@ -105,6 +162,19 @@ pipewrite(struct pipe *pi, uint64 addr, int n)
   return i;
 }
 
+/**
+ * @brief Reads data from a pipe.
+ *
+ * @param pi   Pipe to read from.
+ * @param addr User buffer address.
+ * @param n    Maximum bytes to read.
+ *
+ * @post Data copied to user buffer.
+ * @post Readers woken up when data is available.
+ *
+ * @return Number of bytes read.
+ * @return -1 if write end closed.
+ */
 int
 piperead(struct pipe *pi, uint64 addr, int n)
 {
