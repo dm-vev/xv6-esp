@@ -15,14 +15,14 @@ SYMS_BLOCK_RE = re.compile(
 SYM_RE = re.compile(r'\{\s*"([^"]+)"\s*,')
 
 
-def parse_exports(ksh_path: Path) -> list[str]:
-    text = ksh_path.read_text(encoding="utf-8")
+def parse_exports(source_path: Path) -> list[str]:
+    text = source_path.read_text(encoding="utf-8")
     match = SYMS_BLOCK_RE.search(text)
     if match is None:
-        raise RuntimeError(f"failed to locate host ABI symbol table in {ksh_path}")
+        raise RuntimeError(f"failed to locate host ABI symbol table in {source_path}")
     symbols = SYM_RE.findall(match.group(1))
     if not symbols:
-        raise RuntimeError(f"no symbols parsed from {ksh_path}")
+        raise RuntimeError(f"no symbols parsed from {source_path}")
     duplicates = sorted({name for name in symbols if symbols.count(name) > 1})
     if duplicates:
         dup_list = ", ".join(duplicates)
@@ -47,7 +47,7 @@ def write_snapshot(path: Path, symbols: list[str]) -> None:
     lines = [
         "# Host ABI export snapshot for applet/newlib runtime.",
         "# Order is intentionally fixed and treated as ABI-significant.",
-        "# Generated from kernel/shell/ksh.c register_default_symbols().",
+        "# Generated from main/runtime/shell_runtime.c register_default_symbols().",
         *symbols,
         "",
     ]
@@ -58,9 +58,9 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Check/freeze host ABI export surface.")
     parser.add_argument(
-        "--ksh",
-        default=str(root / "kernel" / "shell" / "ksh.c"),
-        help="path to kernel shell runtime source",
+        "--exports-source",
+        default=str(root / "main" / "runtime" / "shell_runtime.c"),
+        help="path to source file that defines register_default_symbols()",
     )
     parser.add_argument(
         "--snapshot",
@@ -74,9 +74,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    ksh_path = Path(args.ksh)
+    source_path = Path(args.exports_source)
     snapshot_path = Path(args.snapshot)
-    current = parse_exports(ksh_path)
+    current = parse_exports(source_path)
 
     if args.update:
         write_snapshot(snapshot_path, current)
@@ -98,7 +98,7 @@ def main() -> int:
         [f"{line}\n" for line in expected],
         [f"{line}\n" for line in current],
         fromfile=str(snapshot_path),
-        tofile="current:ksh.register_default_symbols",
+        tofile="current:register_default_symbols",
     )
     print("host ABI snapshot mismatch:", file=sys.stderr)
     for line in diff:

@@ -1,6 +1,6 @@
 # Host ABI export snapshot for applet/newlib runtime.
 # Order is intentionally fixed and treated as ABI-significant.
-# Generated from kernel/shell/ksh.c register_default_symbols().
+# Generated from main/runtime/shell_runtime.c register_default_symbols().
 puts
 printf
 fprintf

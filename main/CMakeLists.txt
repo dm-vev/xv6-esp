@@ -14,7 +14,7 @@ idf_component_register(
     "../kernel/hostabi/hostabi_pty.c"
     "../kernel/modules/module_manager.c"
     "../kernel/vfs/xv6fs_ro.c"
-    "../kernel/shell/ksh.c"
+    "runtime/shell_runtime.c"
   INCLUDE_DIRS
     "."
     "../kernel"
