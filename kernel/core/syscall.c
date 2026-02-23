@@ -1,3 +1,8 @@
+/**
+ * @file syscall.c
+ * @brief System call handling implementation.
+ */
+
 #include "core/types.h"
 #include "core/param.h"
 #include "core/memlayout.h"
@@ -7,7 +12,20 @@
 #include "core/syscall.h"
 #include "core/defs.h"
 
-// Fetch the uint64 at addr from the current process.
+/**
+ * @brief Fetches a uint64 value from user memory.
+ *
+ * @param addr User virtual address to read from.
+ * @param ip   Pointer to store the fetched value.
+ *
+ * @pre addr must be within process memory bounds.
+ * @pre addr+sizeof(uint64) must not overflow.
+ *
+ * @return 0 on success, -1 on failure.
+ *
+ * @error Returns -1 if address is out of bounds.
+ * @error Returns -1 if copyin fails.
+ */
 int
 fetchaddr(uint64 addr, uint64 *ip)
 {
@@ -19,8 +37,18 @@ fetchaddr(uint64 addr, uint64 *ip)
   return 0;
 }
 
-// Fetch the nul-terminated string at addr from the current process.
-// Returns length of string, not including nul, or -1 for error.
+/**
+ * @brief Fetches a null-terminated string from user memory.
+ *
+ * @param addr User virtual address of string.
+ * @param buf  Buffer to store the string.
+ * @param max  Maximum bytes to copy (including null terminator).
+ *
+ * @return Length of string (not including null) on success.
+ * @return -1 on error.
+ *
+ * @error Returns -1 if copyinstr fails.
+ */
 int
 fetchstr(uint64 addr, char *buf, int max)
 {
@@ -30,6 +58,17 @@ fetchstr(uint64 addr, char *buf, int max)
   return strlen(buf);
 }
 
+/**
+ * @brief Fetches raw argument value from trapframe.
+ *
+ * @param n Argument index (0-5).
+ *
+ * @pre n must be between 0 and 5 inclusive.
+ *
+ * @return Value of nth argument register.
+ *
+ * @error Panics if n is out of range.
+ */
 static uint64
 argraw(int n)
 {
@@ -52,25 +91,45 @@ argraw(int n)
   return -1;
 }
 
-// Fetch the nth 32-bit system call argument.
+/**
+ * @brief Fetches the nth system call argument as an integer.
+ *
+ * @param n  Argument index (0-5).
+ * @param ip Pointer to store the integer value.
+ *
+ * @post *ip contains the integer value of argument n.
+ *
+ * @return None.
+ */
 void
 argint(int n, int *ip)
 {
   *ip = argraw(n);
 }
 
-// Retrieve an argument as a pointer.
-// Doesn't check for legality, since
-// copyin/copyout will do that.
+/**
+ * @brief Fetches the nth system call argument as an address.
+ *
+ * @param n  Argument index (0-5).
+ * @param ip Pointer to store the address value.
+ *
+ * @post *ip contains the address value of argument n.
+ *
+ * @note Does not check validity - copyin/copyout handle that.
+ *
+ * @return None.
+ */
 void
 argaddr(int n, uint64 *ip)
 {
   *ip = argraw(n);
 }
 
-// Fetch the nth word-sized system call argument as a null-terminated string.
-// Copies into buf, at most max.
-// Returns string length if OK (including nul), -1 if error.
+/**
+ * @brief Fetches the nth word-sized system call argument as a null-terminated string.
+ * Copies into buf, at most max.
+ * Returns string length if OK (including nul), -1 if error.
+ */
 int
 argstr(int n, char *buf, int max)
 {
@@ -102,8 +161,11 @@ extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 
-// An array mapping syscall numbers from syscall.h
-// to the function that handles the system call.
+/**
+ * @brief System call dispatch table.
+ *
+ * Maps syscall numbers from syscall.h to handler functions.
+ */
 static uint64 (*syscalls[])(void) = {
   0,
   sys_fork,
@@ -129,6 +191,18 @@ static uint64 (*syscalls[])(void) = {
   sys_close,
 };
 
+/**
+ * @brief System call handler dispatch function.
+ *
+ * Called from trap.c when a system call trap occurs.
+ * Looks up the system call function by number and executes it.
+ *
+ * @post System call function result stored in a0 register.
+ *
+ * @note Prints error message for unknown system calls.
+ *
+ * @return None.
+ */
 void
 syscall(void)
 {

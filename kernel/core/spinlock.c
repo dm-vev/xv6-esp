@@ -1,4 +1,7 @@
-// Mutual exclusion spin locks.
+/**
+ * @file spinlock.c
+ * @brief Mutual exclusion spin locks implementation.
+ */
 
 #include "core/types.h"
 #include "core/param.h"
@@ -8,6 +11,17 @@
 #include "core/proc.h"
 #include "core/defs.h"
 
+/**
+ * @brief Initializes a spinlock.
+ *
+ * @param lk     Pointer to the spinlock to initialize.
+ * @param name   Name string for debugging purposes.
+ *
+ * @note The lock is initially in the unlocked state (locked = 0).
+ * @note Must be called before acquiring the lock.
+ *
+ * @return None.
+ */
 void
 initlock(struct spinlock *lk, char *name)
 {
@@ -16,8 +30,24 @@ initlock(struct spinlock *lk, char *name)
   lk->cpu = 0;
 }
 
-// Acquire the lock.
-// Loops (spins) until the lock is acquired.
+/**
+ * @brief Acquires the spinlock, spinning until successful.
+ *
+ * @param lk Pointer to the spinlock to acquire.
+ *
+ * @pre Interrupts must be enabled on entry.
+ * @pre The calling thread must not already hold this lock.
+ *
+ * @post The lock is held by the calling CPU.
+ * @post Interrupts are disabled while the lock is held.
+ *
+ * @note Uses atomic swap instruction (amoswap) on RISC-V.
+ * @note Disables interrupts to prevent deadlock.
+ *
+ * @return None.
+ *
+ * @error Panics if the lock is already held by the current CPU.
+ */
 void
 acquire(struct spinlock *lk)
 {
@@ -42,7 +72,24 @@ acquire(struct spinlock *lk)
   lk->cpu = mycpu();
 }
 
-// Release the lock.
+/**
+ * @brief Releases the spinlock.
+ *
+ * @param lk Pointer to the spinlock to release.
+ *
+ * @pre The lock must be held by the calling CPU.
+ *
+ * @post The lock is released (locked = 0).
+ * @post Interrupts are restored to their previous state.
+ *
+ * @note Uses atomic swap instruction (amoswap.w) on RISC-V.
+ * @note Emits a memory fence to ensure all stores in critical section
+ *       are visible before the lock is released.
+ *
+ * @return None.
+ *
+ * @error Panics if the lock is not held by the current CPU.
+ */
 void
 release(struct spinlock *lk)
 {
@@ -71,8 +118,17 @@ release(struct spinlock *lk)
   pop_off();
 }
 
-// Check whether this cpu is holding the lock.
-// Interrupts must be off.
+/**
+ * @brief Checks whether the current CPU holds the spinlock.
+ *
+ * @param lk Pointer to the spinlock to check.
+ *
+ * @pre Interrupts must be off when calling this function.
+ *
+ * @return 1 if the lock is held by the current CPU, 0 otherwise.
+ *
+ * @note Used for debugging and assertion checking.
+ */
 int
 holding(struct spinlock *lk)
 {
@@ -81,10 +137,23 @@ holding(struct spinlock *lk)
   return r;
 }
 
-// push_off/pop_off are like intr_off()/intr_on() except that they are matched:
-// it takes two pop_off()s to undo two push_off()s.  Also, if interrupts
-// are initially off, then push_off, pop_off leaves them off.
-
+/**
+ * @brief Decrements the interrupt disable nesting count.
+ *
+ * @pre Must be called after push_off().
+ *
+ * @post Interrupts are re-enabled if this is the final pop_off()
+ *       and they were originally enabled.
+ *
+ * @note This is like intr_off()/intr_on() except matched in pairs:
+ *       two push_off()s require two pop_off()s to undo.
+ * @note If interrupts were initially off, push_off/pop_off leaves them off.
+ *
+ * @return None.
+ *
+ * @error Panics if called with interrupts already enabled.
+ * @error Panics if the nesting count goes negative.
+ */
 void
 push_off(void)
 {
@@ -99,6 +168,22 @@ push_off(void)
   mycpu()->noff += 1;
 }
 
+/**
+ * @brief Increments the interrupt disable nesting count.
+ *
+ * @pre Must be called after push_off().
+ *
+ * @post Interrupts are re-enabled if this is the final pop_off()
+ *       and they were originally enabled.
+ *
+ * @note This is like intr_off()/intr_on() except matched in pairs:
+ *       two push_off()s require two pop_off()s to undo.
+ *
+ * @return None.
+ *
+ * @error Panics if called with interrupts already enabled.
+ * @error Panics if the nesting count goes negative.
+ */
 void
 pop_off(void)
 {

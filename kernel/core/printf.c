@@ -1,6 +1,9 @@
-//
-// formatted console output -- printf, panic.
-//
+/**
+ * @file printf.c
+ * @brief Formatted console output implementation.
+ *
+ * Provides printf and panic functions for formatted output to console.
+ */
 
 #include <stdarg.h>
 
@@ -15,16 +18,41 @@
 #include "core/defs.h"
 #include "core/proc.h"
 
-volatile int panicking = 0; // printing a panic message
-volatile int panicked = 0; // spinning forever at end of a panic
+/**
+ * @brief Indicates if system is currently panicking.
+ */
+volatile int panicking = 0;
 
-// lock to avoid interleaving concurrent printf's.
+/**
+ * @brief Indicates if panic has occurred.
+ *
+ * When set, causes spinning indefinitely at end of panic.
+ */
+volatile int panicked = 0;
+
+/**
+ * @brief Printf lock to avoid interleaving output.
+ */
 static struct {
   struct spinlock lock;
 } pr;
 
+/**
+ * @brief Character lookup table for numeric conversion.
+ */
 static char digits[] = "0123456789abcdef";
 
+/**
+ * @brief Prints a signed or unsigned integer in the given base.
+ *
+ * @param xx   Value to print.
+ * @param base Radix (10 for decimal, 16 for hex, etc.).
+ * @param sign If non-zero, treat as signed integer.
+ *
+ * @post Number printed to console in specified base.
+ *
+ * @note Handles negative numbers for signed conversion.
+ */
 static void
 printint(long long xx, int base, int sign)
 {
@@ -49,6 +77,13 @@ printint(long long xx, int base, int sign)
     consputc(buf[i]);
 }
 
+/**
+ * @brief Prints a pointer value in hex format.
+ *
+ * @param x Pointer value to print.
+ *
+ * @post Pointer printed as "0x" followed by hex digits.
+ */
 static void
 printptr(uint64 x)
 {
@@ -59,7 +94,25 @@ printptr(uint64 x)
     consputc(digits[x >> (sizeof(uint64) * 8 - 4)]);
 }
 
-// Print to the console.
+/**
+ * @brief Prints formatted output to the console.
+ *
+ * Supports format specifiers:
+ * - %d, %ld, %lld: signed decimal
+ * - %u, %lu, %llu: unsigned decimal
+ * - %x, %lx, %llx: hexadecimal
+ * - %p: pointer
+ * - %c: character
+ * - %s: string
+ * - %%: literal percent sign
+ *
+ * @param fmt Format string.
+ * @param ... Arguments for format specifiers.
+ *
+ * @post Formatted output written to console.
+ *
+ * @return Always returns 0.
+ */
 int
 printf(char *fmt, ...)
 {
@@ -133,6 +186,19 @@ printf(char *fmt, ...)
   return 0;
 }
 
+/**
+ * @brief Prints a panic message and halts.
+ *
+ * @param s Panic message string.
+ *
+ * @post Panic message printed.
+ * @post panicking flag set to 1.
+ * @post panicked flag set to 1.
+ *
+ * @note Does not return - enters infinite loop.
+ *
+ * @return None.
+ */
 void
 panic(char *s)
 {
@@ -144,6 +210,13 @@ panic(char *s)
     ;
 }
 
+/**
+ * @brief Initializes the printf subsystem.
+ *
+ * @post Printf lock is initialized.
+ *
+ * @return None.
+ */
 void
 printfinit(void)
 {

@@ -1,3 +1,8 @@
+/**
+ * @file proc.c
+ * @brief Process management implementation.
+ */
+
 #include "core/types.h"
 #include "core/param.h"
 #include "core/memlayout.h"
@@ -6,13 +11,29 @@
 #include "core/proc.h"
 #include "core/defs.h"
 
+/**
+ * @brief Array of CPU structures, one per CPU.
+ */
 struct cpu cpus[NCPU];
 
+/**
+ * @brief Process table containing all processes.
+ */
 struct proc proc[NPROC];
 
+/**
+ * @brief Pointer to the init process (first user process).
+ */
 struct proc *initproc;
 
+/**
+ * @brief Next available PID.
+ */
 int nextpid = 1;
+
+/**
+ * @brief Spinlock protecting PID allocation.
+ */
 struct spinlock pid_lock;
 
 extern void forkret(void);
@@ -20,15 +41,32 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
-// helps ensure that wakeups of wait()ing
-// parents are not lost. helps obey the
-// memory model when using p->parent.
-// must be acquired before any p->lock.
+/**
+ * @brief Spinlock protecting parent-child relationship during wait().
+ *
+ * Helps ensure that wakeups of wait()ing parents are not lost.
+ * Must be acquired before any p->lock.
+ */
 struct spinlock wait_lock;
 
-// Allocate a page for each process's kernel stack.
-// Map it high in memory, followed by an invalid
-// guard page.
+/**
+ * @brief Allocates kernel stacks for all processes.
+ *
+ * Maps each process's kernel stack at a high virtual address,
+ * followed by an invalid guard page.
+ *
+ * @param kpgtbl Kernel page table to use for mapping.
+ *
+ * @pre kpgtbl must be a valid kernel page table.
+ * @post Each process has a kernel stack allocated and mapped.
+ *
+ * @note Uses kalloc() to get physical memory for each stack.
+ * @note Stacks are mapped with read and write permissions.
+ *
+ * @return None.
+ *
+ * @error Panics if kalloc fails.
+ */
 void
 proc_mapstacks(pagetable_t kpgtbl)
 {
@@ -43,7 +81,17 @@ proc_mapstacks(pagetable_t kpgtbl)
   }
 }
 
-// initialize the proc table.
+/**
+ * @brief Initializes the process table.
+ *
+ * Sets up locks for process management and initializes
+ * each process slot to the UNUSED state.
+ *
+ * @note Initializes pid_lock and wait_lock spinlocks.
+ * @note Sets initial kernel stack address for each process.
+ *
+ * @return None.
+ */
 void
 procinit(void)
 {
@@ -58,9 +106,14 @@ procinit(void)
   }
 }
 
-// Must be called with interrupts disabled,
-// to prevent race with process being moved
-// to a different CPU.
+/**
+ * @brief Returns the ID of the current CPU.
+ *
+ * @pre Must be called with interrupts disabled to prevent
+ *      race with process being moved to a different CPU.
+ *
+ * @return CPU ID (hartid from RISC-V tp register).
+ */
 int
 cpuid()
 {
@@ -68,8 +121,13 @@ cpuid()
   return id;
 }
 
-// Return this CPU's cpu struct.
-// Interrupts must be disabled.
+/**
+ * @brief Returns a pointer to the current CPU structure.
+ *
+ * @pre Interrupts must be disabled.
+ *
+ * @return Pointer to the current cpu structure.
+ */
 struct cpu*
 mycpu(void)
 {
@@ -78,7 +136,14 @@ mycpu(void)
   return c;
 }
 
-// Return the current struct proc *, or zero if none.
+/**
+ * @brief Returns a pointer to the current process, or zero if none.
+ *
+ * @post Properly saves and restores interrupt state.
+ *
+ * @return Pointer to the current proc structure, or 0 if no process
+ *         is running on this CPU.
+ */
 struct proc*
 myproc(void)
 {
@@ -89,6 +154,13 @@ myproc(void)
   return p;
 }
 
+/**
+ * @brief Atomically allocates and returns a new PID.
+ *
+ * @post PID is allocated atomically using pid_lock.
+ *
+ * @return The newly allocated PID.
+ */
 int
 allocpid()
 {
@@ -102,10 +174,21 @@ allocpid()
   return pid;
 }
 
-// Look in the process table for an UNUSED proc.
-// If found, initialize state required to run in the kernel,
-// and return with p->lock held.
-// If there are no free procs, or a memory allocation fails, return 0.
+/**
+ * @brief Allocates a free process structure from the process table.
+ *
+ * Searches for an UNUSED process slot and initializes it
+ * with a new PID, trapframe, and page table.
+ *
+ * @pre No locks held.
+ * @post On success, returns with p->lock held.
+ *
+ * @return Pointer to allocated process on success, NULL on failure.
+ *
+ * @error Returns NULL if no free process slots available.
+ * @error Returns NULL if trapframe allocation fails.
+ * @error Returns NULL if page table allocation fails.
+ */
 static struct proc*
 allocproc(void)
 {
@@ -149,9 +232,18 @@ found:
   return p;
 }
 
-// free a proc structure and the data hanging from it,
-// including user pages.
-// p->lock must be held.
+/**
+ * @brief Frees a process structure and all associated resources.
+ *
+ * @param p Pointer to the process to free.
+ *
+ * @pre p->lock must be held.
+ *
+ * @post Trapframe and page table are freed.
+ * @post Process state set to UNUSED.
+ *
+ * @return None.
+ */
 static void
 freeproc(struct proc *p)
 {
@@ -171,8 +263,18 @@ freeproc(struct proc *p)
   p->state = UNUSED;
 }
 
-// Create a user page table for a given process, with no user memory,
-// but with trampoline and trapframe pages.
+/**
+ * @brief Creates a user page table for a new process.
+ *
+ * Sets up an empty page table with trampoline code and
+ * trapframe mappings.
+ *
+ * @param p Pointer to the process being created.
+ *
+ * @post Page table is allocated and mapped with trampoline and trapframe.
+ *
+ * @return New page table on success, NULL on failure.
+ */
 pagetable_t
 proc_pagetable(struct proc *p)
 {
@@ -205,8 +307,17 @@ proc_pagetable(struct proc *p)
   return pagetable;
 }
 
-// Free a process's page table, and free the
-// physical memory it refers to.
+/**
+ * @brief Frees a process's page table and associated physical memory.
+ *
+ * @param pagetable Page table to free.
+ * @param sz Size of user memory in bytes.
+ *
+ * @post Trampoline and trapframe pages are unmapped.
+ * @post User memory is freed.
+ *
+ * @return None.
+ */
 void
 proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
@@ -215,7 +326,14 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmfree(pagetable, sz);
 }
 
-// Set up first user process.
+/**
+ * @brief Creates and initializes the first user process.
+ *
+ * @post initproc points to the new process.
+ * @post Process is in RUNNABLE state with root filesystem as cwd.
+ *
+ * @return None.
+ */
 void
 userinit(void)
 {
@@ -231,8 +349,20 @@ userinit(void)
   release(&p->lock);
 }
 
-// Grow or shrink user memory by n bytes.
-// Return 0 on success, -1 on failure.
+/**
+ * @brief Grows or shrinks user memory by n bytes.
+ *
+ * @param n Number of bytes to add (positive) or remove (negative).
+ *
+ * @pre Must be called from a valid process context.
+ *
+ * @post Process memory size is updated.
+ *
+ * @return 0 on success, -1 on failure.
+ *
+ * @error Returns -1 if new size would exceed TRAPFRAME.
+ * @error Returns -1 if memory allocation fails.
+ */
 int
 growproc(int n)
 {
@@ -254,8 +384,20 @@ growproc(int n)
   return 0;
 }
 
-// Create a new process, copying the parent.
-// Sets up child kernel stack to return as if from fork() system call.
+/**
+ * @brief Creates a new process as a copy of the current process.
+ *
+ * Copies the parent's address space, file descriptors, and
+ * sets up the child to return 0 from fork().
+ *
+ * @post Child process is in RUNNABLE state.
+ * @post Child has copies of parent's open files and cwd.
+ *
+ * @return PID of child process on success, -1 on failure.
+ *
+ * @error Returns -1 if process allocation fails.
+ * @error Returns -1 if memory copy fails.
+ */
 int
 kfork(void)
 {
@@ -305,8 +447,18 @@ kfork(void)
   return pid;
 }
 
-// Pass p's abandoned children to init.
-// Caller must hold wait_lock.
+/**
+ * @brief Reparents all children of a process to init.
+ *
+ * @param p Pointer to the parent process.
+ *
+ * @pre wait_lock must be held by caller.
+ *
+ * @post All children of p now have initproc as parent.
+ * @post initproc is woken up if needed.
+ *
+ * @return None.
+ */
 void
 reparent(struct proc *p)
 {
@@ -320,9 +472,27 @@ reparent(struct proc *p)
   }
 }
 
-// Exit the current process.  Does not return.
-// An exited process remains in the zombie state
-// until its parent calls wait().
+/**
+ * @brief Exits the current process with the given exit status.
+ *
+ * Does not return. The process remains in ZOMBIE state
+ * until its parent calls wait().
+ *
+ * @param status Exit status to be returned to parent.
+ *
+ * @pre Must not be called from init process.
+ *
+ * @post All open files are closed.
+ * @post Current working directory is released.
+ * @post Process state is ZOMBIE.
+ * @post Parent is woken up.
+ *
+ * @note Never returns - jumps to scheduler.
+ *
+ * @return None.
+ *
+ * @error Panics if called from init process.
+ */
 void
 kexit(int status)
 {
@@ -365,8 +535,21 @@ kexit(int status)
   panic("zombie exit");
 }
 
-// Wait for a child process to exit and return its pid.
-// Return -1 if this process has no children.
+/**
+ * @brief Waits for a child process to exit and returns its pid.
+ *
+ * @param addr Address to copy child's exit status to (0 to ignore).
+ *
+ * @pre Must hold no process locks on entry.
+ *
+ * @post Child's exit status is copied to addr if addr != 0.
+ * @post Child process structure is freed.
+ *
+ * @return PID of exited child on success, -1 if no children.
+ *
+ * @error Returns -1 if this process has no children.
+ * @error Returns -1 if copyout fails.
+ */
 int
 kwait(uint64 addr)
 {
@@ -414,13 +597,23 @@ kwait(uint64 addr)
   }
 }
 
-// Per-CPU process scheduler.
-// Each CPU calls scheduler() after setting itself up.
-// Scheduler never returns.  It loops, doing:
-//  - choose a process to run.
-//  - swtch to start running that process.
-//  - eventually that process transfers control
-//    via swtch back to the scheduler.
+/**
+ * @brief Per-CPU process scheduler.
+ *
+ * Runs on each CPU and selects a RUNNABLE process to run.
+ * Never returns - loops forever selecting and running processes.
+ *
+ * @post Switches to selected process's context.
+ * @post Selected process state changes to RUNNING.
+ *
+ * @note Uses wait-free algorithm to find runnable processes.
+ * @note Enables interrupts briefly to avoid deadlock, then disables.
+ * @note Uses WFI (wait for interrupt) when no processes are runnable.
+ *
+ * @return None.
+ *
+ * @warning Never returns - infinite loop.
+ */
 void
 scheduler(void)
 {
@@ -462,13 +655,22 @@ scheduler(void)
   }
 }
 
-// Switch to scheduler.  Must hold only p->lock
-// and have changed proc->state. Saves and restores
-// intena because intena is a property of this
-// kernel thread, not this CPU. It should
-// be proc->intena and proc->noff, but that would
-// break in the few places where a lock is held but
-// there's no process.
+/**
+ * @brief Switches from process to scheduler.
+ *
+ * @pre Must hold only p->lock.
+ * @pre Process state must have been changed.
+ *
+ * @post Saves current process context.
+ * @post Restores scheduler context.
+ *
+ * @note Saves and restores intena because it is a property
+ *       of the kernel thread, not the CPU.
+ *
+ * @return None.
+ *
+ * @error Panics if lock not held, wrong lock count, or interrupts enabled.
+ */
 void
 sched(void)
 {
@@ -489,7 +691,16 @@ sched(void)
   mycpu()->intena = intena;
 }
 
-// Give up the CPU for one scheduling round.
+/**
+ * @brief Yields the CPU for one scheduling round.
+ *
+ * @pre Must be called from a valid process.
+ *
+ * @post Process state is RUNNABLE.
+ * @post Process will run again when scheduled.
+ *
+ * @return None.
+ */
 void
 yield(void)
 {
@@ -500,8 +711,20 @@ yield(void)
   release(&p->lock);
 }
 
-// A fork child's very first scheduling by scheduler()
-// will swtch to forkret.
+/**
+ * @brief First function executed by a newly forked child process.
+ *
+ * Called by scheduler when first switching to a new process.
+ * Runs file system initialization if this is the first call.
+ *
+ * @post File system is initialized on first call.
+ * @post Process returns to user space via trampoline.
+ *
+ * @note Runs fsinit(ROOTDEV) on first invocation only.
+ * @note Loads and executes /init program via kexec.
+ *
+ * @return None.
+ */
 void
 forkret(void)
 {
@@ -537,8 +760,23 @@ forkret(void)
   ((void (*)(uint64))trampoline_userret)(satp);
 }
 
-// Sleep on channel chan, releasing condition lock lk.
-// Re-acquires lk when awakened.
+/**
+ * @brief Puts the current process to sleep on a channel.
+ *
+ * @param chan Sleep channel to block on.
+ * @param lk Lock to release while sleeping.
+ *
+ * @pre Must hold lk lock.
+ *
+ * @post Process state is SLEEPING.
+ * @post Process chan is set to sleep channel.
+ * @post lk is released and reacquired around sleep.
+ *
+ * @note Releases lk before sleeping to allow other processes
+ *       to acquire it and potentially wake this process.
+ *
+ * @return None.
+ */
 void
 sleep(void *chan, struct spinlock *lk)
 {
@@ -568,8 +806,20 @@ sleep(void *chan, struct spinlock *lk)
   acquire(lk);
 }
 
-// Wake up all processes sleeping on channel chan.
-// Caller should hold the condition lock.
+/**
+ * @brief Wakes up all processes sleeping on a channel.
+ *
+ * @param chan Sleep channel to wake up.
+ *
+ * @pre Caller should hold the condition lock.
+ *
+ * @post All SLEEPING processes on chan are set to RUNNABLE.
+ *
+ * @note Does not acquire p->lock for non-matching processes
+ *       to avoid lock contention.
+ *
+ * @return None.
+ */
 void
 wakeup(void *chan)
 {
@@ -586,9 +836,20 @@ wakeup(void *chan)
   }
 }
 
-// Kill the process with the given pid.
-// The victim won't exit until it tries to return
-// to user space (see usertrap() in trap.c).
+/**
+ * @brief Sends a kill signal to the process with the given PID.
+ *
+ * @param pid Process ID to kill.
+ *
+ * @pre No locks held.
+ *
+ * @post Target process is marked as killed.
+ * @post If target was sleeping, it is made RUNNABLE.
+ *
+ * @return 0 on success, -1 if process not found.
+ *
+ * @note Process won't exit until it tries to return to user space.
+ */
 int
 kkill(int pid)
 {
@@ -610,6 +871,17 @@ kkill(int pid)
   return -1;
 }
 
+/**
+ * @brief Sets the killed flag for a process.
+ *
+ * @param p Pointer to the process.
+ *
+ * @pre No locks held.
+ *
+ * @post p->killed is set to 1.
+ *
+ * @return None.
+ */
 void
 setkilled(struct proc *p)
 {
@@ -618,6 +890,13 @@ setkilled(struct proc *p)
   release(&p->lock);
 }
 
+/**
+ * @brief Checks if a process has been killed.
+ *
+ * @param p Pointer to the process.
+ *
+ * @return 1 if killed, 0 otherwise.
+ */
 int
 killed(struct proc *p)
 {
@@ -629,9 +908,20 @@ killed(struct proc *p)
   return k;
 }
 
-// Copy to either a user address, or kernel address,
-// depending on usr_dst.
-// Returns 0 on success, -1 on error.
+/**
+ * @brief Copies data to either a user or kernel address.
+ *
+ * @param user_dst If non-zero, copy to user address; else kernel address.
+ * @param dst Destination address.
+ * @param src Source address.
+ * @param len Number of bytes to copy.
+ *
+ * @post Data is copied to destination.
+ *
+ * @return 0 on success, -1 on failure.
+ *
+ * @error Returns -1 if user_dst and copyout fails.
+ */
 int
 either_copyout(int user_dst, uint64 dst, void *src, uint64 len)
 {
@@ -644,9 +934,20 @@ either_copyout(int user_dst, uint64 dst, void *src, uint64 len)
   }
 }
 
-// Copy from either a user address, or kernel address,
-// depending on usr_src.
-// Returns 0 on success, -1 on error.
+/**
+ * @brief Copies data from either a user or kernel address.
+ *
+ * @param dst Destination buffer.
+ * @param user_src If non-zero, copy from user address; else kernel address.
+ * @param src Source address.
+ * @param len Number of bytes to copy.
+ *
+ * @post Data is copied to destination buffer.
+ *
+ * @return 0 on success, -1 on failure.
+ *
+ * @error Returns -1 if user_src and copyin fails.
+ */
 int
 either_copyin(void *dst, int user_src, uint64 src, uint64 len)
 {
@@ -659,9 +960,16 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
   }
 }
 
-// Print a process listing to console.  For debugging.
-// Runs when user types ^P on console.
-// No lock to avoid wedging a stuck machine further.
+/**
+ * @brief Dumps process information to console for debugging.
+ *
+ * Called when user types ^P on console.
+ * Displays PID, state, and name for each process.
+ *
+ * @note No lock used to avoid wedging a stuck machine.
+ *
+ * @return None.
+ */
 void
 procdump(void)
 {

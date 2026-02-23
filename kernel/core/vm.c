@@ -1,3 +1,8 @@
+/**
+ * @file vm.c
+ * @brief Virtual memory management implementation.
+ */
+
 #include "core/param.h"
 #include "core/types.h"
 #include "core/memlayout.h"
@@ -8,8 +13,10 @@
 #include "core/proc.h"
 #include "fs/fs.h"
 
-/*
- * the kernel's page table.
+/**
+ * @brief The kernel's page table.
+ *
+ * Direct-mapped page table shared by all CPUs.
  */
 pagetable_t kernel_pagetable;
 
@@ -17,7 +24,24 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
-// Make a direct-map page table for the kernel.
+/**
+ * @brief Creates a direct-map page table for the kernel.
+ *
+ * Sets up direct mappings for:
+ * - UART registers
+ * - Virtio disk interface
+ * - PLIC
+ * - Kernel text (executable, read-only)
+ * - Kernel data and RAM
+ * - Trampoline page
+ * - Per-process kernel stacks
+ *
+ * @post Kernel page table is allocated and fully mapped.
+ *
+ * @return Newly created kernel page table.
+ *
+ * @error Panics if memory allocation fails during mapping.
+ */
 pagetable_t
 kvmmake(void)
 {
@@ -51,9 +75,22 @@ kvmmake(void)
   return kpgtbl;
 }
 
-// add a mapping to the kernel page table.
-// only used when booting.
-// does not flush TLB or enable paging.
+/**
+ * @brief Adds a mapping to the kernel page table.
+ *
+ * @param kpgtbl Kernel page table to modify.
+ * @param va      Virtual address to map.
+ * @param pa      Physical address to map.
+ * @param sz      Size of mapping in bytes.
+ * @param perm    Page table permissions (PTE_R, PTE_W, PTE_X, etc.).
+ *
+ * @note Only used during boot.
+ * @note Does not flush TLB or enable paging.
+ *
+ * @return None.
+ *
+ * @error Panics if mappages fails.
+ */
 void
 kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 {
@@ -61,15 +98,34 @@ kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
     panic("kvmmap");
 }
 
-// Initialize the kernel_pagetable, shared by all CPUs.
+/**
+ * @brief Initializes the kernel page table.
+ *
+ * Called once during kernel startup, shared by all CPUs.
+ *
+ * @post kernel_pagetable is set to a new kernel page table.
+ *
+ * @return None.
+ */
 void
 kvminit(void)
 {
   kernel_pagetable = kvmmake();
 }
 
-// Switch the current CPU's h/w page table register to
-// the kernel's page table, and enable paging.
+/**
+ * @brief Activates the kernel page table on the current CPU.
+ *
+ * Switches the hardware page table register to the kernel's page table
+ * and enables paging.
+ *
+ * @post SATP register points to kernel_pagetable.
+ * @post Paging is enabled.
+ *
+ * @note Flushes TLB before and after switching to ensure consistency.
+ *
+ * @return None.
+ */
 void
 kvminithart()
 {
@@ -82,18 +138,23 @@ kvminithart()
   sfence_vma();
 }
 
-// Return the address of the PTE in page table pagetable
-// that corresponds to virtual address va.  If alloc!=0,
-// create any required page-table pages.
-//
-// The risc-v Sv39 scheme has three levels of page-table
-// pages. A page-table page contains 512 64-bit PTEs.
-// A 64-bit virtual address is split into five fields:
-//   39..63 -- must be zero.
-//   30..38 -- 9 bits of level-2 index.
-//   21..29 -- 9 bits of level-1 index.
-//   12..20 -- 9 bits of level-0 index.
-//    0..11 -- 12 bits of byte offset within the page.
+/**
+ * @brief Walks the page table to find the PTE for a virtual address.
+ *
+ * Uses RISC-V Sv39 scheme with three levels of page-table pages.
+ * Each page-table page contains 512 64-bit PTEs.
+ *
+ * @param pagetable Page table to walk.
+ * @param va        Virtual address to look up.
+ * @param alloc     If non-zero, allocate missing page-table pages.
+ *
+ * @pre va must be less than MAXVA.
+ *
+ * @return Pointer to PTE on success, NULL if allocation failed.
+ *
+ * @error Panics if va >= MAXVA.
+ * @error Returns NULL if alloc is true and memory allocation fails.
+ */
 pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
 {
@@ -114,9 +175,20 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
   return &pagetable[PX(0, va)];
 }
 
-// Look up a virtual address, return the physical address,
-// or 0 if not mapped.
-// Can only be used to look up user pages.
+/**
+ * @brief Looks up a virtual address and returns the physical address.
+ *
+ * Only works for user pages (must have PTE_U set).
+ *
+ * @param pagetable Page table to search.
+ * @param va        Virtual address to translate.
+ *
+ * @pre va must be less than MAXVA.
+ *
+ * @return Physical address if mapped, 0 otherwise.
+ *
+ * @note Returns 0 if PTE doesn't exist or isn't valid/user.
+ */
 uint64
 walkaddr(pagetable_t pagetable, uint64 va)
 {
@@ -137,11 +209,21 @@ walkaddr(pagetable_t pagetable, uint64 va)
   return pa;
 }
 
-// Create PTEs for virtual addresses starting at va that refer to
-// physical addresses starting at pa.
-// va and size MUST be page-aligned.
-// Returns 0 on success, -1 if walk() couldn't
-// allocate a needed page-table page.
+/**
+ * @brief Creates PTEs mapping virtual addresses to physical addresses.
+ *
+ * @param pagetable Page table to modify.
+ * @param va        Starting virtual address (must be page-aligned).
+ * @param size      Size of memory to map (must be page-aligned).
+ * @param pa        Starting physical address.
+ * @param perm      Permissions (PTE_R, PTE_W, PTE_X, PTE_U).
+ *
+ * @pre va and size must be page-aligned.
+ *
+ * @return 0 on success, -1 if page table allocation fails.
+ *
+ * @error Panics if va, size not aligned, or remapping attempted.
+ */
 int
 mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 {
@@ -173,8 +255,13 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   return 0;
 }
 
-// create an empty user page table.
-// returns 0 if out of memory.
+/**
+ * @brief Creates an empty user page table.
+ *
+ * @post New page table allocated and zeroed.
+ *
+ * @return New page table on success, NULL if out of memory.
+ */
 pagetable_t
 uvmcreate()
 {
@@ -186,9 +273,23 @@ uvmcreate()
   return pagetable;
 }
 
-// Remove npages of mappings starting from va. va must be
-// page-aligned. It's OK if the mappings don't exist.
-// Optionally free the physical memory.
+/**
+ * @brief Removes mappings for a range of virtual addresses.
+ *
+ * @param pagetable Page table to modify.
+ * @param va        Starting virtual address (must be page-aligned).
+ * @param npages    Number of pages to unmap.
+ * @param do_free   If true, free the underlying physical memory.
+ *
+ * @pre va must be page-aligned.
+ *
+ * @post Specified virtual pages are unmapped.
+ * @post Physical memory is freed if do_free is true.
+ *
+ * @note It's OK if mappings don't exist - they will be skipped.
+ *
+ * @return None.
+ */
 void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
@@ -211,8 +312,23 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   }
 }
 
-// Allocate PTEs and physical memory to grow a process from oldsz to
-// newsz, which need not be page aligned.  Returns new size or 0 on error.
+/**
+ * @brief Allocates physical memory and maps it into user space.
+ *
+ * Grows process memory from oldsz to newsz by allocating
+ * new pages and mapping them.
+ *
+ * @param pagetable User page table.
+ * @param oldsz     Current size of process memory.
+ * @param newsz     Desired new size.
+ * @param xperm     Extra permissions (e.g., PTE_X for executable).
+ *
+ * @pre newsz >= oldsz.
+ *
+ * @post New pages are allocated and mapped.
+ *
+ * @return New size on success, 0 on failure.
+ */
 uint64
 uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
 {
@@ -239,10 +355,17 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
   return newsz;
 }
 
-// Deallocate user pages to bring the process size from oldsz to
-// newsz.  oldsz and newsz need not be page-aligned, nor does newsz
-// need to be less than oldsz.  oldsz can be larger than the actual
-// process size.  Returns the new process size.
+/**
+ * @brief Deallocates user memory to shrink process size.
+ *
+ * @param pagetable User page table.
+ * @param oldsz     Current size.
+ * @param newsz     Target size (can be larger than oldsz).
+ *
+ * @post Memory from newsz to oldsz is freed if newsz < oldsz.
+ *
+ * @return New process size (may be less than newsz if alignment changes).
+ */
 uint64
 uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
 {
@@ -257,8 +380,17 @@ uvmdealloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
   return newsz;
 }
 
-// Recursively free page-table pages.
-// All leaf mappings must already have been removed.
+/**
+ * @brief Recursively frees all page-table pages.
+ *
+ * @param pagetable Page table to free.
+ *
+ * @pre All leaf mappings must have been removed.
+ *
+ * @post All page-table pages are freed.
+ *
+ * @error Panics if leaf mappings still exist.
+ */
 void
 freewalk(pagetable_t pagetable)
 {
@@ -277,8 +409,16 @@ freewalk(pagetable_t pagetable)
   kfree((void*)pagetable);
 }
 
-// Free user memory pages,
-// then free page-table pages.
+/**
+ * @brief Frees all user memory and page table.
+ *
+ * @param pagetable User page table to free.
+ * @param sz        Size of user memory in bytes.
+ *
+ * @post All user pages and page-table pages are freed.
+ *
+ * @return None.
+ */
 void
 uvmfree(pagetable_t pagetable, uint64 sz)
 {
@@ -287,12 +427,21 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
-// Given a parent process's page table, copy
-// its memory into a child's page table.
-// Copies both the page table and the
-// physical memory.
-// returns 0 on success, -1 on failure.
-// frees any allocated pages on failure.
+/**
+ * @brief Copies parent's address space to child.
+ *
+ * Copies both page table entries and physical memory.
+ *
+ * @param old Parent's page table.
+ * @param new Child's page table.
+ * @param sz  Size of parent process memory.
+ *
+ * @post Child has copy of parent's memory.
+ *
+ * @return 0 on success, -1 on failure.
+ *
+ * @error Frees any allocated pages on failure.
+ */
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
@@ -323,8 +472,20 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return -1;
 }
 
-// mark a PTE invalid for user access.
-// used by exec for the user stack guard page.
+/**
+ * @brief Marks a PTE invalid for user access.
+ *
+ * Used for user stack guard pages.
+ *
+ * @param pagetable Page table to modify.
+ * @param va        Virtual address to clear PTE_U bit.
+ *
+ * @post PTE at va no longer has user (PTE_U) permission.
+ *
+ * @error Panics if PTE doesn't exist.
+ *
+ * @return None.
+ */
 void
 uvmclear(pagetable_t pagetable, uint64 va)
 {
@@ -336,9 +497,21 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
-// Copy from kernel to user.
-// Copy len bytes from src to virtual address dstva in a given page table.
-// Return 0 on success, -1 on error.
+/**
+ * @brief Copies data from kernel to user virtual memory.
+ *
+ * @param pagetable Page table to use for translation.
+ * @param dstva     Destination virtual address.
+ * @param src       Source kernel pointer.
+ * @param len       Number of bytes to copy.
+ *
+ * @post Data copied to user virtual address.
+ *
+ * @return 0 on success, -1 on failure.
+ *
+ * @error Returns -1 if dstva >= MAXVA.
+ * @error Returns -1 if page not writable.
+ */
 int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
@@ -374,9 +547,20 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   return 0;
 }
 
-// Copy from user to kernel.
-// Copy len bytes to dst from virtual address srcva in a given page table.
-// Return 0 on success, -1 on error.
+/**
+ * @brief Copies data from user to kernel virtual memory.
+ *
+ * @param pagetable Page table to use for translation.
+ * @param dst       Destination kernel pointer.
+ * @param srcva     Source virtual address.
+ * @param len       Number of bytes to copy.
+ *
+ * @post Data copied to kernel buffer.
+ *
+ * @return 0 on success, -1 on failure.
+ *
+ * @error Returns -1 if translation fails.
+ */
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
@@ -402,10 +586,20 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
   return 0;
 }
 
-// Copy a null-terminated string from user to kernel.
-// Copy bytes to dst from virtual address srcva in a given page table,
-// until a '\0', or max.
-// Return 0 on success, -1 on error.
+/**
+ * @brief Copies a null-terminated string from user to kernel.
+ *
+ * @param pagetable Page table to use for translation.
+ * @param dst       Destination kernel buffer.
+ * @param srcva     Source virtual address.
+ * @param max       Maximum bytes to copy.
+ *
+ * @post String copied to kernel (null-terminated).
+ *
+ * @return 0 on success, -1 on failure.
+ *
+ * @error Returns -1 if no null terminator found within max bytes.
+ */
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
@@ -448,10 +642,24 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   }
 }
 
-// allocate and map user memory if process is referencing a page
-// that was lazily allocated in sys_sbrk().
-// returns 0 if va is invalid or already mapped, or if
-// out of physical memory, and physical address if successful.
+/**
+ * @brief Handles page faults for lazily-allocated pages.
+ *
+ * Allocates and maps user memory for pages that were
+ * lazily allocated via sys_sbrk().
+ *
+ * @param pagetable Page table to modify.
+ * @param va        Faulting virtual address.
+ * @param read      1 if read fault, 0 if write fault.
+ *
+ * @pre va must be within process memory bounds.
+ *
+ * @post New page allocated and mapped if needed.
+ *
+ * @return Physical address on success, 0 on failure.
+ *
+ * @note Only allocates if va < p->sz and page not already mapped.
+ */
 uint64
 vmfault(pagetable_t pagetable, uint64 va, int read)
 {
@@ -475,6 +683,14 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   return mem;
 }
 
+/**
+ * @brief Checks if a virtual address is mapped.
+ *
+ * @param pagetable Page table to check.
+ * @param va        Virtual address.
+ *
+ * @return 1 if mapped, 0 otherwise.
+ */
 int
 ismapped(pagetable_t pagetable, uint64 va)
 {

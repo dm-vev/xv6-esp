@@ -1,4 +1,18 @@
-// Saved registers for kernel context switches.
+/**
+ * @file proc.h
+ * @brief Process management structures and interfaces.
+ */
+#ifndef PROC_H
+#define PROC_H
+
+#include "core/spinlock.h"
+
+/**
+ * @brief Saved registers for kernel context switches.
+ *
+ * Contains callee-saved registers that must be preserved
+ * when switching between processes.
+ */
 struct context {
   uint64 ra;
   uint64 sp;
@@ -18,7 +32,11 @@ struct context {
   uint64 s11;
 };
 
-// Per-CPU state.
+/**
+ * @brief Per-CPU state structure.
+ *
+ * Each CPU has its own context and tracks the currently running process.
+ */
 struct cpu {
   struct proc *proc;          // The process running on this cpu, or null.
   struct context context;     // swtch() here to enter scheduler().
@@ -28,18 +46,24 @@ struct cpu {
 
 extern struct cpu cpus[NCPU];
 
-// per-process data for the trap handling code in trampoline.S.
-// sits in a page by itself just under the trampoline page in the
-// user page table. not specially mapped in the kernel page table.
-// uservec in trampoline.S saves user registers in the trapframe,
-// then initializes registers from the trapframe's
-// kernel_sp, kernel_hartid, kernel_satp, and jumps to kernel_trap.
-// usertrapret() and userret in trampoline.S set up
-// the trapframe's kernel_*, restore user registers from the
-// trapframe, switch to the user page table, and enter user space.
-// the trapframe includes callee-saved user registers like s0-s11 because the
-// return-to-user path via usertrapret() doesn't return through
-// the entire kernel call stack.
+/**
+ * @brief Per-process data for trap handling in trampoline.S.
+ *
+ * Sits in a page by itself just under the trampoline page in the
+ * user page table. Not specially mapped in the kernel page table.
+ *
+ * uservec in trampoline.S saves user registers in the trapframe,
+ * then initializes registers from the trapframe's
+ * kernel_sp, kernel_hartid, kernel_satp, and jumps to kernel_trap.
+ *
+ * usertrapret() and userret in trampoline.S set up
+ * the trapframe's kernel_*, restore user registers from the
+ * trapframe, switch to the user page table, and enter user space.
+ *
+ * The trapframe includes callee-saved user registers like s0-s11 because the
+ * return-to-user path via usertrapret() doesn't return through
+ * the entire kernel call stack.
+ */
 struct trapframe {
   /*   0 */ uint64 kernel_satp;   // kernel page table
   /*   8 */ uint64 kernel_sp;     // top of process's kernel stack
@@ -79,9 +103,16 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
+/**
+ * @brief Process states.
+ */
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
-// Per-process state
+/**
+ * @brief Per-process state structure.
+ *
+ * Represents a single process in the system.
+ */
 struct proc {
   struct spinlock lock;
 
@@ -105,3 +136,5 @@ struct proc {
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 };
+
+#endif // PROC_H

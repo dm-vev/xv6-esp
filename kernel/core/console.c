@@ -1,13 +1,15 @@
-//
-// Console input and output, to the uart.
-// Reads are line at a time.
-// Implements special input characters:
-//   newline -- end of line
-//   control-h -- backspace
-//   control-u -- kill line
-//   control-d -- end of file
-//   control-p -- print process list
-//
+/**
+ * @file console.c
+ * @brief Console input and output implementation.
+ *
+ * Handles UART-based console I/O with line buffering and
+ * special character processing:
+ *   newline -- end of line
+ *   control-h -- backspace
+ *   control-u -- kill line
+ *   control-d -- end of file
+ *   control-p -- print process list
+ */
 
 #include <stdarg.h>
 
@@ -22,26 +24,19 @@
 #include "core/defs.h"
 #include "core/proc.h"
 
-#define BACKSPACE 0x100  // erase the last output character
-#define C(x)  ((x)-'@')  // Control-x
+/**
+ * @brief Backspace character code - erases last output character.
+ */
+#define BACKSPACE 0x100
 
-//
-// send one character to the uart, but don't use
-// interrupts or sleep(). safe to be called from
-// interrupts, e.g. by printf and to echo input
-// characters.
-//
-void
-consputc(int c)
-{
-  if(c == BACKSPACE){
-    // if the user typed backspace, overwrite with a space.
-    uartputc_sync('\b'); uartputc_sync(' '); uartputc_sync('\b');
-  } else {
-    uartputc_sync(c);
-  }
-}
+/**
+ * @brief Converts control character to control code.
+ */
+#define C(x)  ((x)-'@')
 
+/**
+ * @brief Console input buffer structure.
+ */
 struct {
   struct spinlock lock;
   
@@ -53,10 +48,42 @@ struct {
   uint e;  // Edit index
 } cons;
 
-//
-// user write() system calls to the console go here.
-// uses sleep() and UART interrupts.
-//
+/**
+ * @brief Outputs a single character to UART synchronously.
+ *
+ * Does not use interrupts or sleep - safe to call from interrupt
+ * handlers (e.g., by printf or to echo input characters).
+ *
+ * @param c Character to output.
+ *
+ * @note Handles BACKSPACE by printing backspace-space-backspace sequence.
+ *
+ * @return None.
+ */
+void
+consputc(int c)
+{
+  if(c == BACKSPACE){
+    // if the user typed backspace, overwrite with a space.
+    uartputc_sync('\b'); uartputc_sync(' '); uartputc_sync('\b');
+  } else {
+    uartputc_sync(c);
+  }
+}
+
+/**
+ * @brief Handles user write() system calls to the console.
+ *
+ * Copies data from user or kernel space and writes to UART.
+ *
+ * @param user_src If non-zero, src is user address; else kernel address.
+ * @param src      Source address to copy from.
+ * @param n        Number of bytes to write.
+ *
+ * @post Data written to UART.
+ *
+ * @return Number of bytes actually written.
+ */
 int
 consolewrite(int user_src, uint64 src, int n)
 {
@@ -76,12 +103,23 @@ consolewrite(int user_src, uint64 src, int n)
   return i;
 }
 
-//
-// user read()s from the console go here.
-// copy (up to) a whole input line to dst.
-// user_dst indicates whether dst is a user
-// or kernel address.
-//
+/**
+ * @brief Handles user read() system calls from the console.
+ *
+ * Copies a whole input line to the destination buffer.
+ * Blocks until a line is available or EOF.
+ *
+ * @param user_dst If non-zero, dst is user address; else kernel address.
+ * @param dst      Destination buffer address.
+ * @param n        Maximum bytes to read.
+ *
+ * @post Line copied to destination buffer.
+ *
+ * @return Number of bytes read, -1 on error.
+ *
+ * @error Returns -1 if process was killed while waiting.
+ * @error Returns -1 if copyout fails.
+ */
 int
 consoleread(int user_dst, uint64 dst, int n)
 {
@@ -137,12 +175,24 @@ consoleread(int user_dst, uint64 dst, int n)
   return target - n;
 }
 
-//
-// the console input interrupt handler.
-// uartintr() calls this for each input character.
-// do erase/kill processing, append to cons.buf,
-// wake up consoleread() if a whole line has arrived.
-//
+/**
+ * @brief Console input interrupt handler.
+ *
+ * Called by uartintr() for each input character.
+ * Handles special characters and appends to console buffer.
+ * Wakes up consoleread() when a whole line arrives.
+ *
+ * @param c Input character from UART.
+ *
+ * @pre Console lock must be held.
+ *
+ * @post Input processed and added to buffer.
+ * @post consoleread() woken up if line complete.
+ *
+ * @note Handles: ^P (procdump), ^U (kill line), ^H/del (backspace).
+ *
+ * @return None.
+ */
 void
 consoleintr(int c)
 {
@@ -189,6 +239,18 @@ consoleintr(int c)
   release(&cons.lock);
 }
 
+/**
+ * @brief Initializes the console subsystem.
+ *
+ * Sets up console lock and UART, then registers
+ * console read/write handlers with device switch table.
+ *
+ * @post Console lock initialized.
+ * @post UART initialized.
+ * @post Console registered as character device.
+ *
+ * @return None.
+ */
 void
 consoleinit(void)
 {

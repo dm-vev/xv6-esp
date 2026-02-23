@@ -1,5 +1,21 @@
+/**
+ * @file string.c
+ * @brief String and memory manipulation functions.
+ */
+
 #include "core/types.h"
 
+/**
+ * @brief Fills a block of memory with a byte value.
+ *
+ * @param dst Destination memory block.
+ * @param c   Byte value to fill with.
+ * @param n   Number of bytes to fill.
+ *
+ * @post dst filled with n copies of byte c.
+ *
+ * @return Pointer to dst.
+ */
 void*
 memset(void *dst, int c, uint n)
 {
@@ -11,6 +27,17 @@ memset(void *dst, int c, uint n)
   return dst;
 }
 
+/**
+ * @brief Compares two memory blocks.
+ *
+ * @param v1 First memory block.
+ * @param v2 Second memory block.
+ * @param n  Number of bytes to compare.
+ *
+ * @return 0 if blocks are equal.
+ * @return Negative if v1 < v2.
+ * @return Positive if v1 > v2.
+ */
 int
 memcmp(const void *v1, const void *v2, uint n)
 {
@@ -27,6 +54,20 @@ memcmp(const void *v1, const void *v2, uint n)
   return 0;
 }
 
+/**
+ * @brief Copies a block of memory.
+ *
+ * Handles overlapping regions correctly by copying
+ * from end to start when regions overlap.
+ *
+ * @param dst Destination memory block.
+ * @param src Source memory block.
+ * @param n   Number of bytes to copy.
+ *
+ * @post src copied to dst.
+ *
+ * @return Pointer to dst.
+ */
 void*
 memmove(void *dst, const void *src, uint n)
 {
@@ -50,13 +91,33 @@ memmove(void *dst, const void *src, uint n)
   return dst;
 }
 
-// memcpy exists to placate GCC.  Use memmove.
+/**
+ * @brief Copies a block of memory.
+ *
+ * @param dst Destination memory block.
+ * @param src Source memory block.
+ * @param n   Number of bytes to copy.
+ *
+ * @note Uses memmove internally to handle overlapping regions.
+ *
+ * @return Pointer to dst.
+ */
 void*
 memcpy(void *dst, const void *src, uint n)
 {
   return memmove(dst, src, n);
 }
 
+/**
+ * @brief Compares two strings up to n characters.
+ *
+ * @param p First string.
+ * @param q Second string.
+ * @param n Maximum characters to compare.
+ *
+ * @return 0 if strings are equal up to n characters.
+ * @return Difference between differing characters.
+ */
 int
 strncmp(const char *p, const char *q, uint n)
 {
@@ -67,6 +128,17 @@ strncmp(const char *p, const char *q, uint n)
   return (uchar)*p - (uchar)*q;
 }
 
+/**
+ * @brief Copies a string (not null-terminated).
+ *
+ * @param s Destination buffer.
+ * @param t Source string.
+ * @param n Maximum characters to copy.
+ *
+ * @post Exactly n bytes copied (may not be null-terminated).
+ *
+ * @return Pointer to destination buffer.
+ */
 char*
 strncpy(char *s, const char *t, int n)
 {
@@ -80,7 +152,17 @@ strncpy(char *s, const char *t, int n)
   return os;
 }
 
-// Like strncpy but guaranteed to NUL-terminate.
+/**
+ * @brief Copies a string, always null-terminated.
+ *
+ * @param s Destination buffer.
+ * @param t Source string.
+ * @param n Size of destination buffer.
+ *
+ * @post String copied and always null-terminated.
+ *
+ * @return Pointer to destination buffer.
+ */
 char*
 safestrcpy(char *s, const char *t, int n)
 {
@@ -95,6 +177,13 @@ safestrcpy(char *s, const char *t, int n)
   return os;
 }
 
+/**
+ * @brief Returns the length of a string.
+ *
+ * @param s Null-terminated string.
+ *
+ * @return Number of characters before null terminator.
+ */
 int
 strlen(const char *s)
 {
@@ -104,4 +193,3 @@ strlen(const char *s)
     ;
   return n;
 }
-
