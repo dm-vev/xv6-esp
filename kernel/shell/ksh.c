@@ -1682,6 +1682,48 @@ static int parse_u32_dec(const char *s, uint32 *out)
   return 0;
 }
 
+static int parse_i32_dec(const char *s, int *out)
+{
+  uint32 v = 0;
+  uint32 d;
+  int neg = 0;
+
+  if(s == 0 || *s == 0 || out == 0)
+    return -1;
+
+  if(*s == '-'){
+    neg = 1;
+    s++;
+    if(*s == 0)
+      return -1;
+  }
+
+  while(*s){
+    if(*s < '0' || *s > '9')
+      return -1;
+    d = (uint32)(*s - '0');
+    if(!neg){
+      if(v > 214748364u || (v == 214748364u && d > 7u))
+        return -1;
+    } else {
+      if(v > 214748364u || (v == 214748364u && d > 8u))
+        return -1;
+    }
+    v = v * 10u + d;
+    s++;
+  }
+
+  if(neg){
+    if(v == 2147483648u)
+      *out = (-2147483647 - 1);
+    else
+      *out = -(int)v;
+  } else {
+    *out = (int)v;
+  }
+  return 0;
+}
+
 static int env_find_slot(const char *key)
 {
   int i;
@@ -2668,7 +2710,7 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
-  if(g_jobs[slot].used)
+  if(g_jobs[slot].used && !g_jobs[slot].done && g_jobs[slot].task_ctx == t)
     g_jobs[slot].task = handle;
   if(g_jobs_lock)
     (void)xSemaphoreGive(g_jobs_lock);
@@ -3490,13 +3532,10 @@ static int cmd_kmod(int argc, char **argv)
       return 2;
     }
     if(argc >= 4){
-      char *endp = 0;
-      long v = strtol(argv[3], &endp, 10);
-      if(endp == argv[3] || *endp != 0){
+      if(parse_i32_dec(argv[3], &prio) != 0){
         eputs_line("kmod load: bad priority");
         return 2;
       }
-      prio = (int)v;
     }
     if(kmod_load_with_priority(argv[2], prio, &id) != 0){
       eputs_console("kmod load: ");
@@ -3508,19 +3547,29 @@ static int cmd_kmod(int argc, char **argv)
   }
 
   if(strcmp(argv[1], "unload") == 0){
+    uint32 id_u32 = 0;
     int id;
     int force = 0;
     if(argc < 3){
       puts_line("usage: kmod unload <id> [--force]");
       return 2;
     }
-    id = atoi(argv[2]);
-    if(id <= 0){
+    if(parse_u32_dec(argv[2], &id_u32) != 0 || id_u32 == 0 || id_u32 > 2147483647u){
       eputs_line("kmod unload: bad id");
       return 2;
     }
-    if(argc >= 4 && strcmp(argv[3], "--force") == 0)
+    id = (int)id_u32;
+    if(argc >= 4){
+      if(strcmp(argv[3], "--force") != 0){
+        puts_line("usage: kmod unload <id> [--force]");
+        return 2;
+      }
       force = 1;
+    }
+    if(argc > 4){
+      puts_line("usage: kmod unload <id> [--force]");
+      return 2;
+    }
     if(kmod_unload(id, force) != 0){
       eputs_console("kmod unload: ");
       eputs_line(kmod_last_error());
@@ -3531,6 +3580,7 @@ static int cmd_kmod(int argc, char **argv)
   }
 
   if(strcmp(argv[1], "reload") == 0){
+    uint32 id_u32 = 0;
     int id = 0;
     int new_id = -1;
     if(argc < 3){
@@ -3538,7 +3588,8 @@ static int cmd_kmod(int argc, char **argv)
       return 2;
     }
 
-    id = atoi(argv[2]);
+    if(parse_u32_dec(argv[2], &id_u32) == 0 && id_u32 <= 2147483647u)
+      id = (int)id_u32;
     if(id > 0){
       if(kmod_reload(id, &new_id) != 0){
         eputs_console("kmod reload: ");
@@ -3552,13 +3603,10 @@ static int cmd_kmod(int argc, char **argv)
     {
       int prio = KMOD_PRIORITY_AUTO;
       if(argc >= 4){
-        char *endp = 0;
-        long v = strtol(argv[3], &endp, 10);
-        if(endp == argv[3] || *endp != 0){
+        if(parse_i32_dec(argv[3], &prio) != 0){
           eputs_line("kmod reload: bad priority");
           return 2;
         }
-        prio = (int)v;
       }
       if(kmod_reload_path(argv[2], prio, &new_id) != 0){
         eputs_console("kmod reload: ");
