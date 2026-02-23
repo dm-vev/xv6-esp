@@ -8,12 +8,12 @@
 #include <sys/stat.h>
 
 #define stat xv6_stat  // avoid clash with host struct stat in kernel headers
-#include "kernel/types.h"
+#include "kernel/core/types.h"
 #define dirent xv6_dirent
-#include "kernel/fs.h"
+#include "kernel/fs/fs.h"
 #undef dirent
-#include "kernel/stat.h"
-#include "kernel/param.h"
+#include "kernel/fs/stat.h"
+#include "kernel/core/param.h"
 #undef stat
 
 #ifndef static_assert

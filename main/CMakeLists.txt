@@ -3,19 +3,21 @@ set(XV6FS_IMAGE "${CMAKE_BINARY_DIR}/xv6fs.bin")
 idf_component_register(
   SRCS
     "app_main.c"
-    "../kernel/xv6_esp_boot.c"
-    "../kernel/hal_esp32s3.c"
-    "../kernel/esp_flash_disk.c"
-    "../kernel/elf_loader.c"
-    "../kernel/hostabi_dirent.c"
-    "../kernel/hostabi_exports.c"
-    "../kernel/hostabi_posix_fs.c"
-    "../kernel/hostabi_posix_io.c"
-    "../kernel/hostabi_pty.c"
-    "../kernel/xv6fs_ro.c"
-    "../kernel/ksh.c"
+    "../kernel/platform/xv6_esp_boot.c"
+    "../kernel/platform/hal_esp32s3.c"
+    "../kernel/platform/esp_flash_disk.c"
+    "../kernel/loader/elf_loader.c"
+    "../kernel/hostabi/hostabi_dirent.c"
+    "../kernel/hostabi/exports_registry.c"
+    "../kernel/hostabi/hostabi_posix_fs.c"
+    "../kernel/hostabi/hostabi_posix_io.c"
+    "../kernel/hostabi/hostabi_pty.c"
+    "../kernel/modules/module_manager.c"
+    "../kernel/vfs/xv6fs_ro.c"
+    "../kernel/shell/ksh.c"
   INCLUDE_DIRS
     "."
+    "../kernel"
 )
 
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)

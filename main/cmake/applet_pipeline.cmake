@@ -13,7 +13,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     OUTPUT ${MKFS_TOOL}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}
     COMMAND cc -Wno-unknown-attributes -I${PROJECT_DIR} -o ${MKFS_TOOL} ${PROJECT_DIR}/mkfs/mkfs.c
-    DEPENDS ${PROJECT_DIR}/mkfs/mkfs.c ${PROJECT_DIR}/kernel/fs.h ${PROJECT_DIR}/kernel/param.h
+    DEPENDS ${PROJECT_DIR}/mkfs/mkfs.c ${PROJECT_DIR}/kernel/fs/fs.h ${PROJECT_DIR}/kernel/core/param.h
     VERBATIM
   )
 

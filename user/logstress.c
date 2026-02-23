@@ -1,6 +1,6 @@
-#include "kernel/types.h"
-#include "kernel/stat.h"
-#include "kernel/fcntl.h"
+#include "kernel/core/types.h"
+#include "kernel/fs/stat.h"
+#include "kernel/fs/fcntl.h"
 #include "user/user.h"
 
 // Stress xv6 logging system by having several processes writing

@@ -47,7 +47,7 @@ def write_snapshot(path: Path, symbols: list[str]) -> None:
     lines = [
         "# Host ABI export snapshot for applet/newlib runtime.",
         "# Order is intentionally fixed and treated as ABI-significant.",
-        "# Generated from kernel/ksh.c register_default_symbols().",
+        "# Generated from kernel/shell/ksh.c register_default_symbols().",
         *symbols,
         "",
     ]
@@ -57,7 +57,11 @@ def write_snapshot(path: Path, symbols: list[str]) -> None:
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Check/freeze host ABI export surface.")
-    parser.add_argument("--ksh", default=str(root / "kernel" / "ksh.c"), help="path to kernel/ksh.c")
+    parser.add_argument(
+        "--ksh",
+        default=str(root / "kernel" / "shell" / "ksh.c"),
+        help="path to kernel shell runtime source",
+    )
     parser.add_argument(
         "--snapshot",
         default=str(root / "docs" / "abi" / "hostabi_exports.snapshot"),

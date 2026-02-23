@@ -33,16 +33,18 @@ This document defines target boundaries for the runtime architecture.
   - `applet_pipeline.cmake`
   - `fs_image.cmake`
   - `test_targets.cmake`
-- Runtime code is still partially concentrated in `kernel/ksh.c` and `kernel/xv6fs_ro.c`.
-- ABI export registration has been extracted to `kernel/hostabi_exports.c`
-  (called from `ksh` runtime init path), while symbol ownership is still in `ksh.c`.
-- `dirent` host ABI has been extracted to `kernel/hostabi_dirent.c`
+- Runtime code is still partially concentrated in `kernel/shell/ksh.c` and `kernel/vfs/xv6fs_ro.c`.
+- ABI export registry has moved to `kernel/hostabi/exports_registry.c`
+  with support for module-driven extension/override and priority ordering.
+- `dirent` host ABI has been extracted to `kernel/hostabi/hostabi_dirent.c`
   (`opendir/readdir/closedir/rewinddir/dirfd/fdopendir`), and export wiring now uses this module.
-- PTY host ABI entrypoints have been extracted to `kernel/hostabi_pty.c`
+- PTY host ABI entrypoints have been extracted to `kernel/hostabi/hostabi_pty.c`
   (`posix_openpt/grantpt/unlockpt/ptsname/ptsname_r`), and export wiring now uses this module.
-- POSIX FS host ABI has been extracted to `kernel/hostabi_posix_fs.c`
+- POSIX FS host ABI has been extracted to `kernel/hostabi/hostabi_posix_fs.c`
   (`open/read/write/close/dup/dup2/lseek/stat/lstat/fstat/readlink/pipe`), while `ksh.c`
   keeps thin adapters and shell-specific logic.
+- Runtime kernel modules are managed by `kernel/modules/module_manager.c` (`kmod` shell command),
+  with autoload manifest support from `/etc/modules.conf`.
 
 ## Invariants
 
@@ -54,7 +56,6 @@ This document defines target boundaries for the runtime architecture.
 
 ## Next decomposition steps
 
-1. Move export registry from `ksh.c` into `kernel/hostabi/*`.
-2. Split `ksh.c` into shell-only modules.
-3. Split `xv6fs_ro.c` into `vfs/dev/pty/pipe/fs_backend` files.
-4. Add integration tests per layer boundary and ABI snapshot checks.
+1. Split `ksh.c` into shell-only modules.
+2. Split `xv6fs_ro.c` into `vfs/dev/pty/pipe/fs_backend` files.
+3. Add integration tests per layer boundary and ABI snapshot checks.

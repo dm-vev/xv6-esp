@@ -1,6 +1,6 @@
 # Host ABI export snapshot for applet/newlib runtime.
 # Order is intentionally fixed and treated as ABI-significant.
-# Generated from kernel/ksh.c register_default_symbols().
+# Generated from kernel/shell/ksh.c register_default_symbols().
 puts
 printf
 fprintf
@@ -60,6 +60,8 @@ xv6fs_read_file_alloc_path
 xv6fs_write_file_path
 xv6fs_mkdir_path
 xv6fs_unlink_path
+xv6fs_rmdir_path
+xv6fs_rename_path
 xv6_open
 xv6_dup
 xv6_read

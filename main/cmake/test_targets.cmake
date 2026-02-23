@@ -55,7 +55,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
 
   add_custom_target(abi_check
     COMMAND ${PROJECT_DIR}/scripts/check_hostabi_abi.py
-    DEPENDS ${PROJECT_DIR}/kernel/ksh.c
+    DEPENDS ${PROJECT_DIR}/kernel/shell/ksh.c
     USES_TERMINAL
   )
 

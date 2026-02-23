@@ -60,7 +60,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
             --lib ${LIBGCC_A_PATH}
             --lib ${LIBNOSYS_A_PATH}
             --out ${LIBC_SYMBOLS_C}
-            --header ${PROJECT_DIR}/kernel/elf_loader.h
+            --header ${PROJECT_DIR}/kernel/loader/elf_loader.h
     DEPENDS ${LIBC_SYMBOLS_GEN} ${LIBC_A_PATH} ${LIBM_A_PATH} ${LIBGCC_A_PATH} ${LIBNOSYS_A_PATH}
     VERBATIM
   )

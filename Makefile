@@ -1,34 +1,42 @@
 K=kernel
 U=user
+KBUILD=build/xv6-riscv/kernel
+KERNEL_ELF=$(KBUILD)/kernel
+KERNEL_ASM=$(KBUILD)/kernel.asm
+KERNEL_SYM=$(KBUILD)/kernel.sym
 
-OBJS = \
-  $K/entry.o \
-  $K/start.o \
-  $K/console.o \
-  $K/printf.o \
-  $K/uart.o \
-  $K/kalloc.o \
-  $K/spinlock.o \
-  $K/string.o \
-  $K/main.o \
-  $K/vm.o \
-  $K/proc.o \
-  $K/swtch.o \
-  $K/trampoline.o \
-  $K/trap.o \
-  $K/syscall.o \
-  $K/sysproc.o \
-  $K/bio.o \
-  $K/fs.o \
-  $K/log.o \
-  $K/sleeplock.o \
-  $K/file.o \
-  $K/pipe.o \
-  $K/exec.o \
-  $K/sysfile.o \
-  $K/kernelvec.o \
-  $K/plic.o \
-  $K/virtio_disk.o
+KSRCS = \
+  arch/entry.S \
+  arch/start.c \
+  core/console.c \
+  core/printf.c \
+  platform/uart.c \
+  core/kalloc.c \
+  core/spinlock.c \
+  core/string.c \
+  core/main.c \
+  core/vm.c \
+  core/proc.c \
+  arch/swtch.S \
+  arch/trampoline.S \
+  arch/trap.c \
+  core/syscall.c \
+  core/sysproc.c \
+  fs/bio.c \
+  fs/fs.c \
+  fs/log.c \
+  core/sleeplock.c \
+  fs/file.c \
+  fs/pipe.c \
+  core/exec.c \
+  fs/sysfile.c \
+  arch/kernelvec.S \
+  arch/plic.c \
+  fs/virtio_disk.c
+
+OBJS = $(addprefix $(KBUILD)/,$(KSRCS))
+OBJS := $(OBJS:.c=.o)
+OBJS := $(OBJS:.S=.o)
 
 # riscv64-unknown-elf- or riscv64-linux-gnu-
 # perhaps in /opt/riscv/bin
@@ -74,6 +82,7 @@ CFLAGS += -fno-builtin-free
 CFLAGS += -fno-builtin-memcpy -Wno-main
 CFLAGS += -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf
 CFLAGS += -I.
+CFLAGS += -I$K
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
 
 # Disable PIE when possible (for Ubuntu 16.10 toolchain)
@@ -86,16 +95,25 @@ endif
 
 LDFLAGS = -z max-page-size=4096
 
-$K/kernel: $(OBJS) $K/kernel.ld
-	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $K/kernel $(OBJS) 
-	$(OBJDUMP) -S $K/kernel > $K/kernel.asm
-	$(OBJDUMP) -t $K/kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $K/kernel.sym
+$(KERNEL_ELF): $(OBJS) $K/linker/kernel.ld
+	@mkdir -p $(dir $@)
+	$(LD) $(LDFLAGS) -T $K/linker/kernel.ld -o $@ $(OBJS) 
+	$(OBJDUMP) -S $@ > $(KERNEL_ASM)
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $(KERNEL_SYM)
 
-$K/%.o: $K/%.S
-	$(CC) -march=rv64gc -g -c -o $@ $<
+$(KBUILD)/%.o: $K/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(KBUILD)/%.o: $K/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+.PHONY: $K/kernel
+$K/kernel: $(KERNEL_ELF)
 
 tags: $(OBJS)
-	etags kernel/*.S kernel/*.c
+	etags `find kernel -name '*.S' -o -name '*.c' -o -name '*.h'`
 
 ULIB = $U/ulib.o $U/usys.o $U/printf.o $U/umalloc.o
 
@@ -116,7 +134,7 @@ $U/_forktest: $U/forktest.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $U/_forktest $U/forktest.o $U/ulib.o $U/usys.o
 	$(OBJDUMP) -S $U/_forktest > $U/forktest.asm
 
-mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
+mkfs/mkfs: mkfs/mkfs.c $K/fs/fs.h $K/core/param.h
 	gcc -Wno-unknown-attributes -I. -o mkfs/mkfs mkfs/mkfs.c
 
 # Prevent deletion of intermediate files, e.g. cat.o, after first build, so
@@ -149,15 +167,17 @@ UPROGS=\
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)
 
--include kernel/*.d user/*.d
+-include $(OBJS:.o=.d) user/*.d
 
 clean: 
 	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg \
 	*/*.o */*.d */*.asm */*.sym \
-	$K/kernel fs.img \
+	*/*/*.o */*/*.d */*/*.asm */*/*.sym \
+	$K/kernel $K/*.o $K/*.d $K/*.asm $K/*.sym fs.img \
 	mkfs/mkfs .gdbinit \
         $U/usys.S \
 	$(UPROGS)
+	rm -rf $(KBUILD)
 
 # try to generate a unique GDB port
 GDBPORT = $(shell expr `id -u` % 5000 + 25000)
@@ -169,18 +189,18 @@ ifndef CPUS
 CPUS := 3
 endif
 
-QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 128M -smp $(CPUS) -nographic
+QEMUOPTS = -machine virt -bios none -kernel $(KERNEL_ELF) -m 128M -smp $(CPUS) -nographic
 QEMUOPTS += -global virtio-mmio.force-legacy=false
 QEMUOPTS += -drive file=fs.img,if=none,format=raw,id=x0
 QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 
-qemu: check-qemu-version $K/kernel fs.img
+qemu: check-qemu-version $(KERNEL_ELF) fs.img
 	$(QEMU) $(QEMUOPTS)
 
 .gdbinit: .gdbinit.tmpl-riscv
 	sed "s/:1234/:$(GDBPORT)/" < $^ > $@
 
-qemu-gdb: $K/kernel .gdbinit fs.img
+qemu-gdb: $(KERNEL_ELF) .gdbinit fs.img
 	@echo "*** Now run 'gdb' in another window." 1>&2
 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
 

@@ -1,4 +1,4 @@
-#include "../kernel/xv6_esp_boot.h"
+#include "../kernel/platform/xv6_esp_boot.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
