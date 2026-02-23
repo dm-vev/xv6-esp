@@ -71,27 +71,50 @@ int main(int argc, char **argv)
 
 int build(char *path)
 {
-    register char *p;
     struct stat sb;
-    int create, ch;
+    char tmp[512];
+    char *p;
+    char ch;
+    size_t len;
 
-    for (create = 0, p = path;; ++p)
-        if (!*p || *p == '/') {
-            ch = *p;
-            *p = '\0';
-            if (stat(path, &sb)) {
-                if (errno != ENOENT || mkdir(path, 0777) < 0) {
-                    (void)fprintf(stderr, "mkdir: %s: %s\n", path, strerror(errno));
+    if (path == NULL || path[0] == '\0') {
+        (void)fprintf(stderr, "mkdir: %s: %s\n", path ? path : "", strerror(EINVAL));
+        return (1);
+    }
+
+    len = strlen(path);
+    if (len >= sizeof(tmp)) {
+        (void)fprintf(stderr, "mkdir: %s: %s\n", path, strerror(ENAMETOOLONG));
+        return (1);
+    }
+    memcpy(tmp, path, len + 1);
+
+    p = tmp;
+    if (*p == '/')
+        ++p;
+    for (;; ++p) {
+        if (*p != '\0' && *p != '/')
+            continue;
+        ch = *p;
+        *p = '\0';
+        if (tmp[0] != '\0') {
+            if (stat(tmp, &sb) < 0) {
+                if (errno != ENOENT) {
+                    (void)fprintf(stderr, "mkdir: %s: %s\n", tmp, strerror(errno));
                     return (1);
                 }
-                create = 1;
+                if (mkdir(tmp, 0777) < 0 && errno != EEXIST) {
+                    (void)fprintf(stderr, "mkdir: %s: %s\n", tmp, strerror(errno));
+                    return (1);
+                }
+            } else if (!S_ISDIR(sb.st_mode)) {
+                (void)fprintf(stderr, "mkdir: %s: %s\n", tmp, strerror(ENOTDIR));
+                return (1);
             }
-            if (!(*p = ch))
-                break;
         }
-    if (!create) {
-        (void)fprintf(stderr, "mkdir: %s: %s\n", path, strerror(EEXIST));
-        return (1);
+        if (ch == '\0')
+            break;
+        *p = ch;
     }
     return (0);
 }

@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache ESP-IDF
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.espressif
+            ~/esp-idf
+          key: ${{ runner.os }}-espidf-v6.0-release-v1
+
+      - name: Prepare ESP-IDF
+        run: |
+          if [ ! -d "$HOME/esp-idf/.git" ]; then
+            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          fi
+          cd "$HOME/esp-idf"
+          ./install.sh esp32s3
+
+      - name: Install static tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck clang-tidy codespell
+          python3 -m pip install --upgrade pip
+          python3 -m pip install semgrep ruff bandit
+
+      - name: Build + gates
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          idf.py set-target esp32s3
+          python3 ./scripts/ci_gate_esp.py
+
+      - name: Build release bundle
+        run: |
+          python3 ./scripts/release_bundle.py \
+            --version "${GITHUB_REF_NAME}" \
+            --commit "${GITHUB_SHA}"
+
+      - name: Upload release bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-${{ github.ref_name }}
+          path: dist/releases/${{ github.ref_name }}
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/releases/${{ github.ref_name }}/SHA256SUMS
+            dist/releases/${{ github.ref_name }}/manifest.json
+            dist/releases/${{ github.ref_name }}/xv6-esp-${{ github.ref_name }}.tar.gz
+            dist/releases/${{ github.ref_name }}/files/*
+          generate_release_notes: true

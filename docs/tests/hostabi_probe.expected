@@ -1,0 +1,27 @@
+# Deterministic reference output from /bin/hostabi_probe.
+PROBE open_missing rc=-1 errno=ENOENT
+PROBE open_dir_rd rc=0 errno=OK
+PROBE open_dir_wr rc=-1 errno=EISDIR
+PROBE read_zero_null rc=0 errno=OK
+PROBE write_readonly rc=-1 errno=EBADF
+PROBE lseek_tty rc=-1 errno=ESPIPE
+PROBE fcntl_badfd rc=-1 errno=EBADF
+PROBE ioctl_notty rc=-1 errno=ENOTTY
+PROBE tcgetattr_file rc=-1 errno=ENOTTY
+PROBE tcgetattr_tty rc=0 errno=OK
+PROBE opendir_missing rc=-1 errno=ENOENT
+PROBE opendir_file rc=-1 errno=ENOTDIR
+PROBE opendir_root rc=0 errno=OK
+PROBE dirfd_root rc=0 errno=OK
+PROBE readdir_root rc=0 errno=OK
+PROBE posix_openpt_rdwr rc=0 errno=OK
+PROBE grantpt rc=0 errno=OK
+PROBE unlockpt rc=0 errno=OK
+PROBE ptsname_r_small rc=-1 errno=ERANGE
+PROBE ptsname_r_ok rc=0 errno=OK
+PROBE posix_openpt_rdonly rc=-1 errno=EINVAL
+PROBE fdopendir rc=-1 errno=ENOSYS
+PROBE truncate_nosys rc=-1 errno=ENOSYS
+PROBE utimes_nosys rc=-1 errno=ENOSYS
+PROBE chown_nosys rc=-1 errno=ENOSYS
+PROBE SUMMARY failures=0

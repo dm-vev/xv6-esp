@@ -21,10 +21,14 @@
 #ifndef MAXBSIZE
 #define MAXBSIZE 4096
 #endif
+#ifndef CP_RECURSION_MAX
+#define CP_RECURSION_MAX 64
+#endif
 
 int iflag;
 int rflag;
 int pflag;
+static int g_cp_recursion_depth;
 
 static void Perror(char *s);
 static int copy(char *from, char *to);
@@ -37,6 +41,11 @@ int main(
 {
     struct stat stb;
     int rc, i;
+
+    iflag = 0;
+    rflag = 0;
+    pflag = 0;
+    g_cp_recursion_depth = 0;
 
     argc--, argv++;
     while (argc > 0 && **argv == '-') {
@@ -82,39 +91,39 @@ int copy(
     char *from, char *to)
 {
     int fold, fnew, n, exists;
-    char *last, destname[MAXPATHLEN + 1], buf[MAXBSIZE];
+    char *last, destname[MAXPATHLEN + 1];
+    char *buf = 0;
     struct stat stfrom, stto;
 
-    fold = open(from, 0);
-    if (fold < 0) {
+    if (stat(from, &stfrom) < 0) {
         Perror(from);
         return (1);
     }
-    if (fstat(fold, &stfrom) < 0) {
-        Perror(from);
-        (void) close(fold);
-        return (1);
-    }
+
     if (stat(to, &stto) >= 0 &&
        (stto.st_mode&S_IFMT) == S_IFDIR) {
         last = rindex(from, '/');
         if (last) last++; else last = from;
         if (strlen(to) + strlen(last) >= sizeof destname - 1) {
             fprintf(stderr, "cp: %s/%s: Name too long", to, last);
-            (void) close(fold);
             return(1);
         }
         if (snprintf(destname, sizeof(destname), "%s/%s", to, last) >= (int)sizeof(destname)) {
             fprintf(stderr, "cp: %s/%s: Name too long\n", to, last);
-            (void) close(fold);
             return (1);
         }
         to = destname;
     }
+
     if (rflag && (stfrom.st_mode&S_IFMT) == S_IFDIR) {
         int fixmode = 0;    /* cleanup mode after rcopy */
+        int rc;
 
-        (void) close(fold);
+        if (g_cp_recursion_depth >= CP_RECURSION_MAX) {
+            fprintf(stderr, "cp: %s: recursion limit reached\n", from);
+            return (1);
+        }
+
         if (stat(to, &stto) < 0) {
             if (mkdir(to, (stfrom.st_mode & 07777) | 0700) < 0) {
                 Perror(to);
@@ -126,10 +135,18 @@ int copy(
             return (1);
         } else if (pflag)
             fixmode = 1;
-        n = rcopy(from, to);
+        g_cp_recursion_depth++;
+        rc = rcopy(from, to);
+        g_cp_recursion_depth--;
         if (fixmode)
             (void) chmod(to, stfrom.st_mode & 07777);
-        return (n);
+        return (rc);
+    }
+
+    fold = open(from, 0);
+    if (fold < 0) {
+        Perror(from);
+        return (1);
     }
 
     if ((stfrom.st_mode&S_IFMT) == S_IFDIR)
@@ -165,22 +182,30 @@ int copy(
         Perror(to);
         (void) close(fold); return(1);
     }
+    buf = (char *)malloc(MAXBSIZE);
+    if (buf == 0) {
+        fprintf(stderr, "cp: out of memory\n");
+        (void) close(fold); (void) close(fnew); return (1);
+    }
     if (exists && pflag)
         (void) fchmod(fnew, stfrom.st_mode & 07777);
 
     for (;;) {
-        n = read(fold, buf, sizeof buf);
+        n = read(fold, buf, MAXBSIZE);
         if (n == 0)
             break;
         if (n < 0) {
             Perror(from);
+            free(buf);
             (void) close(fold); (void) close(fnew); return (1);
         }
         if (write(fnew, buf, n) != n) {
             Perror(to);
+            free(buf);
             (void) close(fold); (void) close(fnew); return (1);
         }
     }
+    free(buf);
     (void) close(fold); (void) close(fnew);
     if (pflag)
         return (setimes(to, &stfrom));
@@ -191,16 +216,31 @@ int rcopy(
     char *from, char *to)
 {
     DIR *fold = opendir(from);
-    struct direct *dp;
+    struct dirent *dp;
     struct stat statb;
     int errs = 0;
+    long max_iters = 4096;
+    long iter = 0;
     char fromname[MAXPATHLEN + 1];
+
+    if (stat(from, &statb) == 0 && statb.st_size > 0) {
+        long est = (long)(statb.st_size / 4) + 64;
+        if (est > max_iters)
+            max_iters = est;
+        if (max_iters > 200000)
+            max_iters = 200000;
+    }
 
     if (fold == 0 || (pflag && fstat(dirfd(fold), &statb) < 0)) {
         Perror(from);
         return (1);
     }
     for (;;) {
+        if (++iter > max_iters) {
+            fprintf(stderr, "cp: %s: directory iteration limit exceeded\n", from);
+            (void)closedir(fold);
+            return (errs + 1);
+        }
         dp = readdir(fold);
         if (dp == 0) {
             closedir(fold);
@@ -210,6 +250,15 @@ int rcopy(
         }
         if (dp->d_ino == 0)
             continue;
+        if (dp->d_name[0] == '\0') {
+            errs++;
+            continue;
+        }
+        if (strchr(dp->d_name, '/') != 0) {
+            fprintf(stderr, "cp: %s/%s: Invalid directory entry name.\n", from, dp->d_name);
+            errs++;
+            continue;
+        }
         if (!strcmp(dp->d_name, ".") || !strcmp(dp->d_name, ".."))
             continue;
         if (strlen(from)+1+strlen(dp->d_name) >= sizeof fromname - 1) {

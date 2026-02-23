@@ -1,0 +1,54 @@
+name: CI Gates
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache ESP-IDF
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.espressif
+            ~/esp-idf
+          key: ${{ runner.os }}-espidf-v6.0-ci-gates-v1
+
+      - name: Prepare ESP-IDF
+        run: |
+          if [ ! -d "$HOME/esp-idf/.git" ]; then
+            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          fi
+          cd "$HOME/esp-idf"
+          ./install.sh esp32s3
+
+      - name: Install Static Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck clang-tidy codespell
+          python3 -m pip install --upgrade pip
+          python3 -m pip install semgrep ruff bandit
+
+      - name: build + static_analysis + qemu_smoke + qemu_applets + qemu_soak + qemu_stress + qemu_regressions
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          idf.py set-target esp32s3
+          python3 ./scripts/ci_gate_esp.py
+
+      - name: Upload triage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-gate-triage-${{ github.run_id }}
+          path: build/triage
+          if-no-files-found: ignore

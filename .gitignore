@@ -22,8 +22,13 @@ TAGS
 .pytest_cache/
 compile_commands.json
 build/
+dist/
 .venv_static/
 .tools/
 .vscode/
 sdkconfig
 sdkconfig.old
+sdkconfig.local
+sdkconfig.local.defaults
+.env
+.env.*

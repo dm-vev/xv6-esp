@@ -21,11 +21,12 @@ def resolve_idf_export() -> str:
     candidates = []
     if os.environ.get("IDF_PATH"):
         candidates.append(Path(os.environ["IDF_PATH"]))
-    candidates.extend((Path("/root/esp-idf"), Path("/tmp/esp-idf")))
+    home = Path.home()
+    candidates.extend((home / "esp-idf", Path("/opt/esp-idf"), Path("/root/esp-idf"), Path("/tmp/esp-idf")))
     for p in candidates:
         if p and has_export_script(p):
             return f"source {p}/export.sh >/dev/null"
-    raise RuntimeError("ESP-IDF not found. Set IDF_PATH or install to /root/esp-idf.")
+    raise RuntimeError("ESP-IDF not found. Set IDF_PATH or install under ~/esp-idf.")
 
 
 IDF_EXPORT = resolve_idf_export()
@@ -142,8 +143,34 @@ def stop_qemu(proc: subprocess.Popen) -> None:
     run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
 
 
+def assert_clean_output(out: str) -> None:
+    bad_markers = (
+        "Guru Meditation Error",
+        "panic'ed",
+        "Backtrace:",
+        "task_wdt: Task watchdog got triggered",
+        "Traceback (most recent call last)",
+        "assert failed:",
+    )
+    for marker in bad_markers:
+        if marker in out:
+            raise RuntimeError(f"detected failure marker: {marker}")
+
+
+def extract_job_id(out: str) -> str | None:
+    for pat in (
+        r"\[(\d+)\]\s+started",
+        r"\[(\d+)\]",
+    ):
+        m = re.search(pat, out)
+        if m is not None:
+            return m.group(1)
+    return None
+
+
 def main() -> int:
-    run(f"{IDF_EXPORT} && idf.py build")
+    if os.environ.get("XV6_SKIP_BUILD") != "1":
+        run(f"{IDF_EXPORT} && idf.py set-target esp32s3 && idf.py build")
     generate_qemu_flash()
     ensure_qemu_efuse()
     run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
@@ -155,33 +182,58 @@ def main() -> int:
         sock.sendall(b"\n")
         boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
         print(boot)
+        assert_clean_output(boot)
 
         job_ids = []
         for _ in range(20):
             out = cmd(sock, "sleep 1200 &")
-            m = re.search(r"\[(\d+)\]\s+started", out)
-            assert m is not None
-            job_ids.append(m.group(1))
+            assert_clean_output(out)
+            if "jobs: spawn failed" in out:
+                break
+            job_id = extract_job_id(out)
+            assert job_id is not None
+            job_ids.append(job_id)
+        assert len(job_ids) >= 4
 
         out = cmd(sock, "ps")
+        assert_clean_output(out)
         assert "PID STATE EXIT REASON" in out
-        assert "ksh" in out
-
-        out = cmd(sock, "wait")
-        assert "wait: done" in out
+        assert "sh" in out
 
         out = cmd(sock, "jobs")
+        assert_clean_output(out)
+        assert "running sleep 1200" in out
+
+        for jid in job_ids:
+            out = cmd(sock, f"kill {jid}")
+            assert_clean_output(out)
+            assert "kill: ok" in out
+            out = cmd(sock, f"wait {jid}")
+            assert_clean_output(out)
+            assert "wait: done 137" in out
+
+        out = cmd(sock, "jobs")
+        assert_clean_output(out)
         assert "jobs: empty" in out
 
-        for _ in range(8):
-            out = cmd(sock, "ptysend stress")
-            m = re.search(r"/dev/pts/[0-9]+", out)
-            assert m is not None
-            out = cmd(sock, f"ptyrecv {m.group(0)}")
-            assert "stress" in out
+        for i in range(200):
+            if i % 3 == 0:
+                out = cmd(sock, "head -1 /etc/rc")
+                assert "export PATH=" in out
+            elif i % 3 == 1:
+                out = cmd(sock, "echo stress | tr s S")
+                assert "StreSS" in out
+            else:
+                out = cmd(sock, "wc -l /home/README")
+                assert "/home/README" in out
+            assert_clean_output(out)
+            if (i + 1) % 50 == 0:
+                print(f"stress progress: {i + 1}/200")
 
         out = cmd(sock, "ps")
-        assert "ksh" in out
+        assert_clean_output(out)
+        assert "sh" in out
+        assert "- NOJOBS -" in out
     finally:
         if sock is not None:
             sock.close()

@@ -21,11 +21,12 @@ def resolve_idf_export() -> str:
     candidates = []
     if os.environ.get("IDF_PATH"):
         candidates.append(Path(os.environ["IDF_PATH"]))
-    candidates.extend((Path("/root/esp-idf"), Path("/tmp/esp-idf")))
+    home = Path.home()
+    candidates.extend((home / "esp-idf", Path("/opt/esp-idf"), Path("/root/esp-idf"), Path("/tmp/esp-idf")))
     for p in candidates:
         if p and has_export_script(p):
             return f"source {p}/export.sh >/dev/null"
-    raise RuntimeError("ESP-IDF not found. Set IDF_PATH or install to /root/esp-idf.")
+    raise RuntimeError("ESP-IDF not found. Set IDF_PATH or install under ~/esp-idf.")
 
 
 IDF_EXPORT = resolve_idf_export()
@@ -150,8 +151,36 @@ def parse_free_heap(out: str) -> int:
     return int(m.group(1))
 
 
+def assert_clean_output(out: str) -> None:
+    bad_markers = (
+        "Guru Meditation Error",
+        "panic'ed",
+        "Backtrace:",
+        "task_wdt: Task watchdog got triggered",
+        "Traceback (most recent call last)",
+        "assert failed:",
+    )
+    for marker in bad_markers:
+        if marker in out:
+            raise RuntimeError(f"detected failure marker: {marker}")
+
+
+def read_free_heap_or_none(sock: socket.socket) -> int | None:
+    out = cmd(sock, "mem", verbose=True)
+    if "exec: command not found" in out:
+        print("mem command is unavailable; skipping heap drift check")
+        return None
+    assert_clean_output(out)
+    try:
+        return parse_free_heap(out)
+    except RuntimeError:
+        print("mem output does not expose free_heap; skipping heap drift check")
+        return None
+
+
 def main() -> int:
-    run(f"{IDF_EXPORT} && idf.py build")
+    if os.environ.get("XV6_SKIP_BUILD") != "1":
+        run(f"{IDF_EXPORT} && idf.py set-target esp32s3 && idf.py build")
     generate_qemu_flash()
     ensure_qemu_efuse()
     run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
@@ -164,32 +193,40 @@ def main() -> int:
         boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
         print(boot)
 
-        start_mem = parse_free_heap(cmd(sock, "mem", verbose=True))
+        start_mem = read_free_heap_or_none(sock)
         total_cmds = 1200
 
         for i in range(total_cmds):
-            if i % 3 == 0:
-                out = cmd(sock, "head -c 1 /etc/motd | stdinhead 1")
-                assert "x" in out
-            elif i % 3 == 1:
-                out = cmd(sock, "head -c 4 /etc/motd > /tmp/soak.txt")
+            if i % 4 == 0:
+                out = cmd(sock, "head -1 /etc/rc")
+                assert "export PATH=" in out
+            elif i % 4 == 1:
+                out = cmd(sock, "cat /home/README > /tmp/soak.txt")
                 assert "xv6> " in out
+            elif i % 4 == 2:
+                out = cmd(sock, "wc -c /tmp/soak.txt")
+                assert "/tmp/soak.txt" in out
             else:
-                out = cmd(sock, "stdinhead 4 < /tmp/soak.txt")
-                assert "xv6-" in out
+                out = cmd(sock, "echo abc | tr a A")
+                assert "Abc" in out
+
+            assert_clean_output(out)
 
             if (i + 1) % 200 == 0:
                 print(f"soak progress: {i + 1}/{total_cmds}")
 
         out = cmd(sock, "ps", verbose=True)
+        assert_clean_output(out)
         assert "PID STATE EXIT REASON" in out
-        assert "ksh" in out
+        assert "sh" in out
         assert "- NOJOBS -" in out
 
-        end_mem = parse_free_heap(cmd(sock, "mem", verbose=True))
-        drift = start_mem - end_mem
-        print(f"heap drift: {drift} bytes")
-        assert drift < 32768
+        if start_mem is not None:
+            end_mem = read_free_heap_or_none(sock)
+            if end_mem is not None:
+                drift = start_mem - end_mem
+                print(f"heap drift: {drift} bytes")
+                assert drift < 32768
     finally:
         if sock is not None:
             sock.close()

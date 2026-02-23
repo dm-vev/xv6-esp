@@ -187,9 +187,13 @@ qemu-gdb: $K/kernel .gdbinit fs.img
 print-gdbport:
 	@echo $(GDBPORT)
 
-QEMU_VERSION := $(shell $(QEMU) --version | head -n 1 | sed -E 's/^QEMU emulator version ([0-9]+\.[0-9]+)\..*/\1/')
 check-qemu-version:
-	@if [ "$(shell echo "$(QEMU_VERSION) >= $(MIN_QEMU_VERSION)" | bc)" -eq 0 ]; then \
+	@if ! command -v $(QEMU) >/dev/null 2>&1; then \
+		echo "ERROR: $(QEMU) is not installed"; \
+		exit 1; \
+	fi
+	@QEMU_VERSION="$$( $(QEMU) --version | head -n 1 | sed -E 's/^QEMU emulator version ([0-9]+\.[0-9]+)\..*/\1/' )"; \
+	if [ "$$(echo "$$QEMU_VERSION >= $(MIN_QEMU_VERSION)" | bc)" -eq 0 ]; then \
 		echo "ERROR: Need qemu version >= $(MIN_QEMU_VERSION)"; \
 		exit 1; \
 	fi

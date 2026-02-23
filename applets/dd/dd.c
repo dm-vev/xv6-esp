@@ -473,13 +473,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "counts: cannot be zero\n");
         exit(1);
     }
-    ibuf = sbrk(ibs);
+    ibuf = malloc((size_t)ibs);
     if (fflag)
         obuf = ibuf;
     else
-        obuf = sbrk(obs);
-    sbrk(64); /* For good measure */
-    if (ibuf == (char *)-1 || obuf == (char *)-1) {
+        obuf = malloc((size_t)obs);
+    if (ibuf == NULL || obuf == NULL) {
         fprintf(stderr, "not enough memory\n");
         exit(1);
     }

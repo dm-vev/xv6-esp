@@ -69,6 +69,7 @@ uint64
 sys_read(void)
 {
   struct file *f;
+  int n;
   uint64 p;
 
   argaddr(1, &p);

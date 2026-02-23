@@ -525,7 +525,7 @@ forkret(void)
     // We can invoke kexec() now that file system is initialized.
     // Put the return value (argc) of kexec into a0.
     p->trapframe->a0 = kexec("/init", (char *[]){ "/init", 0 });
-    if ((int64)p->trapframe->a0 == -1) {
+    if (p->trapframe->a0 == (uint64)-1) {
       panic("exec");
     }
   }

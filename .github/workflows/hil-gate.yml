@@ -1,0 +1,98 @@
+name: ESP32 HIL Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      port:
+        description: "Serial port"
+        required: false
+        default: "/dev/ttyACM0"
+      baud:
+        description: "Serial baud rate"
+        required: false
+        default: "115200"
+      cycles:
+        description: "HIL cycles"
+        required: false
+        default: "3"
+      flash_first:
+        description: "Flash firmware before first cycle"
+        required: false
+        type: boolean
+        default: true
+  schedule:
+    - cron: "0 2 * * 1"
+
+concurrency:
+  group: hil-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  hil-gate:
+    runs-on:
+      - self-hosted
+      - linux
+      - esp32-hil
+    timeout-minutes: 180
+    env:
+      HIL_PORT: ${{ vars.HIL_PORT || '/dev/ttyACM0' }}
+      HIL_BAUD: ${{ vars.HIL_BAUD || '115200' }}
+      HIL_CYCLES: ${{ vars.HIL_CYCLES || '3' }}
+      HIL_FLASH_FIRST: ${{ vars.HIL_FLASH_FIRST || '1' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare ESP-IDF
+        run: |
+          if [ ! -d "$HOME/esp-idf/.git" ]; then
+            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          fi
+          cd "$HOME/esp-idf"
+          ./install.sh esp32s3
+
+      - name: Install HIL tooling
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pyserial
+
+      - name: Run HIL gate
+        run: |
+          source "$HOME/esp-idf/export.sh"
+
+          PORT="$HIL_PORT"
+          BAUD="$HIL_BAUD"
+          CYCLES="$HIL_CYCLES"
+          FLASH_ARG="--flash-first"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.flash_first }}" = "false" ]; then
+            FLASH_ARG=""
+          fi
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ "${{ vars.HIL_FLASH_FIRST }}" = "0" ]; then
+            FLASH_ARG=""
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.port }}" ]; then
+              PORT="${{ inputs.port }}"
+            fi
+            if [ -n "${{ inputs.baud }}" ]; then
+              BAUD="${{ inputs.baud }}"
+            fi
+            if [ -n "${{ inputs.cycles }}" ]; then
+              CYCLES="${{ inputs.cycles }}"
+            fi
+          fi
+
+          python3 ./scripts/hil_gate_esp.py \
+            --port "$PORT" \
+            --baud "$BAUD" \
+            --cycles "$CYCLES" \
+            $FLASH_ARG
+
+      - name: Upload HIL triage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hil-triage-${{ github.run_id }}
+          path: build/triage
+          if-no-files-found: ignore

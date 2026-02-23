@@ -20,5 +20,6 @@ int main(int argc, char **argv)
         }
         n = n * 10 + c - '0';
     }
-    sleep(n);
+    usleep((useconds_t)n * 1000U);
+    return 0;
 }

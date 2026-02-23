@@ -89,7 +89,7 @@ BSD-oriented applets currently included:
 `basename`, `cat`, `cp`, `dd`, `dirname`, `echo`, `false`, `head`, `ls`, `mkdir`, `mv`, `pwd`, `rm`, `sleep`, `touch`, `true`, `uname`.
 
 Project-specific extra applets:
-`mem`, `ticks`, `write`, `ptydemo`, `ptysend`, `ptyrecv`, `stdinhead`.
+`mem`, `ticks`, `write`, `ptydemo`, `ptysend`, `ptyrecv`, `stdinhead`, `hostabi_probe`.
 
 ESP QEMU smoke test:
 - `./scripts/qemu_smoke_esp.py`
@@ -100,12 +100,44 @@ ESP QEMU smoke test:
 - `idf.py qemu_soak`
 - `./scripts/qemu_applets_esp.py`
 - `idf.py qemu_applets`
+- `./scripts/qemu_regressions_esp.py`
+- `idf.py qemu_regress`
+- `./scripts/hil_smoke_esp.py --port /dev/ttyACM0`
+- `idf.py hil_smoke`
 - `./scripts/hil_applets_esp.py --port /dev/ttyACM0`
 - `idf.py hil_applets`
+- `./scripts/hil_gate_esp.py --port /dev/ttyACM0 --cycles 3`
+- `idf.py hil_gate`
+
+CI gates (mandatory):
+- local unified gate runner: `./scripts/ci_gate_esp.py`
+- CMake target: `idf.py ci_gate`
+- workflow: `.github/workflows/ci-gates.yml`
+- enforced sequence: `build + static_analysis + qemu_smoke + qemu_applets + qemu_soak + qemu_stress + qemu_regressions`
+- triage artifacts in CI: `build/triage/*` (uploaded from workflow)
+
+RISC-V CI path:
+- workflow: `.github/workflows/riscv-ci.yml`
+- enforced sequence: `make kernel/kernel fs.img` + `test-xv6.py -q usertests` + `test-xv6.py crash`
+
+Hardware-in-the-loop CI path:
+- workflow: `.github/workflows/hil-gate.yml`
+- runner requirement: self-hosted label set `linux`, `esp32-hil`
+- trigger: manual (`workflow_dispatch`) and weekly scheduled run
+
+Crash triage / fail-fast:
+- wrapper: `./scripts/crash_triage_runner.py --name qemu_smoke -- python3 ./scripts/qemu_smoke_esp.py`
+- artifacts: `build/triage/<timestamp>-<step>/output.log` + `result.json`
+
+Host ABI snapshot freeze:
+- check: `./scripts/check_hostabi_abi.py`
+- update snapshot intentionally: `./scripts/check_hostabi_abi.py --update`
+- snapshot file: `docs/abi/hostabi_exports.snapshot`
 
 Static analysis:
 - unified local runner: `./scripts/static_analysis.sh`
-- strict mode (CI-equivalent): `STRICT=1 BUILD_DIR=build ./scripts/static_analysis.sh`
+- default mode is fail-closed (`STRICT=1`)
+- optional relaxed local mode: `STRICT=0 BUILD_DIR=build ./scripts/static_analysis.sh`
 - CMake target: `idf.py static_analysis`
 - CI workflow: `.github/workflows/static-analysis.yml`
 - pre-commit integration: `pre-commit install` (runs static pipeline before commit)
@@ -121,9 +153,19 @@ Static toolset currently integrated:
 Includes PTY check via `ptydemo` (`/dev/ptmx` <-> dynamic `/dev/pts/N`).
 Also checks two-ELF PTY flow: `ptysend` -> `ptyrecv`.
 Shell supports background jobs: `cmd &`, `ps`, `jobs`, `fg <jobid>`, `kill <jobid>`, `wait [jobid]`.
+Shell health telemetry builtin: `health` (uptime, heap, job counters, runtime limits).
 Pipe-like IPC in shell: `left | right`.
 Shell redirection: `<`, `>`, `>>`, `2>`, `2>>`.
 Job limits: `limit <ms> <heap_kb> <cmd...> [&]`.
 
 The ESP build is intentionally separate from the original `make qemu`
 flow and does not replace the RISC-V path.
+
+Release and operations:
+- tag-based release workflow: `.github/workflows/release.yml` (`v*` tags)
+- local release bundle command: `python3 ./scripts/release_bundle.py --version vX.Y.Z --commit $(git rev-parse HEAD)`
+- security disclosure policy: `SECURITY.md`
+- runbooks and operational docs:
+  - `docs/configuration.md`
+  - `docs/operations/release.md`
+  - `docs/operations/incident-response.md`

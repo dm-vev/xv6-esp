@@ -139,6 +139,11 @@ struct elf_module {
   elf_export_t exports[ELFLOADER_MAX_EXPORTS];
   int export_count;
   int global_visible;
+  int open_count;
+  int active_calls;
+  int dependent_count;
+  uint32 deps_mask;
+  uint32 generation;
 };
 
 static const char *TAG = "xv6_elf";
@@ -147,11 +152,13 @@ static int g_dlerror_set = 0;
 
 static elf_module_t g_modules[ELFLOADER_MAX_MODULES];
 static int g_module_used[ELFLOADER_MAX_MODULES];
+static uint32 g_module_generation = 1;
 
 static elf_host_symbol_t g_host_syms[ELFLOADER_MAX_HOST_SYMBOLS];
 static int g_host_sym_count;
+static SemaphoreHandle_t g_module_mu;
 
-#define ELF_CALL_CTX_MAX 8
+#define ELF_CALL_CTX_MAX XV6_TASK_CTX_CAP
 typedef struct {
   TaskHandle_t task;
   elf_module_t *mod;
@@ -160,22 +167,26 @@ typedef struct {
 } elf_call_ctx_t;
 static elf_call_ctx_t g_call_ctx[ELF_CALL_CTX_MAX];
 static SemaphoreHandle_t g_call_ctx_mu;
+static void module_reset(elf_module_t *m);
+static void *alloc_data_mem(size_t sz);
+
+_Static_assert(ELF_CALL_CTX_MAX >= 8, "ELF_CALL_CTX_MAX too small for concurrent applets");
 
 static void call_ctx_lock(void)
 {
   if(g_call_ctx_mu == 0)
-    g_call_ctx_mu = xSemaphoreCreateMutex();
+    g_call_ctx_mu = xSemaphoreCreateRecursiveMutex();
   if(g_call_ctx_mu)
-    (void)xSemaphoreTake(g_call_ctx_mu, portMAX_DELAY);
+    (void)xSemaphoreTakeRecursive(g_call_ctx_mu, portMAX_DELAY);
 }
 
 static void call_ctx_unlock(void)
 {
   if(g_call_ctx_mu)
-    (void)xSemaphoreGive(g_call_ctx_mu);
+    (void)xSemaphoreGiveRecursive(g_call_ctx_mu);
 }
 
-static void call_ctx_set_current(elf_module_t *mod)
+static int call_ctx_set_current(elf_module_t *mod)
 {
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
   int i;
@@ -192,7 +203,7 @@ static void call_ctx_set_current(elf_module_t *mod)
         g_call_ctx[i].mod = mod;
       }
       call_ctx_unlock();
-      return;
+      return 0;
     }
     if(g_call_ctx[i].task == 0 && free_i < 0)
       free_i = i;
@@ -201,8 +212,11 @@ static void call_ctx_set_current(elf_module_t *mod)
     g_call_ctx[free_i].task = self;
     g_call_ctx[free_i].mod = mod;
     g_call_ctx[free_i].jb_valid = 0;
+    call_ctx_unlock();
+    return 0;
   }
   call_ctx_unlock();
+  return (mod == 0) ? 0 : -1;
 }
 
 static elf_module_t *call_ctx_get_current(void)
@@ -239,6 +253,199 @@ static elf_call_ctx_t *call_ctx_get_current_slot(void)
   return slot;
 }
 
+static int u32_range_valid(uint32 off, uint32 len, uint32 size)
+{
+  if(off > size)
+    return 0;
+  if(len > size - off)
+    return 0;
+  return 1;
+}
+
+static int vaddr_offset_in_range(uint32 base, uint32 len, uint32 addr, uint32 *out_off)
+{
+  uint32 off;
+
+  if(len == 0 || addr < base)
+    return 0;
+  off = addr - base;
+  if(off >= len)
+    return 0;
+  if(out_off)
+    *out_off = off;
+  return 1;
+}
+
+static int module_is_active_in_call_ctx(elf_module_t *mod)
+{
+  int i;
+  int active = 0;
+
+  if(mod == 0)
+    return 0;
+
+  call_ctx_lock();
+  for(i = 0; i < ELF_CALL_CTX_MAX; i++){
+    if(g_call_ctx[i].task != 0 && g_call_ctx[i].mod == mod){
+      active = 1;
+      break;
+    }
+  }
+  call_ctx_unlock();
+  return active;
+}
+
+static void module_lock(void)
+{
+  if(g_module_mu == 0)
+    g_module_mu = xSemaphoreCreateRecursiveMutex();
+  if(g_module_mu)
+    (void)xSemaphoreTakeRecursive(g_module_mu, portMAX_DELAY);
+}
+
+static void module_unlock(void)
+{
+  if(g_module_mu)
+    (void)xSemaphoreGiveRecursive(g_module_mu);
+}
+
+static int module_index_from_ptr_locked(const void *ptr)
+{
+  int i;
+  for(i = 0; i < ELFLOADER_MAX_MODULES; i++){
+    if(g_module_used[i] && ptr == (const void *)&g_modules[i])
+      return i;
+  }
+  return -1;
+}
+
+static int module_is_live_locked(const elf_module_t *mod)
+{
+  return module_index_from_ptr_locked((const void *)mod) >= 0;
+}
+
+void elf_loader_task_cleanup_for_handle(void *task_handle)
+{
+  TaskHandle_t target = (TaskHandle_t)task_handle;
+  elf_module_t *mod = 0;
+  int i;
+
+  if(target == 0)
+    return;
+
+  call_ctx_lock();
+  for(i = 0; i < ELF_CALL_CTX_MAX; i++){
+    if(g_call_ctx[i].task != target)
+      continue;
+    mod = g_call_ctx[i].mod;
+    memset(&g_call_ctx[i], 0, sizeof(g_call_ctx[i]));
+    break;
+  }
+  call_ctx_unlock();
+
+  if(mod == 0)
+    return;
+
+  module_lock();
+  if(module_is_live_locked(mod) && mod->active_calls > 0)
+    mod->active_calls--;
+  module_unlock();
+}
+
+static void *module_make_handle_locked(int idx)
+{
+  uintptr_t token;
+
+  if(idx < 0 || idx >= ELFLOADER_MAX_MODULES || !g_module_used[idx] || g_modules[idx].generation == 0)
+    return 0;
+  token = ((uintptr_t)g_modules[idx].generation << 8) | (uintptr_t)(idx + 1);
+  token = (token << 1) | (uintptr_t)1u;
+  if(token == 0)
+    return 0;
+  return (void *)token;
+}
+
+static int module_from_dl_handle_locked(void *handle, int *out_idx, elf_module_t **out_mod)
+{
+  uintptr_t token = (uintptr_t)handle;
+  uintptr_t raw_idx;
+  int idx;
+  uint32 generation;
+
+  if(out_idx)
+    *out_idx = -1;
+  if(out_mod)
+    *out_mod = 0;
+
+  if(token == 0 || (token & (uintptr_t)1u) == 0)
+    return -1;
+  token >>= 1;
+  raw_idx = token & (uintptr_t)0xffu;
+  if(raw_idx == 0)
+    return -1;
+  idx = (int)(raw_idx - (uintptr_t)1u);
+  generation = (uint32)(token >> 8);
+  if(idx < 0 || idx >= ELFLOADER_MAX_MODULES || generation == 0)
+    return -1;
+  if(!g_module_used[idx] || g_modules[idx].generation != generation)
+    return -1;
+
+  if(out_idx)
+    *out_idx = idx;
+  if(out_mod)
+    *out_mod = &g_modules[idx];
+  return 0;
+}
+
+static void module_track_dependency_locked(elf_module_t *consumer, elf_module_t *provider)
+{
+  int pidx;
+  uint32 bit;
+
+  if(consumer == 0 || provider == 0 || consumer == provider)
+    return;
+  pidx = module_index_from_ptr_locked((const void *)provider);
+  if(pidx < 0 || pidx >= 32)
+    return;
+  bit = (uint32)1u << (uint32)pidx;
+  if((consumer->deps_mask & bit) != 0)
+    return;
+  consumer->deps_mask |= bit;
+  g_modules[pidx].dependent_count++;
+}
+
+static void module_unload_index_locked(int idx)
+{
+  int i;
+  uint32 deps;
+
+  if(idx < 0 || idx >= ELFLOADER_MAX_MODULES || !g_module_used[idx])
+    return;
+  deps = g_modules[idx].deps_mask;
+  for(i = 0; i < ELFLOADER_MAX_MODULES && deps != 0; i++){
+    uint32 bit = (uint32)1u << (uint32)i;
+    if((deps & bit) == 0)
+      continue;
+    deps &= ~bit;
+    if(g_module_used[i] && g_modules[i].dependent_count > 0)
+      g_modules[i].dependent_count--;
+  }
+  g_modules[idx].deps_mask = 0;
+  module_reset(&g_modules[idx]);
+  g_module_used[idx] = 0;
+}
+
+static void *alloc_data_mem(size_t sz)
+{
+  void *p = 0;
+#ifdef MALLOC_CAP_SPIRAM
+  p = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+  if(p == 0)
+    p = heap_caps_malloc(sz, MALLOC_CAP_8BIT);
+  return p;
+}
+
 static int read_flash_image(uint32 sector, uint32 sector_count, uint8 **out, uint32 *out_size)
 {
   uint32 sz;
@@ -247,8 +454,10 @@ static int read_flash_image(uint32 sector, uint32 sector_count, uint8 **out, uin
   if(out == 0 || out_size == 0 || sector_count == 0)
     return -1;
 
+  if(sector_count > (0xffffffffu / XV6_FLASH_SECTOR_SIZE))
+    return -1;
   sz = sector_count * XV6_FLASH_SECTOR_SIZE;
-  buf = (uint8 *)heap_caps_malloc(sz, MALLOC_CAP_8BIT);
+  buf = (uint8 *)alloc_data_mem(sz);
   if(buf == 0)
     return -1;
 
@@ -293,7 +502,7 @@ static const char *module_name_from_path(const char *path, char *out, int out_le
   if(n <= 0)
     return 0;
   if(n >= out_len)
-    n = out_len - 1;
+    return 0;
   memcpy(out, base, (unsigned)n);
   out[n] = 0;
   return out;
@@ -304,7 +513,7 @@ static int load_image_copy(const void *image, uint32 image_size, uint8 **out_cop
   uint8 *copy;
   if(image == 0 || out_copy == 0 || image_size == 0)
     return -1;
-  copy = (uint8 *)heap_caps_malloc(image_size, MALLOC_CAP_8BIT);
+  copy = (uint8 *)alloc_data_mem(image_size);
   if(copy == 0)
     return -1;
   memcpy(copy, image, image_size);
@@ -339,11 +548,10 @@ static void *map_vaddr_exec(elf_module_t *m, uint32 vaddr)
 {
   int i;
   for(i = 0; i < m->seg_count; i++){
-    uint32 start = m->segs[i].vaddr;
-    uint32 end = start + m->segs[i].memsz;
-    if(vaddr >= start && vaddr < end){
-      return m->segs[i].mem + (vaddr - start);
-    }
+    uint32 off = 0;
+    if(!vaddr_offset_in_range(m->segs[i].vaddr, m->segs[i].memsz, vaddr, &off))
+      continue;
+    return m->segs[i].mem + off;
   }
   return 0;
 }
@@ -352,13 +560,12 @@ static void *map_vaddr_data(elf_module_t *m, uint32 vaddr)
 {
   int i;
   for(i = 0; i < m->seg_count; i++){
-    uint32 start = m->segs[i].vaddr;
-    uint32 end = start + m->segs[i].memsz;
-    if(vaddr >= start && vaddr < end){
-      if(m->segs[i].is_exec && m->segs[i].shadow_mem)
-        return m->segs[i].shadow_mem + (vaddr - start);
-      return m->segs[i].mem + (vaddr - start);
-    }
+    uint32 off = 0;
+    if(!vaddr_offset_in_range(m->segs[i].vaddr, m->segs[i].memsz, vaddr, &off))
+      continue;
+    if(m->segs[i].is_exec && m->segs[i].shadow_mem)
+      return m->segs[i].shadow_mem + off;
+    return m->segs[i].mem + off;
   }
   return 0;
 }
@@ -371,6 +578,10 @@ static int parse_segments(elf_module_t *m, const elf32_ehdr_t *eh)
     const elf32_phdr_t *ph = (const elf32_phdr_t *)(m->image + phoff);
     uint8 *dst;
 
+    if(!u32_range_valid(phoff, sizeof(*ph), m->image_size)){
+      ESP_LOGE(TAG, "program header out of image: off=0x%x", (unsigned)phoff);
+      return -1;
+    }
     if(ph->p_type != PT_LOAD)
       continue;
     if(m->seg_count >= (int)(sizeof(m->segs) / sizeof(m->segs[0]))){
@@ -383,16 +594,20 @@ static int parse_segments(elf_module_t *m, const elf32_ehdr_t *eh)
       ESP_LOGE(TAG, "bad segment sizes: filesz=%u memsz=%u", (unsigned)ph->p_filesz, (unsigned)ph->p_memsz);
       return -1;
     }
-    if(ph->p_offset + ph->p_filesz > m->image_size){
+    if(!u32_range_valid(ph->p_offset, ph->p_filesz, m->image_size)){
       ESP_LOGE(TAG, "segment out of image: off=0x%x filesz=0x%x img=0x%x", (unsigned)ph->p_offset,
                (unsigned)ph->p_filesz, (unsigned)m->image_size);
+      return -1;
+    }
+    if(ph->p_vaddr + ph->p_memsz < ph->p_vaddr){
+      ESP_LOGE(TAG, "segment vaddr overflow: vaddr=0x%x memsz=0x%x", (unsigned)ph->p_vaddr, (unsigned)ph->p_memsz);
       return -1;
     }
 
     if((ph->p_flags & PF_X) != 0){
       dst = (uint8 *)heap_caps_malloc(ph->p_memsz, MALLOC_CAP_EXEC);
     } else {
-      dst = (uint8 *)heap_caps_malloc(ph->p_memsz, MALLOC_CAP_8BIT);
+      dst = (uint8 *)alloc_data_mem(ph->p_memsz);
     }
     if(dst == 0){
       ESP_LOGE(TAG, "segment alloc failed: memsz=%u flags=0x%x", (unsigned)ph->p_memsz, (unsigned)ph->p_flags);
@@ -408,7 +623,7 @@ static int parse_segments(elf_module_t *m, const elf32_ehdr_t *eh)
     m->segs[m->seg_count].shadow_mem = 0;
     m->segs[m->seg_count].is_exec = ((ph->p_flags & PF_X) != 0) ? 1 : 0;
     if(m->segs[m->seg_count].is_exec){
-      m->segs[m->seg_count].shadow_mem = (uint8 *)heap_caps_malloc(ph->p_memsz, MALLOC_CAP_8BIT);
+      m->segs[m->seg_count].shadow_mem = (uint8 *)alloc_data_mem(ph->p_memsz);
       if(m->segs[m->seg_count].shadow_mem == 0){
         ESP_LOGE(TAG, "shadow alloc failed: memsz=%u", (unsigned)ph->p_memsz);
         free(dst);
@@ -452,18 +667,18 @@ static int vaddr_is_exec_section(const elf_module_t *m, const elf32_ehdr_t *eh, 
 {
   const elf32_shdr_t *sh;
   int i;
+  uint32 sht_len;
 
   if(m == 0 || eh == 0 || eh->e_shoff == 0 || eh->e_shnum == 0)
     return 0;
+  sht_len = (uint32)eh->e_shnum * (uint32)sizeof(elf32_shdr_t);
+  if(!u32_range_valid(eh->e_shoff, sht_len, m->image_size))
+    return 0;
   sh = (const elf32_shdr_t *)(m->image + eh->e_shoff);
   for(i = 0; i < eh->e_shnum; i++){
-    uint32 start;
-    uint32 end;
     if((sh[i].sh_flags & SHF_EXECINSTR) == 0 || sh[i].sh_size == 0)
       continue;
-    start = sh[i].sh_addr;
-    end = start + sh[i].sh_size;
-    if(vaddr >= start && vaddr < end)
+    if(vaddr_offset_in_range(sh[i].sh_addr, sh[i].sh_size, vaddr, 0))
       return 1;
   }
   return 0;
@@ -519,9 +734,11 @@ static void *resolve_host_symbol(const char *name)
 static int section_bounds_valid(const elf_module_t *m, const elf32_shdr_t *sh);
 static void *module_lookup_symbol(elf_module_t *m, const char *name);
 
-static void *resolve_module_symbol(const char *name)
+static void *resolve_module_symbol(const char *name, elf_module_t **out_provider)
 {
   int mi;
+  if(out_provider)
+    *out_provider = 0;
   for(mi = 0; mi < ELFLOADER_MAX_MODULES; mi++){
     void *addr;
     int ei;
@@ -530,11 +747,17 @@ static void *resolve_module_symbol(const char *name)
     if(!g_modules[mi].global_visible)
       continue;
     addr = module_lookup_symbol(&g_modules[mi], name);
-    if(addr)
+    if(addr){
+      if(out_provider)
+        *out_provider = &g_modules[mi];
       return addr;
+    }
     for(ei = 0; ei < g_modules[mi].export_count; ei++){
-      if(strcmp(name, g_modules[mi].exports[ei].name) == 0)
+      if(strcmp(name, g_modules[mi].exports[ei].name) == 0){
+        if(out_provider)
+          *out_provider = &g_modules[mi];
         return g_modules[mi].exports[ei].addr;
+      }
     }
   }
   return 0;
@@ -606,13 +829,15 @@ static void *module_lookup_symbol(elf_module_t *m, const char *name)
   return 0;
 }
 
-static void *resolve_symbol(elf_module_t *m, const elf32_sym_t *sym, const char *sym_name)
+static void *resolve_symbol(elf_module_t *m, const elf32_sym_t *sym, const char *sym_name, elf_module_t **out_provider)
 {
   void *addr = resolve_local_symbol(m, sym);
+  if(out_provider)
+    *out_provider = 0;
   if(addr)
     return addr;
   if(sym_name && sym_name[0]){
-    addr = resolve_module_symbol(sym_name);
+    addr = resolve_module_symbol(sym_name, out_provider);
     if(addr)
       return addr;
     addr = resolve_host_symbol(sym_name);
@@ -678,7 +903,10 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
       const elf32_sym_t *sym;
       const char *sym_name;
       void *target = 0;
+      void *target_exec = 0;
+      void *target_shadow = 0;
       void *resolved;
+      elf_module_t *provider = 0;
       uint32 val;
 
       if(symi >= nsyms)
@@ -689,7 +917,9 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
       sym = &symtab[symi];
       sym_name = (sym->st_name < str_sh->sh_size) ? (strtab + sym->st_name) : "";
 
-      resolved = resolve_symbol(m, sym, sym_name);
+      resolved = resolve_symbol(m, sym, sym_name, &provider);
+      if(provider && provider != m)
+        module_track_dependency_locked(m, provider);
 
       switch(rtype){
       case R_XTENSA_NONE:
@@ -707,7 +937,9 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
       case R_XTENSA_PLT:
       case R_XTENSA_GLOB_DAT:
       case R_XTENSA_JMP_SLOT:
-        target = map_vaddr_exec(m, r->r_offset);
+        target_exec = map_vaddr_exec(m, r->r_offset);
+        target_shadow = map_vaddr_data(m, r->r_offset);
+        target = (target_exec != 0) ? target_exec : target_shadow;
         if(target == 0){
           ESP_LOGE(TAG, "reloc target map failed: off=0x%x type=%u", (unsigned)r->r_offset, (unsigned)rtype);
           return -1;
@@ -718,9 +950,13 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
         }
         val = (uint32)(uintptr_t)resolved + (uint32)r->r_addend;
         *(uint32 *)target = val;
+        if(target_shadow && target_shadow != target)
+          *(uint32 *)target_shadow = val;
         break;
       case R_XTENSA_RELATIVE:
-        target = map_vaddr_exec(m, r->r_offset);
+        target_exec = map_vaddr_exec(m, r->r_offset);
+        target_shadow = map_vaddr_data(m, r->r_offset);
+        target = (target_exec != 0) ? target_exec : target_shadow;
         if(target == 0){
           ESP_LOGE(TAG, "relative target map failed: off=0x%x", (unsigned)r->r_offset);
           return -1;
@@ -744,6 +980,8 @@ static int apply_relocations(elf_module_t *m, const elf32_ehdr_t *eh, const elf3
           return -1;
         }
         *(uint32 *)target = val;
+        if(target_shadow && target_shadow != target)
+          *(uint32 *)target_shadow = val;
         break;
       default:
         ESP_LOGE(TAG, "unsupported reloc type: %u", (unsigned)rtype);
@@ -805,6 +1043,8 @@ static int collect_exports(elf_module_t *m, const elf32_shdr_t *sym_sh, const el
 static int validate_elf_header(const elf32_ehdr_t *eh, uint32 size)
 {
   uint32 magic;
+  uint32 ph_len = 0;
+  uint32 sh_len = 0;
 
   if(size < sizeof(*eh))
     return -1;
@@ -818,10 +1058,22 @@ static int validate_elf_header(const elf32_ehdr_t *eh, uint32 size)
     return -1;
   if(eh->e_type != ET_EXEC && eh->e_type != ET_DYN)
     return -1;
-  if(eh->e_phoff + (uint32)eh->e_phnum * (uint32)eh->e_phentsize > size)
+  if(eh->e_ehsize != sizeof(*eh))
     return -1;
-  if(eh->e_shoff + (uint32)eh->e_shnum * (uint32)eh->e_shentsize > size)
-    return -1;
+  if(eh->e_phnum > 0){
+    if(eh->e_phentsize != sizeof(elf32_phdr_t))
+      return -1;
+    ph_len = (uint32)eh->e_phnum * (uint32)eh->e_phentsize;
+    if(!u32_range_valid(eh->e_phoff, ph_len, size))
+      return -1;
+  }
+  if(eh->e_shnum > 0){
+    if(eh->e_shentsize != sizeof(elf32_shdr_t))
+      return -1;
+    sh_len = (uint32)eh->e_shnum * (uint32)eh->e_shentsize;
+    if(!u32_range_valid(eh->e_shoff, sh_len, size))
+      return -1;
+  }
 
   return 0;
 }
@@ -829,11 +1081,15 @@ static int validate_elf_header(const elf32_ehdr_t *eh, uint32 size)
 int elf_loader_init(void)
 {
   int i;
+  module_lock();
   g_host_sym_count = 0;
+  g_module_generation = 1;
+  memset(g_host_syms, 0, sizeof(g_host_syms));
   for(i = 0; i < ELFLOADER_MAX_MODULES; i++){
     g_module_used[i] = 0;
     memset(&g_modules[i], 0, sizeof(g_modules[i]));
   }
+  module_unlock();
   return 0;
 }
 
@@ -867,9 +1123,15 @@ static elf_module_t *alloc_module_slot(const char *name)
   int i;
   for(i = 0; i < ELFLOADER_MAX_MODULES; i++){
     if(!g_module_used[i]){
+      uint32 gen = g_module_generation++;
+      if(g_module_generation == 0)
+        g_module_generation = 1;
+      if(gen == 0)
+        gen = g_module_generation++;
       g_module_used[i] = 1;
       memset(&g_modules[i], 0, sizeof(g_modules[i]));
       strncpy(g_modules[i].name, name, ELFLOADER_NAME_MAX - 1);
+      g_modules[i].generation = gen;
       return &g_modules[i];
     }
   }
@@ -890,15 +1152,19 @@ static int elf_module_load_from_image(const char *name, const void *image, uint3
   if(name == 0 || name[0] == 0 || out_mod == 0)
     return -1;
 
+  module_lock();
   m = elf_module_find(name);
   if(m){
     *out_mod = m;
+    module_unlock();
     return 0;
   }
 
   m = alloc_module_slot(name);
-  if(m == 0)
+  if(m == 0){
+    module_unlock();
     return -1;
+  }
 
   if(load_image_copy(image, image_size, &m->image) != 0){
     fail_reason = "image copy";
@@ -951,20 +1217,13 @@ static int elf_module_load_from_image(const char *name, const void *image, uint3
   }
 
   *out_mod = m;
+  module_unlock();
   return 0;
 
 fail:
   ESP_LOGE(TAG, "module '%s' load failed: %s", name, fail_reason ? fail_reason : "unknown");
-  module_reset(m);
-  {
-    int i;
-    for(i = 0; i < ELFLOADER_MAX_MODULES; i++){
-      if(&g_modules[i] == m){
-        g_module_used[i] = 0;
-        break;
-      }
-    }
-  }
+  module_unload_index_locked(module_index_from_ptr_locked((const void *)m));
+  module_unlock();
   return -1;
 }
 
@@ -991,13 +1250,19 @@ int elf_module_unload(const char *name)
   int i;
   if(name == 0)
     return -1;
+  module_lock();
   for(i = 0; i < ELFLOADER_MAX_MODULES; i++){
     if(g_module_used[i] && strcmp(g_modules[i].name, name) == 0){
-      module_reset(&g_modules[i]);
-      g_module_used[i] = 0;
+      if(g_modules[i].open_count > 0 || g_modules[i].active_calls > 0 || g_modules[i].dependent_count > 0){
+        module_unlock();
+        return -1;
+      }
+      module_unload_index_locked(i);
+      module_unlock();
       return 0;
     }
   }
+  module_unlock();
   return -1;
 }
 
@@ -1049,29 +1314,54 @@ int elf_module_call_main_ex(elf_module_t *mod, int argc, char **argv, char **env
   if(mod == 0)
     return -1;
 
+  module_lock();
+  if(!module_is_live_locked(mod)){
+    module_unlock();
+    return -1;
+  }
   fn = (main_fn_t)mod->entry_addr;
   if(fn == 0)
     fn = (main_fn_t)elf_module_find_symbol(mod, "main");
-  if(fn == 0)
+  if(fn == 0){
+    module_unlock();
     return -1;
-
-  call_ctx_set_current(mod);
-  slot = call_ctx_get_current_slot();
-  if(slot != 0){
-    slot->jb_valid = 1;
-    jmp_rc = setjmp(slot->jb);
-    if(jmp_rc == 0){
-      app_rc = fn(argc, argv, envp);
-    } else {
-      app_rc = jmp_rc - 1;
-    }
-    slot->jb_valid = 0;
-  } else {
-    app_rc = fn(argc, argv, envp);
   }
+  mod->active_calls++;
+  module_unlock();
+
+  if(call_ctx_set_current(mod) != 0){
+    module_lock();
+    if(module_is_live_locked(mod) && mod->active_calls > 0)
+      mod->active_calls--;
+    module_unlock();
+    ESP_LOGE(TAG, "call context exhausted");
+    return -1;
+  }
+  slot = call_ctx_get_current_slot();
+  if(slot == 0){
+    (void)call_ctx_set_current(0);
+    module_lock();
+    if(module_is_live_locked(mod) && mod->active_calls > 0)
+      mod->active_calls--;
+    module_unlock();
+    ESP_LOGE(TAG, "call context slot missing");
+    return -1;
+  }
+  slot->jb_valid = 1;
+  jmp_rc = setjmp(slot->jb);
+  if(jmp_rc == 0){
+    app_rc = fn(argc, argv, envp);
+  } else {
+    app_rc = jmp_rc - 1;
+  }
+  slot->jb_valid = 0;
   if(retv)
     *retv = app_rc;
-  call_ctx_set_current(0);
+  (void)call_ctx_set_current(0);
+  module_lock();
+  if(module_is_live_locked(mod) && mod->active_calls > 0)
+    mod->active_calls--;
+  module_unlock();
   return 0;
 }
 
@@ -1100,12 +1390,14 @@ const void *elf_loader_translate_ptr(const void *ptr)
 
   for(i = 0; i < m->seg_count; i++){
     uintptr_t start = (uintptr_t)m->segs[i].mem;
-    uintptr_t end = start + m->segs[i].memsz;
-    if(up >= start && up < end && m->segs[i].shadow_mem){
-      return m->segs[i].shadow_mem + (up - start);
+    if(up >= start){
+      uintptr_t off = up - start;
+      if(off < (uintptr_t)m->segs[i].memsz){
+        if(m->segs[i].shadow_mem)
+          return m->segs[i].shadow_mem + off;
+        return m->segs[i].mem + off;
+      }
     }
-    if(up >= start && up < end)
-      return m->segs[i].mem + (up - start);
   }
 
   /*
@@ -1114,12 +1406,14 @@ const void *elf_loader_translate_ptr(const void *ptr)
    */
   for(i = 0; i < m->seg_count; i++){
     uintptr_t start = (uintptr_t)m->segs[i].vaddr;
-    uintptr_t end = start + m->segs[i].memsz;
-    if(up >= start && up < end && m->segs[i].shadow_mem){
-      return m->segs[i].shadow_mem + (up - start);
+    if(up >= start){
+      uintptr_t off = up - start;
+      if(off < (uintptr_t)m->segs[i].memsz){
+        if(m->segs[i].shadow_mem)
+          return m->segs[i].shadow_mem + off;
+        return m->segs[i].mem + off;
+      }
     }
-    if(up >= start && up < end)
-      return m->segs[i].mem + (up - start);
   }
   return ptr;
 }
@@ -1166,6 +1460,7 @@ void *dlopen(const char *file, int mode)
   void *image = 0;
   uint32 image_size = 0;
   elf_module_t *mod = 0;
+  void *handle = 0;
   char namebuf[ELFLOADER_NAME_MAX];
 
   (void)mode;
@@ -1180,11 +1475,23 @@ void *dlopen(const char *file, int mode)
     return 0;
   }
 
+  module_lock();
   mod = elf_module_find(namebuf);
   if(mod){
+    int idx = module_index_from_ptr_locked((const void *)mod);
+    if(idx >= 0)
+      handle = module_make_handle_locked(idx);
+    if(handle == 0){
+      module_unlock();
+      set_dlerror("dlopen: handle state");
+      return 0;
+    }
+    mod->open_count++;
+    module_unlock();
     set_dlerror(0);
-    return mod;
+    return handle;
   }
+  module_unlock();
 
   if(xv6fs_read_file_alloc_path(file, &image, &image_size) != 0 || image == 0){
     set_dlerror("dlopen: file not found");
@@ -1197,19 +1504,47 @@ void *dlopen(const char *file, int mode)
     return 0;
   }
   free(image);
+  module_lock();
+  if(!module_is_live_locked(mod)){
+    module_unlock();
+    set_dlerror("dlopen: load race");
+    return 0;
+  }
+  {
+    int idx = module_index_from_ptr_locked((const void *)mod);
+    if(idx >= 0)
+      handle = module_make_handle_locked(idx);
+  }
+  if(handle == 0){
+    module_unlock();
+    set_dlerror("dlopen: handle state");
+    return 0;
+  }
+  mod->open_count++;
+  module_unlock();
   (void)elf_module_set_global(mod, 1);
   set_dlerror(0);
-  return mod;
+  return handle;
 }
 
 void *dlsym(void *handle, const char *name)
 {
+  int idx = -1;
+  elf_module_t *mod;
   void *sym;
   if(handle == 0 || name == 0 || name[0] == 0){
     set_dlerror("dlsym: bad args");
     return 0;
   }
-  sym = elf_module_find_symbol((elf_module_t *)handle, name);
+  module_lock();
+  if(module_from_dl_handle_locked(handle, &idx, &mod) != 0 || mod == 0){
+    module_unlock();
+    set_dlerror("dlsym: bad handle");
+    return 0;
+  }
+  (void)idx;
+  sym = elf_module_find_symbol(mod, name);
+  module_unlock();
   if(sym == 0){
     set_dlerror("dlsym: symbol not found");
     return 0;
@@ -1220,15 +1555,34 @@ void *dlsym(void *handle, const char *name)
 
 int dlclose(void *handle)
 {
-  elf_module_t *mod = (elf_module_t *)handle;
-  if(mod == 0){
+  int idx;
+  elf_module_t *mod;
+
+  module_lock();
+  if(module_from_dl_handle_locked(handle, &idx, &mod) != 0 || mod == 0){
+    module_unlock();
     set_dlerror("dlclose: bad handle");
     return -1;
   }
-  if(elf_module_unload(mod->name) != 0){
-    set_dlerror("dlclose: unload failed");
+  if(mod->open_count <= 0){
+    module_unlock();
+    set_dlerror("dlclose: not open");
     return -1;
   }
+  mod->open_count--;
+  if(mod->open_count > 0){
+    module_unlock();
+    set_dlerror(0);
+    return 0;
+  }
+  if(mod->active_calls > 0 || mod->dependent_count > 0 || module_is_active_in_call_ctx(mod)){
+    mod->open_count++;
+    module_unlock();
+    set_dlerror("dlclose: module busy");
+    return -1;
+  }
+  module_unload_index_locked(idx);
+  module_unlock();
   set_dlerror(0);
   return 0;
 }

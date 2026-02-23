@@ -3,9 +3,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build}"
-STRICT="${STRICT:-0}"
+STRICT="${STRICT:-1}"
+STATIC_VENV="${STATIC_VENV:-$ROOT_DIR/.venv_static}"
 
 cd "$ROOT_DIR"
+
+if [[ -x "$STATIC_VENV/bin/python3" ]]; then
+  PATH="$STATIC_VENV/bin:$PATH"
+fi
 
 log() {
   printf '[static] %s\n' "$*"
@@ -70,6 +75,10 @@ run_clang_tidy() {
   require_cmd clang-tidy || return 0
   if [[ ! -f "$BUILD_DIR/compile_commands.json" ]]; then
     warn "compile_commands.json not found in $BUILD_DIR (skip clang-tidy)"
+    return 0
+  fi
+  if grep -qE 'xtensa-esp|riscv32-esp' "$BUILD_DIR/compile_commands.json"; then
+    warn "compile DB targets embedded toolchains (xtensa/riscv). Host clang-tidy cannot parse those flags reliably; skip clang-tidy."
     return 0
   fi
   log "clang-tidy"

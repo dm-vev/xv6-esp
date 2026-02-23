@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: esp-qemu-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-qemu:
     runs-on: ubuntu-latest
@@ -48,3 +52,13 @@ jobs:
         run: |
           source "$HOME/esp-idf/export.sh"
           python3 ./scripts/qemu_soak_esp.py
+
+      - name: QEMU Applets
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          python3 ./scripts/qemu_applets_esp.py
+
+      - name: QEMU Regressions
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          python3 ./scripts/qemu_regressions_esp.py

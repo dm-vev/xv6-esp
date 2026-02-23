@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 int main(int argc, char *argv[])
 {
@@ -12,11 +14,14 @@ int main(int argc, char *argv[])
         argv++;
     }
     for (i = 1; i < argc; i++) {
-        fputs(argv[i], stdout);
+        const char *s = argv[i];
+        size_t n = strlen(s);
+        if (n > 0)
+            (void)write(1, s, n);
         if (i < argc - 1)
-            putchar(' ');
+            (void)write(1, " ", 1);
     }
     if (nflg == 0)
-        putchar('\n');
+        (void)write(1, "\n", 1);
     exit(0);
 }

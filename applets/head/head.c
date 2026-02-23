@@ -1,75 +1,88 @@
-/*
- * head - give the first few lines of a stream or of each of a set of files
- *
- * Bill Joy UCB August 24, 1977
- *
- * Copyright (c) 1980 Regents of the University of California.
- * All rights reserved.  The Berkeley software License Agreement
- * specifies the terms and conditions for redistribution.
- */
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
-static int getnum(char *cp);
-static void copyout(int cnt);
-
-int main(int Argc, char *argv[])
+static int parse_num(const char *s)
 {
-    int argc;
-    char *name;
-    int linecnt = 10;
-    int around = 0;
+    int v = 0;
+    if (s == NULL || *s == '\0')
+        return -1;
+    while (*s >= '0' && *s <= '9') {
+        v = (v * 10) + (*s - '0');
+        s++;
+    }
+    if (*s != '\0')
+        return -1;
+    return v;
+}
 
-    Argc--, argv++;
-    argc = Argc;
-    do {
-        while (argc > 0 && argv[0][0] == '-') {
-            linecnt = getnum(argv[0] + 1);
-            argc--, argv++, Argc--;
+static int copy_head_fd(int fd, int lines)
+{
+    char ch;
+    int rc;
+
+    while (lines > 0) {
+        rc = read(fd, &ch, 1);
+        if (rc == 0)
+            return 0;
+        if (rc < 0)
+            return -1;
+        if (write(1, &ch, 1) != 1)
+            return -1;
+        if (ch == '\n')
+            lines--;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    int lines = 10;
+    int argi = 1;
+    int printed_any = 0;
+    int rc = 0;
+
+    while (argi < argc && argv[argi][0] == '-') {
+        int n = parse_num(argv[argi] + 1);
+        if (n < 0) {
+            fprintf(stderr, "Badly formed number\n");
+            return 1;
         }
-        if (argc == 0 && around)
-            break;
-        if (argc > 0) {
-            close(0);
-            if (freopen(argv[0], "r", stdin) == NULL) {
-                perror(argv[0]);
-                exit(1);
-            }
-            name = argv[0];
-            argc--, argv++;
-        } else
-            name = 0;
-        if (around)
-            putchar('\n');
-        around++;
-        if (Argc > 1 && name)
-            printf("==> %s <==\n", name);
-        copyout(linecnt);
-        fflush(stdout);
-    } while (argc > 0);
-}
-
-void copyout(int cnt)
-{
-    char lbuf[BUFSIZ];
-
-    while (cnt > 0 && fgets(lbuf, sizeof lbuf, stdin) != 0) {
-        printf("%s", lbuf);
-        fflush(stdout);
-        cnt--;
+        lines = n;
+        argi++;
     }
-}
 
-int getnum(char *cp)
-{
-    int i;
-
-    for (i = 0; *cp >= '0' && *cp <= '9'; cp++)
-        i *= 10, i += *cp - '0';
-    if (*cp) {
-        fprintf(stderr, "Badly formed number\n");
-        exit(1);
+    if (argi >= argc) {
+        if (copy_head_fd(0, lines) != 0) {
+            perror("stdin");
+            return 1;
+        }
+        return 0;
     }
-    return (i);
+
+    while (argi < argc) {
+        int fd = open(argv[argi], O_RDONLY);
+        if (fd < 0) {
+            perror(argv[argi]);
+            rc = 1;
+            argi++;
+            continue;
+        }
+        if (printed_any)
+            (void)write(1, "\n", 1);
+        printed_any = 1;
+        if ((argc - argi) > 1) {
+            printf("==> %s <==\n", argv[argi]);
+        }
+        if (copy_head_fd(fd, lines) != 0) {
+            perror(argv[argi]);
+            rc = 1;
+        }
+        (void)close(fd);
+        argi++;
+    }
+
+    return rc;
 }

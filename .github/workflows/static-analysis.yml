@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: static-analysis-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   static-analysis:
     runs-on: ubuntu-latest
@@ -45,4 +49,3 @@ jobs:
         run: |
           source "$HOME/esp-idf/export.sh"
           STRICT=1 BUILD_DIR=build ./scripts/static_analysis.sh
-

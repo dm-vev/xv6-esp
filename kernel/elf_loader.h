@@ -46,6 +46,7 @@ int elf_module_info(elf_module_t *mod, uint16 *etype, uint16 *machine, uint32 *e
 void elf_module_list(const char **names, int max_names, int *out_count);
 const void *elf_loader_translate_ptr(const void *ptr);
 void elf_loader_host_exit(int status);
+void elf_loader_task_cleanup_for_handle(void *task_handle);
 
 void *dlopen(const char *file, int mode);
 void *dlsym(void *handle, const char *name);

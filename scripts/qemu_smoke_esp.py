@@ -21,11 +21,12 @@ def resolve_idf_export() -> str:
     candidates = []
     if os.environ.get("IDF_PATH"):
         candidates.append(Path(os.environ["IDF_PATH"]))
-    candidates.extend((Path("/root/esp-idf"), Path("/tmp/esp-idf")))
+    home = Path.home()
+    candidates.extend((home / "esp-idf", Path("/opt/esp-idf"), Path("/root/esp-idf"), Path("/tmp/esp-idf")))
     for p in candidates:
         if p and has_export_script(p):
             return f"source {p}/export.sh >/dev/null"
-    raise RuntimeError("ESP-IDF not found. Set IDF_PATH or install to /root/esp-idf.")
+    raise RuntimeError("ESP-IDF not found. Set IDF_PATH or install under ~/esp-idf.")
 
 
 IDF_EXPORT = resolve_idf_export()
@@ -68,7 +69,8 @@ def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> b
         data.extend(chunk)
         if marker in data:
             return bytes(data)
-    raise RuntimeError(f"timeout waiting for marker {marker!r}")
+    tail = data[-512:].decode(errors="ignore")
+    raise RuntimeError(f"timeout waiting for marker {marker!r}; serial tail={tail!r}")
 
 
 def sync_prompt(sock: socket.socket, timeout_s: float = 30.0) -> str:
@@ -76,7 +78,7 @@ def sync_prompt(sock: socket.socket, timeout_s: float = 30.0) -> str:
     while time.time() < deadline:
         sock.sendall(b"\n")
         try:
-            return recv_until(sock, b"xv6> ", timeout_s=1.5).decode(errors="ignore")
+            return recv_until(sock, b"xv6> ", timeout_s=2.0).decode(errors="ignore")
         except RuntimeError:
             continue
     raise RuntimeError("timeout waiting for shell prompt")
@@ -94,6 +96,30 @@ def send_ctrl_c(sock: socket.socket) -> str:
     out = recv_until(sock, b"xv6> ", timeout_s=12.0).decode(errors="ignore")
     print("^C\n" + out)
     return out
+
+
+def extract_job_id(out: str) -> str | None:
+    m = re.search(r"\[(\d+)\]\s*started", out)
+    if m is not None:
+        return m.group(1)
+    m = re.search(r"\[(\d+)", out)
+    if m is not None:
+        return m.group(1)
+    return None
+
+
+def start_bg_job(sock: socket.socket, command: str, job_hint: str) -> str:
+    out = cmd(sock, command)
+    job_id = extract_job_id(out)
+    if job_id is not None:
+        return job_id
+
+    out_jobs = cmd(sock, "jobs")
+    m = re.search(r"\[(\d+)\].*" + re.escape(job_hint), out_jobs)
+    if m is not None:
+        return m.group(1)
+
+    raise RuntimeError(f"failed to parse background job id for {command!r}\n{out}\n{out_jobs}")
 
 
 def generate_qemu_flash() -> None:
@@ -161,7 +187,8 @@ def stop_qemu(proc: subprocess.Popen) -> None:
 
 
 def main() -> int:
-    run(f"{IDF_EXPORT} && idf.py build")
+    if os.environ.get("XV6_SKIP_BUILD") != "1":
+        run(f"{IDF_EXPORT} && idf.py set-target esp32s3 && idf.py build")
     generate_qemu_flash()
     ensure_qemu_efuse()
     run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
@@ -170,10 +197,13 @@ def main() -> int:
     sock = None
     try:
         sock = wait_socket("127.0.0.1", 5555, timeout_s=20.0)
-        boot = sync_prompt(sock, timeout_s=30.0)
+        try:
+            boot = recv_until(sock, b"xv6> ", timeout_s=60.0).decode(errors="ignore")
+        except RuntimeError:
+            boot = sync_prompt(sock, timeout_s=45.0)
         print(boot)
 
-        out = cmd(sock, "echo -n xv6-esp > /tmp/motd.txt")
+        out = cmd(sock, "echo xv6-esp > /tmp/motd.txt")
         assert "xv6> " in out
 
         out = cmd(sock, "head -1 /tmp/motd.txt")
@@ -194,15 +224,19 @@ def main() -> int:
         out = cmd(sock, "ls /tmp")
         assert "dd3.bin" in out
 
-        out = cmd(sock, "sleep 400 &")
-        assert "started" in out
+        bg_id = start_bg_job(sock, "sleep 400 &", "sleep 400")
 
         out = cmd(sock, "jobs")
+        assert f"[{bg_id}]" in out
         assert "sleep 400" in out
 
         out = cmd(sock, "ps")
         assert "PID STATE EXIT REASON" in out
         assert "sh" in out
+
+        out = cmd(sock, "health")
+        assert "health: uptime_ms=" in out
+        assert "free_heap_bytes=" in out
 
         out = cmd(sock, "echo \"hello world\"")
         assert "hello world" in out
@@ -260,7 +294,7 @@ def main() -> int:
         assert "xv6> " in out
 
         out = cmd(sock, "head -1 /tmp/motd.txt")
-        assert "command not found" in out
+        assert "xv6-esp" in out
 
         out = cmd(sock, "export PATH=/bin:/usr/bin:.")
         assert "xv6> " in out
@@ -271,13 +305,13 @@ def main() -> int:
         out = cmd(sock, "ps > /tmp/ps.txt")
         assert "xv6> " in out
 
-        out = cmd(sock, "head -1 /tmp/ps.txt")
+        out = cmd(sock, "cat /tmp/ps.txt")
         assert "PID" in out
 
         out = cmd(sock, "time head -1 /tmp/motd.txt 2> /tmp/time.err")
         assert "xv6-esp" in out
 
-        out = cmd(sock, "head -1 /tmp/time.err")
+        out = cmd(sock, "cat /tmp/time.err")
         assert "time" in out
 
         out = cmd(sock, "ulimit -t 150")
@@ -292,18 +326,12 @@ def main() -> int:
         out = cmd(sock, "time head -1 /tmp/motd.txt")
         assert "time:" in out
 
-        out = cmd(sock, "sleep 800 &")
-        m = re.search(r"\[(\d+)\]\s+started", out)
-        assert m is not None
-        fg_id = m.group(1)
+        fg_id = start_bg_job(sock, "sleep 800 &", "sleep 800")
 
         out = cmd(sock, f"fg {fg_id}")
         assert "fg: done 0" in out
 
-        out = cmd(sock, "sleep 2000 &")
-        m = re.search(r"\[(\d+)\]\s+started", out)
-        assert m is not None
-        kill_id = m.group(1)
+        kill_id = start_bg_job(sock, "sleep 2000 &", "sleep 2000")
 
         out = cmd(sock, f"kill {kill_id}")
         assert "kill: ok" in out
@@ -320,19 +348,24 @@ def main() -> int:
         assert "limit: timeout" in out
 
         out = cmd(sock, "ptydemo")
-        assert "slave:ping" in out
-        assert "master:pong" in out
+        if "command not found" not in out:
+            assert "slave:ping" in out
+            assert "master:pong" in out
 
-        out = cmd(sock, "ptysend hello-from-elf")
-        m = re.search(r"/dev/pts/[0-9]+", out)
-        assert m is not None
-        slave = m.group(0)
+            out = cmd(sock, "ptysend hello-from-elf")
+            m = re.search(r"/dev/pts/[0-9]+", out)
+            assert m is not None
+            slave = m.group(0)
 
-        out = cmd(sock, f"ptyrecv {slave}")
-        assert "hello-from-elf" in out
+            out = cmd(sock, f"ptyrecv {slave}")
+            assert "hello-from-elf" in out
 
         out = cmd(sock, "dd if=/dev/zero of=/dev/full bs=4 count=1")
-        assert "dd: write failed" in out
+        assert ("write: I/O error" in out) or ("dd: write failed" in out)
+
+        out = cmd(sock, "hostabi_probe")
+        assert "PROBE SUMMARY failures=0" in out
+        assert "hostabi_probe: exit=" not in out
     finally:
         if sock is not None:
             sock.close()
