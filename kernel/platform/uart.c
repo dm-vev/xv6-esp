@@ -1,20 +1,36 @@
-//
-// low-level UART glue.
-//
-// On ESP builds, route xv6 console I/O through hal_console_* to avoid
-// relying on 16550 registers and TX interrupts that do not exist there.
-//
+/**
+ * @file uart.c
+ * @brief Low-level UART driver implementation.
+ *
+ * On ESP builds, routes xv6 console I/O through hal_console_* to avoid
+ * relying on 16550 registers and TX interrupts that do not exist there.
+ */
 
 #ifdef ESP_PLATFORM
 
 #include "core/types.h"
 #include "platform/hal.h"
 
+/**
+ * @brief Initializes UART (ESP platform - no-op).
+ *
+ * @return None.
+ */
 void
 uartinit(void)
 {
 }
 
+/**
+ * @brief Writes data to UART (ESP platform).
+ *
+ * @param buf Buffer containing data to write.
+ * @param n   Number of bytes to write.
+ *
+ * @post Data written to console via HAL.
+ *
+ * @return None.
+ */
 void
 uartwrite(char buf[], int n)
 {
@@ -22,18 +38,35 @@ uartwrite(char buf[], int n)
     hal_console_putc((uint8)buf[i]);
 }
 
+/**
+ * @brief Writes a character synchronously (ESP platform).
+ *
+ * @param c Character to write.
+ *
+ * @return None.
+ */
 void
 uartputc_sync(int c)
 {
   hal_console_putc(c);
 }
 
+/**
+ * @brief Reads a character from UART (ESP platform).
+ *
+ * @return Character read, or -1 if none available.
+ */
 int
 uartgetc(void)
 {
   return hal_console_getc();
 }
 
+/**
+ * @brief UART interrupt handler (ESP platform - no-op).
+ *
+ * @return None.
+ */
 void
 uartintr(void)
 {
@@ -41,9 +74,10 @@ uartintr(void)
 
 #else
 
-//
-// low-level driver for 16550a UART.
-//
+/**
+ * @file uart.c
+ * @brief Low-level driver for 16550a UART.
+ */
 
 #include "core/types.h"
 #include "core/param.h"
@@ -64,8 +98,8 @@ uartintr(void)
 // the UART control registers.
 // some have different meanings for read vs write.
 // see http://byterunner.com/16550.html
-#define RHR 0                 // receive holding register (for input bytes)
-#define THR 0                 // transmit holding register (for output bytes)
+#define RHR 0                 // receive holding register (for input bytes);
+#define THR 0                 // transmit holding register (for output bytes);
 #define IER 1                 // interrupt enable register
 #define IER_RX_ENABLE (1<<0)
 #define IER_TX_ENABLE (1<<1)
@@ -81,13 +115,26 @@ uartintr(void)
 #define LSR_TX_IDLE (1<<5)    // THR can accept another character to send
 
 // for sending threads to synchronize with uart "ready" interrupts.
+/** @brief Lock protecting UART transmission. */
 static struct spinlock tx_lock;
-static int tx_busy;           // is the UART busy sending?
-static int tx_chan;           // &tx_chan is the "wait channel"
+/** @brief Whether UART is currently transmitting. */
+static int tx_busy;
+/** @brief Address used as sleep channel for tx. */
+static int tx_chan;
 
 extern volatile int panicking; // from printf.c
 extern volatile int panicked; // from printf.c
 
+/**
+ * @brief Initializes the UART hardware.
+ *
+ * Configures UART for 38400 baud, 8N1, enables FIFO,
+ * and enables transmit/receive interrupts.
+ *
+ * @post UART initialized and interrupts enabled.
+ *
+ * @return None.
+ */
 void
 uartinit(void)
 {
@@ -116,9 +163,18 @@ uartinit(void)
   initlock(&tx_lock, "uart");
 }
 
-// transmit buf[] to the uart. it blocks if the
-// uart is busy, so it cannot be called from
-// interrupts, only from write() system calls.
+/**
+ * @brief Writes data to UART.
+ *
+ * @param buf Buffer containing data to write.
+ * @param n   Number of bytes to write.
+ *
+ * @post Data transmitted to UART.
+ *
+ * @return None.
+ *
+ * @note Blocks if UART is busy. Cannot be called from interrupts.
+ */
 void
 uartwrite(char buf[], int n)
 {
@@ -130,7 +186,7 @@ uartwrite(char buf[], int n)
       // wait for a UART transmit-complete interrupt
       // to set tx_busy to 0.
       sleep(&tx_chan, &tx_lock);
-    }   
+    }
       
     WriteReg(THR, buf[i]);
     i += 1;
@@ -141,10 +197,18 @@ uartwrite(char buf[], int n)
 }
 
 
-// write a byte to the uart without using
-// interrupts, for use by kernel printf() and
-// to echo characters. it spins waiting for the uart's
-// output register to be empty.
+/**
+ * @brief Writes a character to UART synchronously.
+ *
+ * @param c Character to write.
+ *
+ * @post Character transmitted to UART.
+ *
+ * @note Spins waiting for UART to be ready. Used by kernel printf.
+ * @note Disables interrupts while sending.
+ *
+ * @return None.
+ */
 void
 uartputc_sync(int c)
 {
@@ -165,8 +229,11 @@ uartputc_sync(int c)
     pop_off();
 }
 
-// try to read one input character from the UART.
-// return -1 if none is waiting.
+/**
+ * @brief Reads a character from UART if available.
+ *
+ * @return Character read (0-255), or -1 if none waiting.
+ */
 int
 uartgetc(void)
 {
@@ -178,9 +245,16 @@ uartgetc(void)
   }
 }
 
-// handle a uart interrupt, raised because input has
-// arrived, or the uart is ready for more output, or
-// both. called from devintr().
+/**
+ * @brief UART interrupt handler.
+ *
+ * Handles transmit-complete and receive-ready interrupts.
+ *
+ * @post Transmit thread woken if transmission complete.
+ * @post Incoming characters processed via consoleintr().
+ *
+ * @return None.
+ */
 void
 uartintr(void)
 {
