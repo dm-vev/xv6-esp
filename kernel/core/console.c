@@ -85,7 +85,7 @@ consolewrite(int user_src, uint64 src, int n)
 int
 consoleread(int user_dst, uint64 dst, int n)
 {
-  uint target;
+  int target;
   int c;
   char cbuf;
 
@@ -115,8 +115,11 @@ consoleread(int user_dst, uint64 dst, int n)
 
     // copy the input byte to the user-space buffer.
     cbuf = c;
-    if(either_copyout(user_dst, dst, &cbuf, 1) == -1)
+    if(either_copyout(user_dst, dst, &cbuf, 1) == -1){
+      if(n == target)
+        n = -1;
       break;
+    }
 
     dst++;
     --n;
@@ -129,6 +132,8 @@ consoleread(int user_dst, uint64 dst, int n)
   }
   release(&cons.lock);
 
+  if(n < 0)
+    return -1;
   return target - n;
 }
 
