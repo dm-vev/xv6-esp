@@ -260,7 +260,7 @@ int main(void)
   errno = 0;
   rc = chown("/tmp/probe_nosys", 0, 0);
   err = errno;
-  probe("chown_nosys", rc < 0 && err == ENOSYS, (rc < 0) ? -1 : 0, err);
+  probe("chown_ok", rc == 0 && err == 0, (rc < 0) ? -1 : 0, err);
   (void)unlink("/tmp/probe_nosys");
 
   printf("PROBE SUMMARY failures=%d\n", g_failures);

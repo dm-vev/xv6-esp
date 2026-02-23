@@ -23,5 +23,5 @@ PROBE posix_openpt_rdonly rc=-1 errno=EINVAL
 PROBE fdopendir rc=-1 errno=ENOSYS
 PROBE truncate_nosys rc=-1 errno=ENOSYS
 PROBE utimes_nosys rc=-1 errno=ENOSYS
-PROBE chown_nosys rc=-1 errno=ENOSYS
+PROBE chown_ok rc=0 errno=OK
 PROBE SUMMARY failures=0
