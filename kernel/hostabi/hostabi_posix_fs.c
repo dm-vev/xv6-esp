@@ -159,9 +159,15 @@ int hostabi_posix_fs_dup2(int oldfd, int newfd)
 {
   int dups[XV6_FD_CAP];
   int ndups = 0;
+  int restore_dups[XV6_FD_CAP];
+  int nrestore_dups = 0;
   int rc;
   int i;
   xv6_kstat_t st;
+  xv6_kstat_t newst;
+  int had_newfd = 0;
+  int backup_fd = -1;
+  int restore_ok = 0;
 
   oldfd = hostabi_posix_fs_map_fd(oldfd);
   newfd = hostabi_posix_fs_map_fd(newfd);
@@ -178,7 +184,15 @@ int hostabi_posix_fs_dup2(int oldfd, int newfd)
     return newfd;
   }
 
-  (void)hostabi_posix_fs_close(newfd);
+  if(xv6_fstat(newfd, &newst) == 0){
+    had_newfd = 1;
+    backup_fd = xv6_dup(newfd);
+    if(backup_fd < 0)
+      return set_errno_from_xv6_or(EMFILE);
+    hostabi_posix_io_on_dup(newfd, backup_fd);
+    (void)xv6_close(newfd);
+    hostabi_posix_io_on_close(newfd, 0);
+  }
 
   errno = 0;
   while(1){
@@ -199,6 +213,10 @@ int hostabi_posix_fs_dup2(int oldfd, int newfd)
     (void)xv6_close(dups[i]);
     hostabi_posix_io_on_close(dups[i], 0);
   }
+  if(backup_fd >= 0){
+    (void)xv6_close(backup_fd);
+    hostabi_posix_io_on_close(backup_fd, 0);
+  }
   return rc;
 
 fail:
@@ -206,6 +224,33 @@ fail:
     (void)xv6_close(dups[i]);
     hostabi_posix_io_on_close(dups[i], 0);
   }
+
+  if(had_newfd && backup_fd >= 0){
+    while(1){
+      rc = xv6_dup(backup_fd);
+      if(rc < 0)
+        break;
+      hostabi_posix_io_on_dup(backup_fd, rc);
+      if(rc == newfd){
+        restore_ok = 1;
+        break;
+      }
+      if(nrestore_dups >= (int)(sizeof(restore_dups) / sizeof(restore_dups[0]))){
+        errno = EMFILE;
+        break;
+      }
+      restore_dups[nrestore_dups++] = rc;
+    }
+    for(i = 0; i < nrestore_dups; i++){
+      (void)xv6_close(restore_dups[i]);
+      hostabi_posix_io_on_close(restore_dups[i], 0);
+    }
+    (void)xv6_close(backup_fd);
+    hostabi_posix_io_on_close(backup_fd, 0);
+    if(!restore_ok && errno == 0)
+      errno = EMFILE;
+  }
+
   if(errno == 0)
     (void)set_errno_from_xv6_or(EBADF);
   return -1;
