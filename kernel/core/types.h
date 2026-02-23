@@ -1,3 +1,9 @@
+/**
+ * @file types.h
+ * @brief Base type definitions
+ *
+ * Defines fixed-width integer types used throughout the kernel.
+ */
 typedef unsigned int   uint;
 typedef unsigned short ushort;
 typedef unsigned char  uchar;

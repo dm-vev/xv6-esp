@@ -1,3 +1,11 @@
+/**
+ * @file syscall.h
+ * @brief System call numbers
+ *
+ * Defines system call numbers used in the kernel:
+ * SYS_fork, SYS_exit, SYS_wait, SYS_pipe, SYS_read, etc.
+ */
+
 // System call numbers
 #define SYS_fork    1
 #define SYS_exit    2

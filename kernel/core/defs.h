@@ -1,3 +1,11 @@
+/**
+ * @file defs.h
+ * @brief Kernel function declarations
+ *
+ * This header provides forward declarations and function prototypes
+ * for all kernel subsystems. It serves as a central declaration point
+ * for inter-module function calls.
+ */
 struct buf;
 struct context;
 struct file;

@@ -1,3 +1,16 @@
+/**
+ * @file memlayout.h
+ * @brief Physical memory layout definitions
+ *
+ * Defines memory regions for QEMU virt machine:
+ * - 0x00001000: boot ROM
+ * - 0x02000000: CLINT (timer)
+ * - 0x0C000000: PLIC (interrupts)
+ * - 0x10000000: UART0
+ * - 0x10001000: VirtIO disk
+ * - 0x80000000: kernel load address
+ */
+
 // Physical memory layout
 
 // qemu -machine virt is set up like this,

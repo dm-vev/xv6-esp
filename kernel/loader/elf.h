@@ -1,3 +1,11 @@
+/**
+ * @file elf.h
+ * @brief ELF executable format definitions
+ *
+ * Defines ELF header structures for loading ELF executables.
+ * Supports ELF32/ELF64 formats.
+ */
+
 // Format of an ELF executable file
 
 #define ELF_MAGIC 0x464C457FU  // "\x7FELF" in little endian

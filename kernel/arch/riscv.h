@@ -1,3 +1,15 @@
+/**
+ * @file riscv.h
+ * @brief RISC-V CPU definitions and inline assembly
+ *
+ * This header provides:
+ * - RISC-V CSR (Control and Status Register) accessors
+ * - Physical memory layout definitions
+ * - CPU frequency and timer definitions
+ * - Assembly helper functions
+ *
+ * These definitions are specific to RV64GC (64-bit with compressed instructions).
+ */
 #ifndef __ASSEMBLER__
 
 // which hart (core) is this?

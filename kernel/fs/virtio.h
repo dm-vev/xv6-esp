@@ -1,3 +1,13 @@
+/**
+ * @file virtio.h
+ * @brief VirtIO device definitions
+ *
+ * Defines VirtIO MMIO control registers and descriptor structures
+ * for the QEMU virtio disk device.
+ *
+ * Reference: https://docs.oasis-open.org/virtio/virtio/v1.1/virtio-v1.1.pdf
+ */
+
 //
 // virtio device definitions.
 // for both the mmio interface, and virtio descriptors.

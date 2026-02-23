@@ -1,3 +1,15 @@
+/**
+ * @file param.h
+ * @brief Kernel configuration parameters
+ *
+ * System limits and capacity constants:
+ * - NPROC: max processes
+ * - NCPU: max CPUs
+ * - NOFILE: open files per process
+ * - NFILE: open files system-wide
+ * - NINODE: max active inodes
+ * - And more...
+ */
 #define NPROC        64  // maximum number of processes
 #define NCPU          8  // maximum number of CPUs
 #define NOFILE       16  // open files per process

@@ -1,3 +1,17 @@
+/**
+ * @file fs.h
+ * @brief On-disk file system format
+ *
+ * Defines the on-disk structures for xv6 filesystem:
+ * - Superblock: filesystem metadata
+ * - Inode: file/directory metadata
+ * - Directory entries
+ * - Block allocation
+ *
+ * Disk layout:
+ * [ boot block | super block | log | inode blocks | free bit map | data blocks]
+ */
+
 // On-disk file system format.
 // Both the kernel and user programs use this header file.
 
