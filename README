@@ -54,7 +54,7 @@ ESP32-S3 (`main/app_main.c` with code in `kernel/*_esp*.c`).
 
 Key properties of this M1 bring-up:
 - single app task runtime (`app_main`),
-- UART interactive kernel shell (`ksh`),
+- applet-based boot flow (`/bin/init` -> `/bin/sh`),
 - raw SPI flash partition block backend (`xv6fs`).
 
 Build steps:

@@ -43,12 +43,5 @@ int main(int argc, char **argv)
     return run_script(argv[2]) == 0 ? 0 : 1;
   }
 
-  if(run_script("/etc/rc") != 0){
-    printf("sh: /etc/rc failed, rebooting\n");
-    fflush(stdout);
-    shrt_reboot();
-    return 1;
-  }
-
   return run_interactive();
 }
