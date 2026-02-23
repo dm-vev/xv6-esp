@@ -18,7 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 #define XV6_MAX_PTY XV6_PTY_CAP
 

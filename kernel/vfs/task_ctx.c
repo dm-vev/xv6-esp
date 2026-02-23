@@ -20,7 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "loader/elf_loader.h"
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 #define XV6_MAX_TASK_CTX XV6_TASK_CTX_CAP
 

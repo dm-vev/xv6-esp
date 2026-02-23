@@ -18,7 +18,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 #define XV6_MAX_FD XV6_FD_CAP
 

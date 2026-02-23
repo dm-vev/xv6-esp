@@ -1,4 +1,4 @@
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 #include <errno.h>
 #include <stdio.h>

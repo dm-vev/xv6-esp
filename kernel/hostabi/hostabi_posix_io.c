@@ -23,7 +23,7 @@
 #include "loader/elf_loader.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 #define HOSTABI_FD_META_MAX XV6_FD_CAP
 #define XV6_KSTAT_T_DEVICE 3

@@ -5,7 +5,7 @@
 #include "platform/esp_flash_disk.h"
 #include "platform/hal.h"
 #include "runtime/shell_runtime.h"
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 /**
  * @file xv6_esp_boot.c

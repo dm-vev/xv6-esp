@@ -9,7 +9,7 @@
 
 #include "loader/elf_loader.h"
 #include "hostabi/hostabi_exports.h"
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 

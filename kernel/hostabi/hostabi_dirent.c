@@ -17,7 +17,7 @@
 #include "loader/elf_loader.h"
 #include "hostabi/hostabi_posix_fs.h"
 #include "core/param.h"
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 #ifndef DT_UNKNOWN
 #define DT_UNKNOWN 0

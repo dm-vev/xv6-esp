@@ -11,7 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 /**
  * @file elf_loader.c

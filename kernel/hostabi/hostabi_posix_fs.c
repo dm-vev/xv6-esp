@@ -17,7 +17,7 @@
 
 #include "loader/elf_loader.h"
 #include "hostabi/hostabi_posix_io.h"
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 #define XV6_KSTAT_T_DIR 1
 #define XV6_KSTAT_T_FILE 2

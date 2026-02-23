@@ -30,7 +30,7 @@
 #include "hostabi/hostabi_pty.h"
 #include "modules/module_manager.h"
 #include "core/param.h"
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 #define KSH_MAX_JOBS 32
 #define KSH_MAX_ARGS 32

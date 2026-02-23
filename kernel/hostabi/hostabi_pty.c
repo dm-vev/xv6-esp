@@ -15,7 +15,7 @@
 #include "loader/elf_loader.h"
 #include "hostabi/hostabi_posix_fs.h"
 #include "core/param.h"
-#include "vfs/xv6fs_ro.h"
+#include "vfs/vfs.h"
 
 /**
  * @brief Open a pseudo-terminal master device
