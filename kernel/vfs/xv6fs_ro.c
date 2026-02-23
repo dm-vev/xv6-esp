@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -95,6 +96,18 @@ typedef struct {
 static xv6_vfd_t g_fds[XV6_MAX_FD];
 static int g_next_fd_group = 1;
 
+#define XV6_INODE_SIZE_MASK 0x000fffffu
+#define XV6_INODE_MODE_MASK 0xfff00000u
+#define XV6_INODE_MODE_SHIFT 20
+
+#define XV6_DEFAULT_FILE_MODE 0666u
+#define XV6_DEFAULT_DIR_MODE 0777u
+#define XV6_DEFAULT_SYMLINK_MODE 0777u
+#define XV6_DEFAULT_DEV_MODE 0666u
+
+#define XV6_SYMLINK_MAX_DEPTH 8
+#define XV6_SYMLINK_TARGET_MAX MAXPATH
+
 static void copy_cstr(char *dst, int dst_len, const char *src)
 {
   if(dst == 0 || dst_len <= 0)
@@ -103,6 +116,86 @@ static void copy_cstr(char *dst, int dst_len, const char *src)
     src = "";
   strncpy(dst, src, (size_t)dst_len - 1u);
   dst[dst_len - 1] = 0;
+}
+
+static uint16 inode_default_mode(short type)
+{
+  if(type == T_DIR)
+    return (uint16)XV6_DEFAULT_DIR_MODE;
+  if(type == T_SYMLINK)
+    return (uint16)XV6_DEFAULT_SYMLINK_MODE;
+  if(type == T_DEVICE)
+    return (uint16)XV6_DEFAULT_DEV_MODE;
+  return (uint16)XV6_DEFAULT_FILE_MODE;
+}
+
+static uint32 inode_get_size(const struct dinode *ip)
+{
+  if(ip == 0)
+    return 0;
+  return ip->size & XV6_INODE_SIZE_MASK;
+}
+
+static void inode_set_size(struct dinode *ip, uint32 size)
+{
+  uint32 mode_bits;
+  if(ip == 0)
+    return;
+  mode_bits = ip->size & XV6_INODE_MODE_MASK;
+  ip->size = mode_bits | (size & XV6_INODE_SIZE_MASK);
+}
+
+static uint16 inode_get_mode(const struct dinode *ip)
+{
+  uint16 mode;
+  if(ip == 0)
+    return 0;
+  mode = (uint16)((ip->size & XV6_INODE_MODE_MASK) >> XV6_INODE_MODE_SHIFT);
+  if(mode == 0)
+    return inode_default_mode(ip->type);
+  return (uint16)(mode & 07777u);
+}
+
+static void inode_set_mode(struct dinode *ip, uint16 mode)
+{
+  uint32 size_bits;
+  if(ip == 0)
+    return;
+  size_bits = ip->size & XV6_INODE_SIZE_MASK;
+  ip->size = size_bits | (((uint32)(mode & 07777u)) << XV6_INODE_MODE_SHIFT);
+}
+
+static uid_t inode_get_uid(const struct dinode *ip)
+{
+  if(ip == 0)
+    return 0;
+  return (uid_t)(uint16)ip->major;
+}
+
+static gid_t inode_get_gid(const struct dinode *ip)
+{
+  if(ip == 0)
+    return 0;
+  return (gid_t)(uint16)ip->minor;
+}
+
+static void inode_set_uid_gid(struct dinode *ip, int owner, int group)
+{
+  if(ip == 0)
+    return;
+  if(owner >= 0)
+    ip->major = (short)((uint16)owner);
+  if(group >= 0)
+    ip->minor = (short)((uint16)group);
+}
+
+static void inode_init_attrs(struct dinode *ip, short type)
+{
+  if(ip == 0)
+    return;
+  inode_set_mode(ip, inode_default_mode(type));
+  ip->major = 0;
+  ip->minor = 0;
 }
 
 static int ptr_byte_readable(const void *p)
@@ -703,12 +796,14 @@ static int inode_read_range(const struct dinode *ip, uint32 off, void *dst, uint
   uint8 blk[BSIZE];
   uint8 *out = (uint8 *)dst;
   uint32 copied = 0;
+  uint32 inode_sz;
 
   if(ip == 0 || dst == 0)
     return -1;
-  if(off > ip->size)
+  inode_sz = inode_get_size(ip);
+  if(off > inode_sz)
     return -1;
-  if(n > ip->size - off)
+  if(n > inode_sz - off)
     return -1;
 
   while(copied < n){
@@ -792,7 +887,8 @@ static int alloc_inode(short type, uint32 *out_inum)
       memset(&ip, 0, sizeof(ip));
       ip.type = type;
       ip.nlink = 1;
-      ip.size = 0;
+      inode_set_size(&ip, 0);
+      inode_init_attrs(&ip, type);
       if(write_inode(i, &ip) != 0)
         return -1;
       *out_inum = i;
@@ -847,6 +943,7 @@ static int inode_write_range(struct dinode *ip, uint32 off, const void *src, uin
   uint32 copied = 0;
   uint32 end_off;
   uint32 max_file_size = (uint32)(NDIRECT + NINDIRECT) * BSIZE;
+  uint32 inode_sz;
 
   if(ip == 0 || src == 0)
     return -1;
@@ -857,6 +954,7 @@ static int inode_write_range(struct dinode *ip, uint32 off, const void *src, uin
   end_off = off + n;
   if(end_off > max_file_size)
     return -1;
+  inode_sz = inode_get_size(ip);
 
   while(copied < n){
     uint32 file_off = off + copied;
@@ -876,8 +974,8 @@ static int inode_write_range(struct dinode *ip, uint32 off, const void *src, uin
       return -1;
     copied += take;
   }
-  if(end_off > ip->size)
-    ip->size = end_off;
+  if(end_off > inode_sz)
+    inode_set_size(ip, end_off);
   return 0;
 }
 
@@ -905,7 +1003,7 @@ static int inode_truncate(uint32 inum, struct dinode *ip)
       return -1;
     ip->addrs[NDIRECT] = 0;
   }
-  ip->size = 0;
+  inode_set_size(ip, 0);
   return write_inode(inum, ip);
 }
 
@@ -949,11 +1047,13 @@ static int dir_lookup_inum(uint32 dir_inum, const char *name, uint32 *out_inum, 
 {
   struct dinode dir;
   uint32 off;
+  uint32 dir_sz;
 
   if(read_inode(dir_inum, &dir) != 0 || dir.type != T_DIR)
     return -1;
+  dir_sz = inode_get_size(&dir);
 
-  for(off = 0; off + sizeof(struct dirent) <= dir.size; off += sizeof(struct dirent)){
+  for(off = 0; off + sizeof(struct dirent) <= dir_sz; off += sizeof(struct dirent)){
     struct dirent de;
     char dname[DIRSIZ + 1];
     if(inode_read_range(&dir, off, &de, sizeof(de)) != 0)
@@ -1046,18 +1146,148 @@ static int path_parent(const char *path, uint32 *parent_inum, char *name_out)
   }
 }
 
+static int path_parent_str(const char *path, char *out, int out_len)
+{
+  const char *slash;
+  int len;
+
+  if(path == 0 || out == 0 || out_len <= 1 || path[0] != '/')
+    return -1;
+  if(strcmp(path, "/") == 0)
+    return -1;
+
+  slash = strrchr(path, '/');
+  if(slash == 0)
+    return -1;
+  if(slash == path){
+    if(out_len < 2)
+      return -1;
+    out[0] = '/';
+    out[1] = 0;
+    return 0;
+  }
+
+  len = (int)(slash - path);
+  if(len <= 0 || len >= out_len)
+    return -1;
+  memcpy(out, path, (size_t)len);
+  out[len] = 0;
+  return 0;
+}
+
+static int inode_read_symlink_target_locked(const struct dinode *ip, char *out, int out_len, uint32 *out_n)
+{
+  uint32 n;
+
+  if(ip == 0 || out == 0 || out_len <= 1 || ip->type != T_SYMLINK)
+    return -1;
+  n = inode_get_size(ip);
+  if(n >= (uint32)out_len)
+    return -1;
+  if(n > 0 && inode_read_range(ip, 0, out, n) != 0)
+    return -1;
+  out[n] = 0;
+  if(out_n)
+    *out_n = n;
+  return 0;
+}
+
+static int path_resolve_final_symlink_locked(const char *abs_in, char *abs_out, int out_len)
+{
+  char cur[MAXPATH];
+  int depth;
+
+  if(abs_in == 0 || abs_out == 0 || out_len <= 1)
+    return -1;
+  copy_cstr(cur, sizeof(cur), abs_in);
+
+  for(depth = 0; depth < XV6_SYMLINK_MAX_DEPTH; depth++){
+    uint32 inum = 0;
+    struct dinode ip;
+
+    if(is_dev_node(cur)){
+      if((int)strlen(cur) >= out_len)
+        return -1;
+      copy_cstr(abs_out, out_len, cur);
+      return 0;
+    }
+
+    if(path_lookup(cur, &inum, &ip) != 0)
+      return -1;
+    if(ip.type != T_SYMLINK){
+      if((int)strlen(cur) >= out_len)
+        return -1;
+      copy_cstr(abs_out, out_len, cur);
+      return 0;
+    }
+
+    {
+      char target[XV6_SYMLINK_TARGET_MAX];
+      char combined[MAXPATH];
+
+      if(inode_read_symlink_target_locked(&ip, target, sizeof(target), 0) != 0)
+        return -1;
+      if(target[0] == '/'){
+        copy_cstr(combined, sizeof(combined), target);
+      } else {
+        char parent[MAXPATH];
+        int n;
+        if(path_parent_str(cur, parent, sizeof(parent)) != 0)
+          return -1;
+        n = snprintf(combined, sizeof(combined), "%s/%s", parent, target);
+        if(n <= 0 || n >= (int)sizeof(combined))
+          return -1;
+      }
+      if(path_resolve(combined, cur, sizeof(cur)) != 0)
+        return -1;
+    }
+  }
+
+  task_ctx_set_errno(ELOOP);
+  return -1;
+}
+
+static int path_lookup_follow_locked(const char *abs_path, int follow_final_nonzero, char *resolved_out, int resolved_len,
+                                     uint32 *out_inum, struct dinode *out_ip)
+{
+  char lookup_path[MAXPATH];
+  const char *path_for_lookup = abs_path;
+
+  if(abs_path == 0)
+    return -1;
+
+  if(follow_final_nonzero){
+    if(path_resolve_final_symlink_locked(abs_path, lookup_path, sizeof(lookup_path)) != 0)
+      return -1;
+    path_for_lookup = lookup_path;
+  }
+
+  if(path_lookup(path_for_lookup, out_inum, out_ip) != 0)
+    return -1;
+
+  if(resolved_out){
+    if(resolved_len <= 1 || (int)strlen(path_for_lookup) >= resolved_len)
+      return -1;
+    copy_cstr(resolved_out, resolved_len, path_for_lookup);
+  }
+
+  return 0;
+}
+
 static int dir_add_entry(uint32 dir_inum, const char *name, uint32 inum)
 {
   struct dinode dir;
   uint32 off;
   struct dirent de;
+  uint32 dir_sz;
 
   if(strlen(name) > DIRSIZ)
     return -1;
   if(read_inode(dir_inum, &dir) != 0 || dir.type != T_DIR)
     return -1;
+  dir_sz = inode_get_size(&dir);
 
-  for(off = 0; off + sizeof(de) <= dir.size; off += sizeof(de)){
+  for(off = 0; off + sizeof(de) <= dir_sz; off += sizeof(de)){
     if(inode_read_range(&dir, off, &de, sizeof(de)) != 0)
       return -1;
     if(de.inum == 0)
@@ -1076,11 +1306,13 @@ static int dir_find_entry_offset(uint32 dir_inum, const char *name, uint32 *out_
 {
   struct dinode dir;
   uint32 off;
+  uint32 dir_sz;
 
   if(read_inode(dir_inum, &dir) != 0 || dir.type != T_DIR)
     return -1;
+  dir_sz = inode_get_size(&dir);
 
-  for(off = 0; off + sizeof(struct dirent) <= dir.size; off += sizeof(struct dirent)){
+  for(off = 0; off + sizeof(struct dirent) <= dir_sz; off += sizeof(struct dirent)){
     struct dirent de;
     char dname[DIRSIZ + 1];
     if(inode_read_range(&dir, off, &de, sizeof(de)) != 0)
@@ -1103,12 +1335,14 @@ static int dir_find_entry_offset(uint32 dir_inum, const char *name, uint32 *out_
 static int dir_replace_entry_at(uint32 dir_inum, uint32 off, const struct dirent *in_de)
 {
   struct dinode dir;
+  uint32 dir_sz;
 
   if(in_de == 0)
     return -1;
   if(read_inode(dir_inum, &dir) != 0 || dir.type != T_DIR)
     return -1;
-  if(off + sizeof(*in_de) > dir.size)
+  dir_sz = inode_get_size(&dir);
+  if(off + sizeof(*in_de) > dir_sz)
     return -1;
   if(inode_write_range(&dir, off, in_de, sizeof(*in_de)) != 0)
     return -1;
@@ -1126,10 +1360,12 @@ static int dir_is_empty(uint32 dir_inum)
 {
   struct dinode dir;
   uint32 off;
+  uint32 dir_sz;
 
   if(read_inode(dir_inum, &dir) != 0 || dir.type != T_DIR)
     return -1;
-  for(off = 0; off + sizeof(struct dirent) <= dir.size; off += sizeof(struct dirent)){
+  dir_sz = inode_get_size(&dir);
+  for(off = 0; off + sizeof(struct dirent) <= dir_sz; off += sizeof(struct dirent)){
     struct dirent de;
     char dname[DIRSIZ + 1];
     if(inode_read_range(&dir, off, &de, sizeof(de)) != 0)
@@ -1169,6 +1405,16 @@ static int inode_drop_link_locked(uint32 inum, struct dinode *ip)
       return -1;
     memset(ip, 0, sizeof(*ip));
   }
+  return write_inode(inum, ip);
+}
+
+static int inode_add_link_locked(uint32 inum, struct dinode *ip)
+{
+  if(ip == 0)
+    return -1;
+  if(ip->nlink < 0 || ip->nlink >= 0x7fff)
+    return -1;
+  ip->nlink++;
   return write_inode(inum, ip);
 }
 
@@ -1220,6 +1466,7 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
   uint32 dir_inum;
   struct dinode dir;
   uint32 off;
+  uint32 dir_sz;
   int seen = 0;
   int rc = -1;
   int err = ENOENT;
@@ -1246,8 +1493,9 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
     err = ENOTDIR;
     goto out;
   }
+  dir_sz = inode_get_size(&dir);
 
-  for(off = 0; off + sizeof(struct dirent) <= dir.size; off += sizeof(struct dirent)){
+  for(off = 0; off + sizeof(struct dirent) <= dir_sz; off += sizeof(struct dirent)){
     struct dirent de;
     struct dinode ent;
     char name[DIRSIZ + 1];
@@ -1273,7 +1521,7 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
     if(type_out)
       *type_out = ent.type;
     if(size_out)
-      *size_out = ent.size;
+      *size_out = inode_get_size(&ent);
     rc = 0;
     goto out;
   }
@@ -1323,20 +1571,20 @@ int xv6fs_read_file_alloc_path(const char *path, void **out_data, uint32 *out_si
     goto out_unlock;
   }
 
-  buf = malloc(ip.size ? ip.size : 1);
+  buf = malloc(inode_get_size(&ip) ? inode_get_size(&ip) : 1);
   if(buf == 0){
     err = ENOMEM;
     rc = -1;
     goto out_unlock;
   }
-  if(ip.size > 0 && inode_read_range(&ip, 0, buf, ip.size) != 0){
+  if(inode_get_size(&ip) > 0 && inode_read_range(&ip, 0, buf, inode_get_size(&ip)) != 0){
     free(buf);
     err = EIO;
     rc = -1;
     goto out_unlock;
   }
   *out_data = buf;
-  *out_size = ip.size;
+  *out_size = inode_get_size(&ip);
   rc = 0;
 
 out_unlock:
@@ -1559,7 +1807,7 @@ int xv6fs_unlink_path(const char *path)
     err = EIO;
     goto out_fail;
   }
-  if(ip.type != T_FILE){
+  if(ip.type == T_DIR){
     err = EISDIR;
     goto out_fail;
   }
@@ -1859,6 +2107,223 @@ out_fail:
   return -1;
 }
 
+int xv6fs_link_path(const char *oldpath, const char *newpath)
+{
+  char old_abs[MAXPATH];
+  char new_abs[MAXPATH];
+  char old_lookup[MAXPATH];
+  char new_name[DIRSIZ + 1];
+  uint32 old_inum = 0;
+  uint32 new_parent = 0;
+  uint32 new_off = 0;
+  struct dinode old_ip;
+  struct dirent new_de;
+  int lookup_rc;
+  int added_entry = 0;
+  int err = EIO;
+
+  task_ctx_clear_errno();
+  if(oldpath == 0 || newpath == 0 || !g_ready){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(path_resolve(oldpath, old_abs, sizeof(old_abs)) != 0 || path_resolve(newpath, new_abs, sizeof(new_abs)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
+  if(strcmp(new_abs, "/") == 0){
+    task_ctx_set_errno(EEXIST);
+    return -1;
+  }
+  if(is_dev_node(old_abs) || is_dev_node(new_abs)){
+    task_ctx_set_errno(EPERM);
+    return -1;
+  }
+
+  vfs_lock();
+  if(path_lookup_follow_locked(old_abs, 1, old_lookup, sizeof(old_lookup), &old_inum, &old_ip) != 0){
+    err = (xv6_last_errno() == ELOOP) ? ELOOP : ENOENT;
+    goto out_fail;
+  }
+  if(old_ip.type == T_DIR){
+    err = EPERM;
+    goto out_fail;
+  }
+  if(path_parent(new_abs, &new_parent, new_name) != 0){
+    err = ENOENT;
+    goto out_fail;
+  }
+  if(strcmp(new_name, ".") == 0 || strcmp(new_name, "..") == 0){
+    err = EINVAL;
+    goto out_fail;
+  }
+
+  lookup_rc = dir_find_entry_offset(new_parent, new_name, &new_off, &new_de);
+  if(lookup_rc == 0){
+    err = EEXIST;
+    goto out_fail;
+  }
+  if(lookup_rc != 1){
+    err = EIO;
+    goto out_fail;
+  }
+
+  if(dir_add_entry(new_parent, new_name, old_inum) != 0){
+    err = ENOSPC;
+    goto out_fail;
+  }
+  added_entry = 1;
+
+  if(inode_add_link_locked(old_inum, &old_ip) != 0){
+    err = EMLINK;
+    goto out_rollback;
+  }
+
+  vfs_unlock();
+  return 0;
+
+out_rollback:
+  if(added_entry && dir_find_entry_offset(new_parent, new_name, &new_off, &new_de) == 0)
+    (void)dir_clear_entry_at(new_parent, new_off);
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
+}
+
+int xv6fs_symlink_path(const char *target, const char *linkpath)
+{
+  char target_buf[XV6_SYMLINK_TARGET_MAX];
+  char abs_path[MAXPATH];
+  char name[DIRSIZ + 1];
+  uint32 pinum = 0;
+  uint32 inum = 0;
+  uint32 target_len;
+  struct dinode ip;
+  int lookup_rc;
+  int created = 0;
+  int linked = 0;
+  int err = EIO;
+
+  task_ctx_clear_errno();
+  if(target == 0 || linkpath == 0 || !g_ready){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(copy_guest_cstr(target, target_buf, sizeof(target_buf)) != 0){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  target_len = (uint32)strlen(target_buf);
+  if(path_resolve(linkpath, abs_path, sizeof(abs_path)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
+  if(is_dev_node(abs_path)){
+    task_ctx_set_errno(EPERM);
+    return -1;
+  }
+
+  vfs_lock();
+  lookup_rc = path_lookup(abs_path, 0, 0);
+  if(lookup_rc == 0){
+    err = EEXIST;
+    goto out;
+  }
+  if(lookup_rc != 1){
+    err = EIO;
+    goto out;
+  }
+  if(path_parent(abs_path, &pinum, name) != 0){
+    err = ENOENT;
+    goto out;
+  }
+  if(strcmp(name, ".") == 0 || strcmp(name, "..") == 0){
+    err = EINVAL;
+    goto out;
+  }
+
+  if(alloc_inode(T_SYMLINK, &inum) != 0){
+    err = ENOSPC;
+    goto out;
+  }
+  created = 1;
+  if(read_inode(inum, &ip) != 0){
+    err = EIO;
+    goto out;
+  }
+  if(target_len > 0 && inode_write_range(&ip, 0, target_buf, target_len) != 0){
+    err = ENOSPC;
+    goto out;
+  }
+  if(write_inode(inum, &ip) != 0){
+    err = EIO;
+    goto out;
+  }
+  if(dir_add_entry(pinum, name, inum) != 0){
+    err = ENOSPC;
+    goto out;
+  }
+  linked = 1;
+  vfs_unlock();
+  return 0;
+
+out:
+  if(created && !linked)
+    inode_reclaim_orphan_locked(inum);
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
+}
+
+int xv6fs_readlink_path(const char *path, char *buf, uint32 bufsz)
+{
+  char abs_path[MAXPATH];
+  uint32 inum = 0;
+  uint32 size = 0;
+  uint32 copy_n = 0;
+  struct dinode ip;
+  int err = EIO;
+
+  task_ctx_clear_errno();
+  if(path == 0 || buf == 0 || bufsz == 0 || !g_ready){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
+  if(is_dev_node(abs_path)){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+
+  vfs_lock();
+  if(path_lookup(abs_path, &inum, &ip) != 0){
+    err = ENOENT;
+    goto out_fail;
+  }
+  if(ip.type != T_SYMLINK){
+    err = EINVAL;
+    goto out_fail;
+  }
+  size = inode_get_size(&ip);
+  copy_n = (size < bufsz) ? size : bufsz;
+  if(copy_n > 0 && inode_read_range(&ip, 0, buf, copy_n) != 0){
+    err = EIO;
+    goto out_fail;
+  }
+
+  vfs_unlock();
+  return (int)copy_n;
+
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
+}
+
 static int vfs_alloc_fd(void)
 {
   int i;
@@ -1993,7 +2458,9 @@ int xv6_open(const char *path, int flags)
 {
   int fd;
   int err = EIO;
+  int rc;
   char abs_path[MAXPATH];
+  char resolved_path[MAXPATH];
   char canon[MAXPATH];
   int pty_id = -1;
   uint32 inum;
@@ -2024,6 +2491,15 @@ int xv6_open(const char *path, int flags)
   g_fds[fd].flags = flags;
   g_fds[fd].group_id = 0;
   g_fds[fd].owner = xTaskGetCurrentTaskHandle();
+
+  rc = path_lookup(abs_path, &inum, &ip);
+  if(rc == 0 && ip.type == T_SYMLINK){
+    if(path_resolve_final_symlink_locked(abs_path, resolved_path, sizeof(resolved_path)) != 0){
+      err = (xv6_last_errno() == ELOOP) ? ELOOP : ENOENT;
+      goto fail;
+    }
+    copy_cstr(abs_path, sizeof(abs_path), resolved_path);
+  }
 
   if(is_dev_node(abs_path)){
     if(dev_canonical_path(abs_path, canon, sizeof(canon)) != 0){
@@ -2099,7 +2575,7 @@ int xv6_open(const char *path, int flags)
       goto fail;
     }
   } else if((flags & XV6_O_APPEND) && ip.type == T_FILE){
-    g_fds[fd].off = ip.size;
+    g_fds[fd].off = inode_get_size(&ip);
   }
   fd_group_set_off_locked(fd, g_fds[fd].off);
   vfs_unlock();
@@ -2152,7 +2628,7 @@ int xv6_lseek(int fd, int offset, int whence)
   else if(whence == 1)
     base_off = (long long)cur_off;
   else if(whence == 2)
-    base_off = (long long)ip.size;
+    base_off = (long long)inode_get_size(&ip);
   else {
     err = EINVAL;
     goto fail;
@@ -2367,13 +2843,13 @@ int xv6_read(int fd, void *buf, uint32 size)
     goto fail;
   }
   cur_off = fd_group_get_off_locked(real_fd);
-  if(cur_off >= ip.size){
+  if(cur_off >= inode_get_size(&ip)){
     vfs_unlock();
     return 0;
   }
   nread = size;
-  if(nread > ip.size - cur_off)
-    nread = ip.size - cur_off;
+  if(nread > inode_get_size(&ip) - cur_off)
+    nread = inode_get_size(&ip) - cur_off;
   if(nread > 0 && inode_read_range(&ip, cur_off, buf, nread) != 0)
     goto fail;
   fd_group_set_off_locked(real_fd, cur_off + nread);
@@ -2478,7 +2954,7 @@ int xv6_write(int fd, const void *buf, uint32 size)
   }
   cur_off = fd_group_get_off_locked(real_fd);
   if((g_fds[real_fd].flags & XV6_O_APPEND) != 0){
-    cur_off = ip.size;
+    cur_off = inode_get_size(&ip);
     fd_group_set_off_locked(real_fd, cur_off);
   }
   if(inode_write_range(&ip, cur_off, buf, size) != 0){
@@ -2553,7 +3029,75 @@ int xv6_close(int fd)
   return 0;
 }
 
+static void fill_kstat_from_inode_locked(uint32 inum, const struct dinode *ip, xv6_kstat_t *st)
+{
+  st->ino = inum;
+  st->size = inode_get_size(ip);
+  st->type = ip->type;
+  st->nlink = (uint16)ip->nlink;
+  st->mode = inode_get_mode(ip);
+  st->uid = (uint16)inode_get_uid(ip);
+  st->gid = (uint16)inode_get_gid(ip);
+}
+
 int xv6_stat_path(const char *path, xv6_kstat_t *st)
+{
+  char abs_path[MAXPATH];
+  char resolved_path[MAXPATH];
+  uint32 inum;
+  struct dinode ip;
+  int err = EIO;
+
+  task_ctx_clear_errno();
+  if(path == 0 || st == 0 || !g_ready){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
+
+  memset(st, 0, sizeof(*st));
+
+  if(is_dev_node(abs_path)){
+    st->type = T_DEVICE;
+    st->nlink = 1;
+    st->mode = (uint16)XV6_DEFAULT_DEV_MODE;
+    st->uid = 0;
+    st->gid = 0;
+    return 0;
+  }
+
+  vfs_lock();
+  if(path_resolve_final_symlink_locked(abs_path, resolved_path, sizeof(resolved_path)) != 0){
+    err = (xv6_last_errno() == ELOOP) ? ELOOP : ENOENT;
+    goto out_fail;
+  }
+  if(is_dev_node(resolved_path)){
+    st->type = T_DEVICE;
+    st->nlink = 1;
+    st->mode = (uint16)XV6_DEFAULT_DEV_MODE;
+    st->uid = 0;
+    st->gid = 0;
+    vfs_unlock();
+    return 0;
+  }
+  if(path_lookup(resolved_path, &inum, &ip) != 0){
+    err = ENOENT;
+    goto out_fail;
+  }
+  fill_kstat_from_inode_locked(inum, &ip, st);
+  vfs_unlock();
+  return 0;
+
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
+}
+
+int xv6_lstat_path(const char *path, xv6_kstat_t *st)
 {
   char abs_path[MAXPATH];
   uint32 inum;
@@ -2574,6 +3118,9 @@ int xv6_stat_path(const char *path, xv6_kstat_t *st)
   if(is_dev_node(abs_path)){
     st->type = T_DEVICE;
     st->nlink = 1;
+    st->mode = (uint16)XV6_DEFAULT_DEV_MODE;
+    st->uid = 0;
+    st->gid = 0;
     return 0;
   }
 
@@ -2583,10 +3130,7 @@ int xv6_stat_path(const char *path, xv6_kstat_t *st)
     vfs_unlock();
     return -1;
   }
-  st->ino = inum;
-  st->size = ip.size;
-  st->type = ip.type;
-  st->nlink = (uint16)ip.nlink;
+  fill_kstat_from_inode_locked(inum, &ip, st);
   vfs_unlock();
   return 0;
 }
@@ -2617,6 +3161,9 @@ int xv6_fstat(int fd, xv6_kstat_t *st)
   if(g_fds[real_fd].kind == VFD_DEV){
     st->type = T_DEVICE;
     st->nlink = 1;
+    st->mode = (uint16)XV6_DEFAULT_DEV_MODE;
+    st->uid = 0;
+    st->gid = 0;
     vfs_unlock();
     return 0;
   }
@@ -2630,10 +3177,7 @@ int xv6_fstat(int fd, xv6_kstat_t *st)
     vfs_unlock();
     return -1;
   }
-  st->ino = g_fds[real_fd].inum;
-  st->size = ip.size;
-  st->type = ip.type;
-  st->nlink = (uint16)ip.nlink;
+  fill_kstat_from_inode_locked(g_fds[real_fd].inum, &ip, st);
   vfs_unlock();
   return 0;
 }
@@ -2649,19 +3193,11 @@ int xv6_access(const char *path, int mode)
 
 int xv6_chmod(const char *path, int mode)
 {
-  xv6_kstat_t st;
-  (void)mode;
-  if(xv6_stat_path(path, &st) != 0)
-    return -1;
-  return 0;
-}
-
-int xv6_chdir(const char *path)
-{
   char abs_path[MAXPATH];
+  char resolved_path[MAXPATH];
   uint32 inum;
   struct dinode ip;
-  xv6_task_ctx_t *ctx;
+  int err = EIO;
 
   task_ctx_clear_errno();
   if(path == 0 || !g_ready){
@@ -2672,16 +3208,229 @@ int xv6_chdir(const char *path)
     task_ctx_set_errno(ENOENT);
     return -1;
   }
-  if(is_dev_node(abs_path)){
-    task_ctx_set_errno(ENOTDIR);
+  if(is_dev_node(abs_path))
+    return 0;
+
+  vfs_lock();
+  if(path_resolve_final_symlink_locked(abs_path, resolved_path, sizeof(resolved_path)) != 0){
+    err = (xv6_last_errno() == ELOOP) ? ELOOP : ENOENT;
+    goto out_fail;
+  }
+  if(is_dev_node(resolved_path)){
+    vfs_unlock();
+    return 0;
+  }
+  if(path_lookup(resolved_path, &inum, &ip) != 0){
+    err = ENOENT;
+    goto out_fail;
+  }
+
+  inode_set_mode(&ip, (uint16)mode);
+  if(write_inode(inum, &ip) != 0){
+    err = EIO;
+    goto out_fail;
+  }
+  vfs_unlock();
+  return 0;
+
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
+}
+
+int xv6_chown_path(const char *path, int owner, int group, int follow_final_nonzero)
+{
+  char abs_path[MAXPATH];
+  char lookup_path[MAXPATH];
+  uint32 inum;
+  struct dinode ip;
+  int err = EIO;
+
+  task_ctx_clear_errno();
+  if(path == 0 || !g_ready){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(owner < -1 || group < -1){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(owner > 0xffff || group > 0xffff){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
+  if(is_dev_node(abs_path))
+    return 0;
+
+  vfs_lock();
+  if(follow_final_nonzero){
+    if(path_resolve_final_symlink_locked(abs_path, lookup_path, sizeof(lookup_path)) != 0){
+      err = (xv6_last_errno() == ELOOP) ? ELOOP : ENOENT;
+      goto out_fail;
+    }
+  } else {
+    copy_cstr(lookup_path, sizeof(lookup_path), abs_path);
+  }
+
+  if(is_dev_node(lookup_path)){
+    vfs_unlock();
+    return 0;
+  }
+  if(path_lookup(lookup_path, &inum, &ip) != 0){
+    err = ENOENT;
+    goto out_fail;
+  }
+
+  inode_set_uid_gid(&ip, owner, group);
+  if(write_inode(inum, &ip) != 0){
+    err = EIO;
+    goto out_fail;
+  }
+  vfs_unlock();
+  return 0;
+
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
+}
+
+int xv6_fchmod(int fd, int mode)
+{
+  int real_fd = stdio_map_fd(fd);
+  uint32 inum;
+  struct dinode ip;
+  int err = EIO;
+
+  task_ctx_clear_errno();
+  if(real_fd < 0 || real_fd >= XV6_MAX_FD){
+    task_ctx_set_errno(EBADF);
     return -1;
   }
 
   vfs_lock();
-  if(path_lookup(abs_path, &inum, &ip) != 0 || ip.type != T_DIR){
-    task_ctx_set_errno(ENOTDIR);
+  if(!g_fds[real_fd].used){
+    err = EBADF;
+    goto out_fail;
+  }
+  if(g_fds[real_fd].kind == VFD_DEV){
     vfs_unlock();
+    return 0;
+  }
+  if(g_fds[real_fd].kind != VFD_FILE){
+    err = EBADF;
+    goto out_fail;
+  }
+  inum = g_fds[real_fd].inum;
+  if(read_inode(inum, &ip) != 0){
+    err = EIO;
+    goto out_fail;
+  }
+  inode_set_mode(&ip, (uint16)mode);
+  if(write_inode(inum, &ip) != 0){
+    err = EIO;
+    goto out_fail;
+  }
+
+  vfs_unlock();
+  return 0;
+
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
+}
+
+int xv6_fchown(int fd, int owner, int group)
+{
+  int real_fd = stdio_map_fd(fd);
+  uint32 inum;
+  struct dinode ip;
+  int err = EIO;
+
+  task_ctx_clear_errno();
+  if(real_fd < 0 || real_fd >= XV6_MAX_FD){
+    task_ctx_set_errno(EBADF);
     return -1;
+  }
+  if(owner < -1 || group < -1){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(owner > 0xffff || group > 0xffff){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+
+  vfs_lock();
+  if(!g_fds[real_fd].used){
+    err = EBADF;
+    goto out_fail;
+  }
+  if(g_fds[real_fd].kind == VFD_DEV){
+    vfs_unlock();
+    return 0;
+  }
+  if(g_fds[real_fd].kind != VFD_FILE){
+    err = EBADF;
+    goto out_fail;
+  }
+  inum = g_fds[real_fd].inum;
+  if(read_inode(inum, &ip) != 0){
+    err = EIO;
+    goto out_fail;
+  }
+  inode_set_uid_gid(&ip, owner, group);
+  if(write_inode(inum, &ip) != 0){
+    err = EIO;
+    goto out_fail;
+  }
+
+  vfs_unlock();
+  return 0;
+
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
+}
+
+int xv6_chdir(const char *path)
+{
+  char abs_path[MAXPATH];
+  char resolved_path[MAXPATH];
+  uint32 inum;
+  struct dinode ip;
+  xv6_task_ctx_t *ctx;
+  int err = EIO;
+
+  task_ctx_clear_errno();
+  if(path == 0 || !g_ready){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
+
+  vfs_lock();
+  if(path_resolve_final_symlink_locked(abs_path, resolved_path, sizeof(resolved_path)) != 0){
+    err = (xv6_last_errno() == ELOOP) ? ELOOP : ENOENT;
+    goto out_fail;
+  }
+  if(is_dev_node(resolved_path)){
+    err = ENOTDIR;
+    goto out_fail;
+  }
+  if(path_lookup(resolved_path, &inum, &ip) != 0 || ip.type != T_DIR){
+    err = ENOTDIR;
+    goto out_fail;
   }
   vfs_unlock();
 
@@ -2690,8 +3439,13 @@ int xv6_chdir(const char *path)
     task_ctx_set_errno(EIO);
     return -1;
   }
-  copy_cstr(ctx->cwd, sizeof(ctx->cwd), abs_path);
+  copy_cstr(ctx->cwd, sizeof(ctx->cwd), resolved_path);
   return 0;
+
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
 }
 
 int xv6_getcwd(char *out_path, int out_len)

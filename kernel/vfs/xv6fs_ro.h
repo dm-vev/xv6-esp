@@ -113,6 +113,7 @@ int xv6fs_read_file_alloc_path(const char *path, void **out_data, uint32 *out_si
  * - 1: directory
  * - 2: regular file
  * - 3: device
+ * - 4: symbolic link
  */
 int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_len, uint16 *type_out,
                     uint32 *size_out);
@@ -163,6 +164,31 @@ int xv6fs_rmdir_path(const char *path);
  * @return 0 on success, -1 on failure
  */
 int xv6fs_rename_path(const char *oldpath, const char *newpath);
+
+/**
+ * @brief Create hard link
+ * @param oldpath Existing path
+ * @param newpath New link path
+ * @return 0 on success, -1 on failure
+ */
+int xv6fs_link_path(const char *oldpath, const char *newpath);
+
+/**
+ * @brief Create symbolic link
+ * @param target Link target as provided by caller
+ * @param linkpath New symlink path
+ * @return 0 on success, -1 on failure
+ */
+int xv6fs_symlink_path(const char *target, const char *linkpath);
+
+/**
+ * @brief Read symlink target
+ * @param path Symlink path
+ * @param buf Output buffer
+ * @param bufsz Buffer size
+ * @return Number of bytes copied on success, -1 on failure
+ */
+int xv6fs_readlink_path(const char *path, char *buf, uint32 bufsz);
 
 /**
  * @brief Open file
@@ -281,6 +307,33 @@ int xv6_access(const char *path, int mode);
 int xv6_chmod(const char *path, int mode);
 
 /**
+ * @brief Change owner/group of path
+ * @param path File path
+ * @param owner New owner or -1 to keep
+ * @param group New group or -1 to keep
+ * @param follow_final_nonzero Follow final symlink if non-zero
+ * @return 0 on success, -1 on failure
+ */
+int xv6_chown_path(const char *path, int owner, int group, int follow_final_nonzero);
+
+/**
+ * @brief Change mode by file descriptor
+ * @param fd File descriptor
+ * @param mode New mode bits
+ * @return 0 on success, -1 on failure
+ */
+int xv6_fchmod(int fd, int mode);
+
+/**
+ * @brief Change owner/group by file descriptor
+ * @param fd File descriptor
+ * @param owner New owner or -1 to keep
+ * @param group New group or -1 to keep
+ * @return 0 on success, -1 on failure
+ */
+int xv6_fchown(int fd, int owner, int group);
+
+/**
  * @brief File metadata structure
  *
  * Contains basic file metadata returned by stat/fstat.
@@ -288,8 +341,11 @@ int xv6_chmod(const char *path, int mode);
 typedef struct {
   uint32 ino;     /**< Inode number */
   uint32 size;    /**< File size in bytes */
-  uint16 type;    /**< File type (1=dir, 2=file, 3=device) */
+  uint16 type;    /**< File type (1=dir, 2=file, 3=device, 4=symlink) */
   uint16 nlink;   /**< Number of hard links */
+  uint16 mode;    /**< Permission bits (low 12 bits) */
+  uint16 uid;     /**< Owner id */
+  uint16 gid;     /**< Group id */
 } xv6_kstat_t;
 
 /**
@@ -299,6 +355,14 @@ typedef struct {
  * @return 0 on success, -1 on failure
  */
 int xv6_stat_path(const char *path, xv6_kstat_t *st);
+
+/**
+ * @brief Get file status by path without following final symlink
+ * @param path File path
+ * @param st Buffer for metadata
+ * @return 0 on success, -1 on failure
+ */
+int xv6_lstat_path(const char *path, xv6_kstat_t *st);
 
 /**
  * @brief Get file status by descriptor
