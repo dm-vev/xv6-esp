@@ -483,11 +483,26 @@ static void set_dlerror(const char *msg)
   }
 }
 
+static uint32 path_hash32(const char *s)
+{
+  uint32 h = 2166136261u;
+  if(s == 0)
+    return h;
+  while(*s){
+    h ^= (uint8)*s++;
+    h *= 16777619u;
+  }
+  return h;
+}
+
 static const char *module_name_from_path(const char *path, char *out, int out_len)
 {
   const char *base;
   const char *dot;
-  int n;
+  int stem_len;
+  int max_stem;
+  uint32 hash;
+  char hsuf[9];
 
   if(path == 0 || out == 0 || out_len <= 1)
     return 0;
@@ -498,13 +513,22 @@ static const char *module_name_from_path(const char *path, char *out, int out_le
     return 0;
 
   dot = strrchr(base, '.');
-  n = (dot && dot > base) ? (int)(dot - base) : (int)strlen(base);
-  if(n <= 0)
+  stem_len = (dot && dot > base) ? (int)(dot - base) : (int)strlen(base);
+  if(stem_len <= 0)
     return 0;
-  if(n >= out_len)
+  max_stem = out_len - 1 - 1 - 8; /* "<stem>_<hash8>" + NUL */
+  if(max_stem < 1)
     return 0;
-  memcpy(out, base, (unsigned)n);
-  out[n] = 0;
+  if(stem_len > max_stem)
+    stem_len = max_stem;
+
+  hash = path_hash32(path);
+  snprintf(hsuf, sizeof(hsuf), "%08x", (unsigned)hash);
+
+  memcpy(out, base, (unsigned)stem_len);
+  out[stem_len] = '_';
+  memcpy(out + stem_len + 1, hsuf, 8u);
+  out[stem_len + 1 + 8] = 0;
   return out;
 }
 

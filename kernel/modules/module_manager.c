@@ -117,6 +117,18 @@ static int slot_index_by_path_locked(const char *path)
   return -1;
 }
 
+static int slot_index_by_name_locked(const char *name)
+{
+  int i;
+  if(name == 0 || name[0] == 0)
+    return -1;
+  for(i = 0; i < KMOD_MAX_TRACKED; i++){
+    if(g_slots[i].used && strcmp(g_slots[i].name, name) == 0)
+      return i;
+  }
+  return -1;
+}
+
 static int alloc_slot_locked(void)
 {
   int i;
@@ -232,10 +244,19 @@ int kmod_load_with_priority(const char *path, int priority, int *module_id_out)
   if(module_id_out)
     *module_id_out = -1;
 
+  if(path_to_module_name(path, module_name, sizeof(module_name)) != 0)
+    copy_cstr(module_name, sizeof(module_name), "module");
+
   kmod_lock();
 
   if(slot_index_by_path_locked(path) >= 0){
     set_last_error("kmod load: already loaded");
+    kmod_unlock();
+    return -1;
+  }
+
+  if(slot_index_by_name_locked(module_name) >= 0){
+    set_last_error("kmod load: module name already loaded");
     kmod_unlock();
     return -1;
   }
@@ -266,9 +287,6 @@ int kmod_load_with_priority(const char *path, int priority, int *module_id_out)
     return -1;
   }
 
-  if(path_to_module_name(path, module_name, sizeof(module_name)) != 0)
-    copy_cstr(module_name, sizeof(module_name), "module");
-
   describe_fn = (xv6_module_describe_fn_t)dlsym(handle, "xv6_module_describe");
   if(describe_fn)
     desc = describe_fn();
@@ -284,6 +302,13 @@ int kmod_load_with_priority(const char *path, int priority, int *module_id_out)
 
   if(desc && desc->name && desc->name[0])
     copy_cstr(module_name, sizeof(module_name), desc->name);
+
+  if(slot_index_by_name_locked(module_name) >= 0){
+    set_last_error("kmod load: module name already loaded");
+    (void)dlclose(handle);
+    kmod_unlock();
+    return -1;
+  }
 
   if(effective_priority == KMOD_PRIORITY_AUTO){
     if(desc)
@@ -336,6 +361,8 @@ int kmod_unload(int module_id, int force)
 {
   int idx;
   int rc;
+  int module_id_local;
+  int sym_rc;
 
   kmod_lock();
 
@@ -358,23 +385,22 @@ int kmod_unload(int module_id, int force)
     return -1;
   }
 
-  if(force)
-    (void)hostabi_export_remove_module(g_slots[idx].module_id);
-
+  module_id_local = g_slots[idx].module_id;
   rc = dlclose(g_slots[idx].handle);
-  if(rc != 0 && !force){
+  if(rc != 0){
     set_last_error("kmod unload: %s", dlerror() ? dlerror() : "dlclose failed");
     kmod_unlock();
     return -1;
   }
 
-  if(!force && hostabi_export_remove_module(g_slots[idx].module_id) != 0){
+  sym_rc = hostabi_export_remove_module(module_id_local);
+  memset(&g_slots[idx], 0, sizeof(g_slots[idx]));
+  if(sym_rc != 0){
     set_last_error("kmod unload: symbol cleanup failed");
     kmod_unlock();
     return -1;
   }
 
-  memset(&g_slots[idx], 0, sizeof(g_slots[idx]));
   set_last_error(force ? "forced" : "ok");
   kmod_unlock();
   return 0;
