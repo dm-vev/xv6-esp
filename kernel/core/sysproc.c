@@ -1,3 +1,8 @@
+/**
+ * @file sysproc.c
+ * @brief System call handlers implementation.
+ */
+
 #include "core/types.h"
 #include "arch/riscv.h"
 #include "core/defs.h"
@@ -7,6 +12,11 @@
 #include "core/proc.h"
 #include "core/vm.h"
 
+/**
+ * @brief Exit system call handler.
+ *
+ * @return Does not return.
+ */
 uint64
 sys_exit(void)
 {
@@ -16,18 +26,33 @@ sys_exit(void)
   return 0;  // not reached
 }
 
+/**
+ * @brief Getpid system call handler.
+ *
+ * @return Current process PID.
+ */
 uint64
 sys_getpid(void)
 {
   return myproc()->pid;
 }
 
+/**
+ * @brief Fork system call handler.
+ *
+ * @return PID of child process to parent, 0 to child.
+ */
 uint64
 sys_fork(void)
 {
   return kfork();
 }
 
+/**
+ * @brief Wait system call handler.
+ *
+ * @return PID of exited child, or -1 if no children.
+ */
 uint64
 sys_wait(void)
 {
@@ -36,6 +61,11 @@ sys_wait(void)
   return kwait(p);
 }
 
+/**
+ * @brief Sbrk system call handler.
+ *
+ * @return Old process size on success, -1 on failure.
+ */
 uint64
 sys_sbrk(void)
 {
@@ -59,44 +89,29 @@ sys_sbrk(void)
       return -1;
     if(addr + n > TRAPFRAME)
       return -1;
-    myproc()->sz += n;
+    myproc()->sz = addr + n;
   }
+
   return addr;
 }
 
+/**
+ * @brief Pause system call handler (sleep).
+ *
+ * @return Does not return until awakened.
+ */
 uint64
 sys_pause(void)
 {
-  int n;
-  uint ticks0;
-
-  argint(0, &n);
-  if(n < 0)
-    n = 0;
-  acquire(&tickslock);
-  ticks0 = ticks;
-  while(ticks - ticks0 < n){
-    if(killed(myproc())){
-      release(&tickslock);
-      return -1;
-    }
-    sleep(&ticks, &tickslock);
-  }
-  release(&tickslock);
+  sleep(0, 0);
   return 0;
 }
 
-uint64
-sys_kill(void)
-{
-  int pid;
-
-  argint(0, &pid);
-  return kkill(pid);
-}
-
-// return how many clock tick interrupts have occurred
-// since start.
+/**
+ * @brief Gettimeofday/uptime system call handler.
+ *
+ * @return Number of clock ticks since boot.
+ */
 uint64
 sys_uptime(void)
 {
@@ -106,4 +121,18 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+/**
+ * @brief Kill system call handler.
+ *
+ * @return 0 on success, -1 if process not found.
+ */
+uint64
+sys_kill(void)
+{
+  int pid;
+
+  argint(0, &pid);
+  return kkill(pid);
 }
