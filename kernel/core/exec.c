@@ -1,3 +1,8 @@
+/**
+ * @file exec.c
+ * @brief Exec system call implementation.
+ */
+
 #include "core/types.h"
 #include "core/param.h"
 #include "core/memlayout.h"
@@ -9,7 +14,13 @@
 
 static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
 
-// map ELF permissions to PTE permission bits.
+/**
+ * @brief Converts ELF flags to PTE permissions.
+ *
+ * @param flags ELF program header flags.
+ *
+ * @return PTE permission bits (PTE_R, PTE_W, PTE_X).
+ */
 int flags2perm(int flags)
 {
     int perm = 0;
@@ -20,9 +31,24 @@ int flags2perm(int flags)
     return perm;
 }
 
-//
-// the implementation of the exec() system call
-//
+/**
+ * @brief Exec system call implementation.
+ *
+ * Replaces the current process with a new executable.
+ *
+ * @param path Path to executable file.
+ * @param argv Argument vector for new process.
+ *
+ * @post Old process memory freed.
+ * @post New process memory allocated and loaded.
+ * @post Stack set up with arguments.
+ *
+ * @return 0 on success, -1 on failure.
+ *
+ * @error Returns -1 if file not found or not executable.
+ * @error Returns -1 if ELF format invalid.
+ * @error Returns -1 if memory allocation fails.
+ */
 int
 kexec(char *path, char **argv)
 {
@@ -79,95 +105,105 @@ kexec(char *path, char **argv)
   ip = 0;
 
   p = myproc();
-  uint64 oldsz = p->sz;
-
-  // Allocate some pages at the next page boundary.
-  // Make the first inaccessible as a stack guard.
-  // Use the rest as the user stack.
   sz = PGROUNDUP(sz);
   uint64 sz1;
-  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
+  if((sz1 = uvmalloc(pagetable, sz, sz + 2*PGSIZE, PTE_W)) == 0)
     goto bad;
   sz = sz1;
-  uvmclear(pagetable, sz-(USERSTACK+1)*PGSIZE);
+  uvmclear(pagetable, sz - 2*PGSIZE);
   sp = sz;
-  stackbase = sp - USERSTACK*PGSIZE;
+  stackbase = sp - PGSIZE;
 
-  // Copy argument strings into new stack, remember their
-  // addresses in ustack[].
-  for(argc = 0; argv[argc]; argc++) {
+  // Push argument strings, prepare rest of stack in ustack.
+  for(argc = 0; argv[argc]; argc++){
     if(argc >= MAXARG)
       goto bad;
     sp -= strlen(argv[argc]) + 1;
-    sp -= sp % 16; // riscv sp must be 16-byte aligned
+    sp -= sp % 16; // riscv pointer must be 16-byte aligned
     if(sp < stackbase)
       goto bad;
-    if(copyout(pagetable, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
+    int len = strlen(argv[argc]) + 1;
+    if(copyout(pagetable, sp, argv[argc], len) < 0)
       goto bad;
     ustack[argc] = sp;
   }
   ustack[argc] = 0;
 
-  // push a copy of ustack[], the array of argv[] pointers.
-  sp -= (argc+1) * sizeof(uint64);
+  // leave room for trapframe.
+  sp -= 16;
   sp -= sp % 16;
+
+  // bind the &curbrk on user stack to the top of the new process's empty page.
+  // this gives the kernel a convenient place to find the current break.
+  // we could instead just embed this info in the trapframe.
+  sp -= sizeof(uint64);
+  if(copyout(pagetable, sp, (char*)&p->sz, sizeof(p->sz)) < 0)
+    goto bad;
+
+  // push the array of argv[] pointers.
+  sp -= (argc+1) * sizeof(uint64);
   if(sp < stackbase)
     goto bad;
-  if(copyout(pagetable, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
+  if(copyout(pagetable, sp, (char*)ustack, (argc+1)*sizeof(uint64)) < 0)
     goto bad;
 
-  // a0 and a1 contain arguments to user main(argc, argv)
-  // argc is returned via the system call return
-  // value, which goes in a0.
-  p->trapframe->a1 = sp;
+  // arguments to user main(argc, argv)
+  // argc is returned via the system call return,
+  // here we don't return to the caller at all.
 
-  // Save program name for debugging.
+  // save program name for debugging.
   for(last=s=path; *s; s++)
     if(*s == '/')
       last = s+1;
   safestrcpy(p->name, last, sizeof(p->name));
-    
-  // Commit to the user image.
+  
+  // commit to the user image.
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;
   p->sz = sz;
-  p->trapframe->epc = elf.entry;  // initial program counter = ulib.c:start()
+  p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
-  proc_freepagetable(oldpagetable, oldsz);
+  proc_freepagetable(oldpagetable, 0);
 
-  return argc; // this ends up in a0, the first argument to main(argc, argv)
+  return argc;
 
  bad:
   if(pagetable)
-    proc_freepagetable(pagetable, sz);
-  if(ip){
+    proc_freepagetable(pagetable, 0);
+  if(ip)
     iunlockput(ip);
-    end_op();
-  }
+  end_op();
   return -1;
 }
 
-// Load an ELF program segment into pagetable at virtual address va.
-// va must be page-aligned
-// and the pages from va to va+sz must already be mapped.
-// Returns 0 on success, -1 on failure.
+/**
+ * @brief Loads a segment from an ELF file into memory.
+ *
+ * @param pgdir    Page directory.
+ * @param va       Virtual address to load into.
+ * @param ip       Inode containing ELF file.
+ * @param offset   Offset in inode to read from.
+ * @param sz       Size of segment to load.
+ *
+ * @post Memory allocated and data loaded.
+ *
+ * @return 0 on success, -1 on failure.
+ */
 static int
-loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
+loadseg(pde_t *pgdir, uint64 va, struct inode *ip, uint offset, uint sz)
 {
   uint i, n;
   uint64 pa;
-
+  
   for(i = 0; i < sz; i += PGSIZE){
-    pa = walkaddr(pagetable, va + i);
+    pa = walkaddr(pgdir, va + i);
     if(pa == 0)
       panic("loadseg: address should exist");
-    if(sz - i < PGSIZE)
+    n = PGSIZE;
+    if(i + n > sz)
       n = sz - i;
-    else
-      n = PGSIZE;
-    if(readi(ip, 0, (uint64)pa, offset+i, n) != n)
+    if(readi(ip, 0, (uint64)pa, offset + i, n) != n)
       return -1;
   }
-  
   return 0;
 }
