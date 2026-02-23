@@ -1192,7 +1192,8 @@ static int inode_read_symlink_target_locked(const struct dinode *ip, char *out, 
   return 0;
 }
 
-static int path_resolve_final_symlink_locked(const char *abs_in, char *abs_out, int out_len)
+static int path_resolve_final_symlink_locked_impl(const char *abs_in, char *abs_out, int out_len,
+                                                  int allow_missing_final_nonzero)
 {
   char cur[MAXPATH];
   int depth;
@@ -1212,8 +1213,18 @@ static int path_resolve_final_symlink_locked(const char *abs_in, char *abs_out, 
       return 0;
     }
 
-    if(path_lookup(cur, &inum, &ip) != 0)
-      return -1;
+    {
+      int rc = path_lookup(cur, &inum, &ip);
+      if(rc != 0){
+        if(rc == 1 && allow_missing_final_nonzero){
+          if((int)strlen(cur) >= out_len)
+            return -1;
+          copy_cstr(abs_out, out_len, cur);
+          return 0;
+        }
+        return -1;
+      }
+    }
     if(ip.type != T_SYMLINK){
       if((int)strlen(cur) >= out_len)
         return -1;
@@ -1245,6 +1256,11 @@ static int path_resolve_final_symlink_locked(const char *abs_in, char *abs_out, 
 
   task_ctx_set_errno(ELOOP);
   return -1;
+}
+
+static int path_resolve_final_symlink_locked(const char *abs_in, char *abs_out, int out_len)
+{
+  return path_resolve_final_symlink_locked_impl(abs_in, abs_out, out_len, 0);
 }
 
 static int path_lookup_follow_locked(const char *abs_path, int follow_final_nonzero, char *resolved_out, int resolved_len,
@@ -2396,15 +2412,19 @@ static int vfs_create_regular_file(const char *path, uint32 *out_inum)
   uint32 pinum, inum;
   char name[DIRSIZ + 1];
   struct dinode ip;
+  int lookup_rc;
 
   if(path_parent(path, &pinum, name) != 0)
     return -1;
-  if(dir_lookup_inum(pinum, name, &inum, &ip) == 0){
+  lookup_rc = dir_lookup_inum(pinum, name, &inum, &ip);
+  if(lookup_rc == 0){
     if(ip.type != T_FILE)
       return -1;
     *out_inum = inum;
     return 0;
   }
+  if(lookup_rc != 1)
+    return -1;
 
   if(alloc_inode(T_FILE, &inum) != 0)
     return -1;
@@ -2494,7 +2514,9 @@ int xv6_open(const char *path, int flags)
 
   rc = path_lookup(abs_path, &inum, &ip);
   if(rc == 0 && ip.type == T_SYMLINK){
-    if(path_resolve_final_symlink_locked(abs_path, resolved_path, sizeof(resolved_path)) != 0){
+    int allow_missing_final = ((flags & XV6_O_CREAT) != 0);
+    if(path_resolve_final_symlink_locked_impl(abs_path, resolved_path, sizeof(resolved_path), allow_missing_final) !=
+       0){
       err = (xv6_last_errno() == ELOOP) ? ELOOP : ENOENT;
       goto fail;
     }
@@ -3184,10 +3206,33 @@ int xv6_fstat(int fd, xv6_kstat_t *st)
 
 int xv6_access(const char *path, int mode)
 {
+  const int mode_r = 4;
+  const int mode_w = 2;
+  const int mode_x = 1;
+  const int mode_mask = mode_r | mode_w | mode_x;
   xv6_kstat_t st;
-  (void)mode;
+
+  task_ctx_clear_errno();
+  if((mode & ~mode_mask) != 0){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
   if(xv6_stat_path(path, &st) != 0)
     return -1;
+  if(mode == 0)
+    return 0;
+  if((mode & mode_r) != 0 && (st.mode & 0444u) == 0u){
+    task_ctx_set_errno(EACCES);
+    return -1;
+  }
+  if((mode & mode_w) != 0 && (st.mode & 0222u) == 0u){
+    task_ctx_set_errno(EACCES);
+    return -1;
+  }
+  if((mode & mode_x) != 0 && (st.mode & 0111u) == 0u){
+    task_ctx_set_errno(EACCES);
+    return -1;
+  }
   return 0;
 }
 
