@@ -1,3 +1,8 @@
+/**
+ * @file trap.c
+ * @brief Trap and interrupt handling implementation.
+ */
+
 #include "core/types.h"
 #include "core/param.h"
 #include "core/memlayout.h"
@@ -6,7 +11,14 @@
 #include "core/proc.h"
 #include "core/defs.h"
 
+/**
+ * @brief Lock protecting the ticks counter.
+ */
 struct spinlock tickslock;
+
+/**
+ * @brief Number of timer interrupts since boot.
+ */
 uint ticks;
 
 extern char trampoline[], uservec[];
@@ -14,26 +26,48 @@ extern char trampoline[], uservec[];
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
 
-extern int devintr();
+extern int devintr(void);
 
+/**
+ * @brief Initializes trap handling.
+ *
+ * @post Ticks lock initialized.
+ *
+ * @return None.
+ */
 void
 trapinit(void)
 {
   initlock(&tickslock, "time");
 }
 
-// set up to take exceptions and traps while in the kernel.
+/**
+ * @brief Sets up the kernel to handle traps.
+ *
+ * Configures the stvec register to point to kernelvec.
+ *
+ * @post stvec configured to kernelvec.
+ *
+ * @return None.
+ */
 void
 trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
 }
 
-//
-// handle an interrupt, exception, or system call from user space.
-// called from, and returns to, trampoline.S
-// return value is user satp for trampoline.S to switch to.
-//
+/**
+ * @brief Handles traps from user space.
+ *
+ * Handles system calls, device interrupts, and page faults
+ * when transitioning from user to kernel mode.
+ *
+ * @post Trapframe updated with user state.
+ * @post System call executed if trap was ecall.
+ * @post Page fault handled if applicable.
+ *
+ * @return User page table (satp) for trampoline to switch to.
+ */
 uint64
 usertrap(void)
 {
@@ -95,9 +129,18 @@ usertrap(void)
   return satp;
 }
 
-//
-// set up trapframe and control registers for a return to user space
-//
+/**
+ * @brief Prepares for return to user space.
+ *
+ * Sets up trapframe values and configures CPU registers
+ * for returning to user mode via trampoline.
+ *
+ * @post Trapframe configured for user return.
+ * @post stvec points to uservec.
+ * @post sstatus configured for user mode.
+ *
+ * @return None.
+ */
 void
 prepare_return(void)
 {
@@ -132,8 +175,21 @@ prepare_return(void)
   w_sepc(p->trapframe->epc);
 }
 
-// interrupts and exceptions from kernel code go here via kernelvec,
-// on whatever the current kernel stack is.
+/**
+ * @brief Handles traps from kernel space.
+ *
+ * Handles interrupts and exceptions that occur while
+ * executing in kernel mode.
+ *
+ * @pre Must be called from kernel mode with interrupts disabled.
+ *
+ * @post May yield CPU if timer interrupt.
+ * @post Trap registers restored.
+ *
+ * @return None.
+ *
+ * @error Panics if not from supervisor mode or interrupts enabled.
+ */
 void 
 kerneltrap()
 {
@@ -166,6 +222,17 @@ kerneltrap()
   w_sstatus(sstatus);
 }
 
+/**
+ * @brief Handles timer interrupts.
+ *
+ * Updates system tick counter and schedules next interrupt.
+ *
+ * @post Ticks counter incremented.
+ * @post Waiters woken up if needed.
+ * @post Timer interrupt requested for next tick.
+ *
+ * @return None.
+ */
 void
 clockintr()
 {
@@ -182,11 +249,15 @@ clockintr()
   w_stimecmp(r_time() + 1000000);
 }
 
-// check if it's an external interrupt or software interrupt,
-// and handle it.
-// returns 2 if timer interrupt,
-// 1 if other device,
-// 0 if not recognized.
+/**
+ * @brief Handles device interrupts.
+ *
+ * Checks for external interrupts (via PLIC) and software interrupts.
+ *
+ * @return 2 if timer interrupt.
+ * @return 1 if other device interrupt.
+ * @return 0 if not recognized.
+ */
 int
 devintr()
 {
