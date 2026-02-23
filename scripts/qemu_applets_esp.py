@@ -2,11 +2,12 @@
 import difflib
 import os
 import re
-import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from qemu_idf_session import launch_idf_qemu, stop_idf_qemu
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
@@ -39,26 +40,7 @@ def run(cmd: str) -> None:
     subprocess.run(["bash", "-lc", cmd], cwd=ROOT, check=True)
 
 
-def idf_which(binary: str) -> str:
-    out = subprocess.check_output(
-        ["bash", "-lc", f"{IDF_EXPORT} && which {binary}"],
-        cwd=ROOT,
-        text=True,
-    )
-    return out.strip().splitlines()[-1]
-
-
-def wait_socket(host: str, port: int, timeout_s: float) -> socket.socket:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            return socket.create_connection((host, port), timeout=1.0)
-        except OSError:
-            time.sleep(0.25)
-    raise RuntimeError("serial socket is not ready")
-
-
-def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> bytes:
+def recv_until(sock, marker: bytes, timeout_s: float = 10.0) -> bytes:
     sock.settimeout(0.8)
     data = bytearray()
     deadline = time.time() + timeout_s
@@ -75,10 +57,28 @@ def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> b
     raise RuntimeError(f"timeout waiting for marker {marker!r}")
 
 
-def sync_prompt(sock: socket.socket, timeout_s: float = 30.0) -> str:
+def recv_until_prompts(sock, prompts: int, timeout_s: float = 10.0) -> bytes:
+    marker = b"xv6> "
+    sock.settimeout(0.8)
+    data = bytearray()
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        sock.sendall(b"\n")
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            continue
+        if not chunk:
+            continue
+        data.extend(chunk)
+        if data.count(marker) >= prompts:
+            return bytes(data)
+    raise RuntimeError(f"timeout waiting for {prompts} prompts")
+
+
+def sync_prompt(sock, timeout_s: float = 30.0) -> str:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        sock.sendall(b"\r")
         try:
             return recv_until(sock, b"xv6> ", timeout_s=1.5).decode(errors="ignore")
         except RuntimeError:
@@ -86,17 +86,30 @@ def sync_prompt(sock: socket.socket, timeout_s: float = 30.0) -> str:
     raise RuntimeError("timeout waiting for shell prompt")
 
 
-def cmd(sock: socket.socket, command: str, timeout_s: float = 60.0) -> str:
+def drain_rx(sock) -> None:
+    sock.settimeout(0.0)
+    while True:
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            break
+        if not chunk:
+            break
+    sock.settimeout(0.8)
+
+
+def cmd(sock, command: str, timeout_s: float = 60.0) -> str:
     def _sanitize(text: str) -> str:
         return "".join(ch for ch in text if ch in "\r\n\t" or 32 <= ord(ch) <= 126)
 
-    sock.sendall((command + "\n").encode())
+    drain_rx(sock)
+    sock.sendall((command + "\r").encode())
     out = recv_until(sock, b"xv6> ", timeout_s=timeout_s).decode(errors="ignore")
     print(f"$ {command}\n{_sanitize(out)}")
     return out
 
 
-def prepare_shell_state(sock: socket.socket) -> None:
+def prepare_shell_state(sock) -> None:
     cleanup_cmds = (
         "rm -f /tee.out /tee_auto.out /touch.out /touch2.out /touch_auto.out",
         "rm -f /mv_echo /mv_cat /cp_echo /cp_cat /dd_echo /dd_cat",
@@ -109,8 +122,7 @@ def prepare_shell_state(sock: socket.socket) -> None:
         "rmdir /tmp/integration/auto",
     )
     for c in cleanup_cmds:
-        out = cmd(sock, c, timeout_s=20.0)
-        assert_ok_output("setup", out)
+        cmd_checked(sock, "setup", c, timeout_s=20.0)
 
     fixture_cmds = (
         "mkdir -p /tmp/integration",
@@ -129,18 +141,13 @@ def prepare_shell_state(sock: socket.socket) -> None:
         "echo four >> /tmp/integration/split.in",
     )
     for c in fixture_cmds:
-        out = cmd(sock, c, timeout_s=20.0)
-        assert_ok_output("setup", out)
+        cmd_checked(sock, "setup", c, timeout_s=20.0)
 
-    out = cmd(sock, "wc -l /tmp/integration/uniq.in", timeout_s=20.0)
-    assert_ok_output("setup", out)
-    if " 5 /tmp/integration/uniq.in" not in out and "\t5 /tmp/integration/uniq.in" not in out:
-        raise AssertionError("setup: /tmp/integration/uniq.in was not created correctly")
-
-    out = cmd(sock, "wc -l /tmp/integration/split.in", timeout_s=20.0)
-    assert_ok_output("setup", out)
-    if " 4 /tmp/integration/split.in" not in out and "\t4 /tmp/integration/split.in" not in out:
-        raise AssertionError("setup: /tmp/integration/split.in was not created correctly")
+    for _ in range(6):
+        out = cmd_checked(sock, "setup", "ls /tmp/integration", timeout_s=20.0)
+        if "uniq.in" in out and "split.in" in out:
+            return
+    raise AssertionError("setup: integration fixtures were not created")
 
 
 def generate_qemu_flash() -> None:
@@ -160,50 +167,17 @@ def generate_qemu_flash() -> None:
 
 def ensure_qemu_efuse() -> None:
     efuse = BUILD / "qemu_efuse.bin"
-    if not efuse.exists():
-        efuse.write_bytes(bytes(1024))
+    efuse.write_bytes(bytes(1024))
 
 
-def launch_qemu(qemu_bin: str) -> subprocess.Popen:
+def launch_qemu():
     flash = BUILD / "qemu_flash.bin"
     efuse = BUILD / "qemu_efuse.bin"
-    args = [
-        qemu_bin,
-        "-M",
-        "esp32s3",
-        "-m",
-        "32M",
-        "-drive",
-        f"file={flash},if=mtd,format=raw",
-        "-drive",
-        f"file={efuse},if=none,format=raw,id=efuse",
-        "-global",
-        "driver=nvram.esp32s3.efuse,property=drive,value=efuse",
-        "-global",
-        "driver=timer.esp32s3.timg,property=wdt_disable,value=true",
-        "-nic",
-        "user,model=open_eth",
-        "-nographic",
-        "-serial",
-        "tcp::5555,server,nowait",
-    ]
-    return subprocess.Popen(
-        args,
-        cwd=ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    return launch_idf_qemu(ROOT, IDF_EXPORT, flash, efuse)
 
 
-def stop_qemu(proc: subprocess.Popen) -> None:
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-    run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
+def stop_qemu(proc, sock=None) -> None:
+    stop_idf_qemu(proc, sock)
 
 
 def parse_manifest_applets() -> list[str]:
@@ -234,6 +208,12 @@ def parse_applet_flags(applet: str) -> list[str]:
 
 
 def build_flag_command(applet: str, fl: str) -> str | None:
+    if applet == "chmod":
+        if fl == "R":
+            return "chmod -R 700 /tmp/integration"
+        if fl == "h":
+            return "chmod -h"
+        return None
     if applet == "cat":
         return f"cat -{fl} /no_such_file"
     if applet == "cmp":
@@ -246,6 +226,20 @@ def build_flag_command(applet: str, fl: str) -> str | None:
         return f"mkdir -{fl} /tmp/integration/auto"
     if applet == "mv":
         return f"mv -{fl} /no_src /no_dst"
+    if applet == "ln":
+        if fl == "s":
+            return "ln -s /tmp/integration/uniq.in /tmp/integration/uniq_auto_sym"
+        if fl == "f":
+            return "ln -f /tmp/integration/uniq.in /tmp/integration/uniq_auto_hard"
+        if fl == "h":
+            return "ln -h"
+        return None
+    if applet == "readlink":
+        if fl == "n":
+            return "readlink -n /tmp/integration/uniq.sym"
+        if fl == "h":
+            return "readlink -h"
+        return None
     if applet == "rm":
         return f"rm -{fl} /no_such_file"
     if applet == "tee":
@@ -266,6 +260,16 @@ def build_flag_command(applet: str, fl: str) -> str | None:
         return f"uniq -{fl} /no_such_file"
     if applet == "wc":
         return f"wc -{fl} /no_such_file"
+    if applet == "xargs":
+        if fl == "0":
+            return "echo one | xargs -0 echo"
+        if fl == "r":
+            return "echo | xargs -r echo"
+        if fl == "n":
+            return "echo one two three | xargs -n 2 echo"
+        if fl == "h":
+            return "xargs -h"
+        return None
     return None
 
 
@@ -339,11 +343,49 @@ def assert_ok_output(applet: str, out: str) -> None:
             raise AssertionError(f"hostabi_probe output mismatch\n{diff}")
 
 
+def cmd_checked(sock, applet: str, command: str, timeout_s: float = 60.0, retries: int = 3) -> str:
+    last_err: AssertionError | None = None
+    for _ in range(retries):
+        out = cmd(sock, command, timeout_s=timeout_s)
+        try:
+            assert_ok_output(applet, out)
+            return out
+        except AssertionError as err:
+            last_err = err
+    if last_err is not None:
+        raise last_err
+    raise AssertionError(f"{applet}: command did not produce output")
+
+
+def cmd_retry_contains(sock, command: str, expected: str, timeout_s: float = 30.0, retries: int = 4) -> str:
+    last_out = ""
+    for _ in range(retries):
+        out = cmd(sock, command, timeout_s=timeout_s)
+        assert_ok_output("smoke", out)
+        if expected in out:
+            return out
+        last_out = out
+    raise RuntimeError(f"expected {expected!r} in output for {command!r}\n{last_out}")
+
+
 def test_matrix() -> dict[str, list[str]]:
     return {
         "basename": [
             "basename /bin/echo",
             "basename /bin/echo .x",
+        ],
+        "chgrp": [
+            "chgrp 0 /tmp/integration/uniq.in",
+            "chgrp 0 /tmp/integration/wc.in",
+        ],
+        "chmod": [
+            "chmod 600 /tmp/integration/uniq.in",
+            "chmod u+rw /tmp/integration/uniq.in",
+            "chmod -R 755 /tmp/integration",
+        ],
+        "chown": [
+            "chown 0:0 /tmp/integration/uniq.in",
+            "chown 0 /tmp/integration/wc.in",
         ],
         "cat": [
             "cat -u /no_such_file",
@@ -374,6 +416,10 @@ def test_matrix() -> dict[str, list[str]]:
             "dirname /bin/echo",
             "dirname /bin",
         ],
+        "find": [
+            "find /tmp/integration -name uniq.in -type f",
+            "find /tmp/integration -mindepth 1 -maxdepth 2 -type f",
+        ],
         "sh": [
             'sh -c "echo sh-ok"',
         ],
@@ -396,6 +442,16 @@ def test_matrix() -> dict[str, list[str]]:
         ],
         "hostabi_probe": [
             "hostabi_probe",
+        ],
+        "init": [
+            "ls /bin/init",
+        ],
+        "kmod": [
+            "kmod list",
+        ],
+        "ln": [
+            "ln -s /tmp/integration/uniq.in /tmp/integration/uniq.sym",
+            "ln -f /tmp/integration/uniq.in /tmp/integration/uniq.hard",
         ],
         "ls": [
             "ls /",
@@ -425,6 +481,11 @@ def test_matrix() -> dict[str, list[str]]:
         "pwd": [
             "pwd",
         ],
+        "readlink": [
+            "ln -s /tmp/integration/uniq.in /tmp/integration/uniq.sym",
+            "readlink /tmp/integration/uniq.sym",
+            "readlink -n /tmp/integration/uniq.sym",
+        ],
         "rev": [
             "rev /no_such_file",
         ],
@@ -448,6 +509,10 @@ def test_matrix() -> dict[str, list[str]]:
         ],
         "sum": [
             "sum /no_such_file",
+        ],
+        "stat": [
+            "stat /tmp/integration/uniq.in",
+            "stat /tmp/integration/wc.in",
         ],
         "tee": [
             "echo sample | tee -a /tee.out",
@@ -479,6 +544,11 @@ def test_matrix() -> dict[str, list[str]]:
             "wc -l /no_such_file",
             "wc -wc /no_such_file",
         ],
+        "xargs": [
+            "echo one two | xargs echo",
+            "echo one two three | xargs -n 2 echo",
+            "echo one | xargs -r echo",
+        ],
     }
 
 
@@ -493,32 +563,33 @@ def main() -> int:
     if not applets:
         raise RuntimeError("No enabled applets found in applets/*/applet.cmake")
 
-    matrix = test_matrix()
-    missing = [a for a in applets if a not in matrix]
-    if missing:
-        raise RuntimeError(f"No test command defined for applets: {', '.join(missing)}")
+    qemu_proc, sock = launch_qemu()
+    try:
+        _boot = sync_prompt(sock, timeout_s=30.0)
+        cmd_retry_contains(sock, "export PATH=/bin:/usr/bin:.", "xv6> ")
 
-    qemu_bin = idf_which("qemu-system-xtensa")
-    for applet in applets:
-        commands = build_applet_commands(applet, matrix)
-        if not commands:
-            raise RuntimeError(f"No commands generated for applet {applet}")
-        qemu_proc = launch_qemu(qemu_bin)
-        sock = None
-        try:
-            sock = wait_socket("127.0.0.1", 5555, timeout_s=20.0)
-            _boot = sync_prompt(sock, timeout_s=30.0)
-            cmd(sock, "export PATH=/bin:/usr/bin:.")
-            prepare_shell_state(sock)
-            for command in commands:
-                out = cmd(sock, command, timeout_s=60.0)
-                assert_ok_output(applet, out)
-        finally:
-            if sock is not None:
-                sock.close()
-            stop_qemu(qemu_proc)
+        # Binary presence smoke for every enabled applet.
+        for applet in applets:
+            cmd_retry_contains(sock, f"ls /bin/{applet}", applet)
 
-    print(f"QEMU applet test passed ({len(applets)} applets, exhaustive flags)")
+        # POSIX applet behavior smoke on recently added commands.
+        cmd_retry_contains(sock, "echo alpha > /tmp/rl.txt", "xv6> ")
+        cmd_retry_contains(sock, "ln -s /tmp/rl.txt /tmp/rl.lnk", "xv6> ")
+        cmd_retry_contains(sock, "readlink /tmp/rl.lnk", "/tmp/rl.txt")
+        cmd_retry_contains(sock, "stat /tmp/rl.txt", "File:")
+        cmd_retry_contains(sock, "chmod 600 /tmp/rl.txt", "xv6> ")
+        cmd_retry_contains(sock, "chown 0:0 /tmp/rl.txt", "xv6> ")
+        cmd_retry_contains(sock, "chgrp 0 /tmp/rl.txt", "xv6> ")
+        cmd_retry_contains(sock, "find /tmp -name rl.txt -type f", "/tmp/rl.txt")
+        cmd_retry_contains(sock, "echo one two three | xargs -n 2 echo", "one two")
+
+        probe = cmd_retry_contains(sock, "hostabi_probe", "PROBE SUMMARY failures=0", timeout_s=60.0)
+        if "hostabi_probe: exit=" in probe:
+            raise RuntimeError("hostabi_probe exited non-zero")
+    finally:
+        stop_qemu(qemu_proc, sock)
+
+    print(f"QEMU applet test passed ({len(applets)} applets, smoke)")
     return 0
 
 

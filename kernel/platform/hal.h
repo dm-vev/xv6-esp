@@ -22,6 +22,12 @@ void hal_console_init(void);
 int hal_console_getc(void);
 
 /**
+ * @brief Poll console for Ctrl+C without consuming other bytes
+ * @return 1 if Ctrl+C was received, 0 otherwise
+ */
+int hal_console_poll_ctrl_c(void);
+
+/**
  * @brief Put character to console
  * @param c Character to output
  */

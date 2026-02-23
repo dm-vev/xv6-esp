@@ -39,6 +39,7 @@
 #define KSH_ENV_KEY 24
 #define KSH_ENV_VAL 128
 #define KSH_BG_STACK 16384
+#define KSH_MAX_CORES 8
 
 _Static_assert(XV6_TASK_CTX_CAP >= (KSH_MAX_JOBS + 2), "XV6_TASK_CTX_CAP must cover shell + background jobs");
 _Static_assert(XV6_PIPE_CAP >= (KSH_MAX_STAGES - 1), "XV6_PIPE_CAP must cover one full pipeline");
@@ -63,6 +64,8 @@ typedef struct {
   uint32 started_ms;
   TaskHandle_t task;
   void *task_ctx;
+  int assigned_core;
+  int running_core;
   char cmd[96];
 } ksh_job_t;
 
@@ -91,6 +94,7 @@ typedef struct {
 
 static ksh_job_t g_jobs[KSH_MAX_JOBS];
 static int g_next_job_id = 1;
+static int g_next_core_hint = 0;
 static uint32 g_ulimit_ms = 0;
 static int g_ulimit_heap_kb = 0;
 static volatile int g_runtime_started = 0;
@@ -184,7 +188,9 @@ static int k_read(int fd, void *buf, size_t size);
 static int k_write(int fd, const void *buf, size_t size);
 static int k_close(int fd);
 static off_t k_lseek(int fd, off_t offset, int whence);
-extern struct _reent *__getreent(void);
+extern struct _reent *k_libc_getreent(void) __asm__("__getreent") __attribute__((weak));
+extern struct _reent k_picolibc_reent_stub_start __asm__("_picolibc_reent_stub_start") __attribute__((weak));
+extern struct _reent k_global_impure_reent __asm__("_global_impure_ptr") __attribute__((weak));
 
 static int k_host_printf(const char *fmt, ...)
 {
@@ -1327,8 +1333,43 @@ static void k_reent_set_errno(struct _reent *r, int err)
   if(err <= 0)
     err = EIO;
   errno = err;
+  #if CONFIG_LIBC_NEWLIB
   if(r)
     r->_errno = err;
+  #else
+  (void)r;
+  #endif
+}
+
+static void k_reent_clear_errno(struct _reent *r)
+{
+  errno = 0;
+  #if CONFIG_LIBC_NEWLIB
+  if(r)
+    r->_errno = 0;
+  #else
+  (void)r;
+  #endif
+}
+
+static struct _reent *k_getreent(void)
+{
+  #if CONFIG_LIBC_NEWLIB
+  return __getreent();
+  #else
+  static struct _reent fallback_reent;
+  struct _reent *r = 0;
+
+  if(k_libc_getreent)
+    r = k_libc_getreent();
+  if(r)
+    return r;
+  if((uintptr_t)&k_picolibc_reent_stub_start != 0)
+    return &k_picolibc_reent_stub_start;
+  if((uintptr_t)&k_global_impure_reent != 0)
+    return &k_global_impure_reent;
+  return &fallback_reent;
+  #endif
 }
 
 static int k_reent_finish_int(struct _reent *r, int rc)
@@ -1337,8 +1378,7 @@ static int k_reent_finish_int(struct _reent *r, int rc)
     k_reent_set_errno(r, errno);
     return -1;
   }
-  if(r)
-    r->_errno = 0;
+  k_reent_clear_errno(r);
   return rc;
 }
 
@@ -1348,8 +1388,7 @@ static _ssize_t k_reent_finish_ssize(struct _reent *r, int rc)
     k_reent_set_errno(r, errno);
     return (_ssize_t)-1;
   }
-  if(r)
-    r->_errno = 0;
+  k_reent_clear_errno(r);
   return (_ssize_t)rc;
 }
 
@@ -1360,8 +1399,7 @@ static _off_t k__lseek_r(struct _reent *r, int fd, _off_t off, int whence)
     k_reent_set_errno(r, errno);
     return (_off_t)-1;
   }
-  if(r)
-    r->_errno = 0;
+  k_reent_clear_errno(r);
   return (_off_t)rc;
 }
 
@@ -1450,8 +1488,7 @@ static int k__gettimeofday_r(struct _reent *r, struct timeval *tp, void *tzp)
     tz->tz_minuteswest = 0;
     tz->tz_dsttime = 0;
   }
-  if(r)
-    r->_errno = 0;
+  k_reent_clear_errno(r);
   return 0;
 }
 
@@ -1470,8 +1507,7 @@ static clock_t k__times_r(struct _reent *r, struct tms *buf)
     buf->tms_cutime = 0;
     buf->tms_cstime = 0;
   }
-  if(r)
-    r->_errno = 0;
+  k_reent_clear_errno(r);
   return now;
 }
 
@@ -1513,29 +1549,28 @@ static caddr_t k__sbrk_r(struct _reent *r, ptrdiff_t incr)
   }
   old = used;
   used += (size_t)incr;
-  if(r)
-    r->_errno = 0;
+  k_reent_clear_errno(r);
   return (caddr_t)(arena + old);
 }
 
 static caddr_t k_sbrk(ptrdiff_t incr)
 {
-  return k__sbrk_r(__getreent(), incr);
+  return k__sbrk_r(k_getreent(), incr);
 }
 
 static caddr_t k__sbrk(ptrdiff_t incr)
 {
-  return k__sbrk_r(__getreent(), incr);
+  return k__sbrk_r(k_getreent(), incr);
 }
 
 static int k_gettimeofday(struct timeval *tp, void *tzp)
 {
-  return k__gettimeofday_r(__getreent(), tp, tzp);
+  return k__gettimeofday_r(k_getreent(), tp, tzp);
 }
 
 static clock_t k_times(struct tms *buf)
 {
-  return k__times_r(__getreent(), buf);
+  return k__times_r(k_getreent(), buf);
 }
 
 static time_t k_time(time_t *out)
@@ -1558,7 +1593,6 @@ static void k_abort(void)
   elf_loader_host_exit(134);
 }
 
-extern struct _reent *__getreent(void);
 extern char **environ;
 
 static int k_fs_readdir_path(const char *path, int index, char *name_out, int name_out_len, uint16 *type_out,
@@ -2398,6 +2432,67 @@ static int alloc_job_id_locked(void)
   return -1;
 }
 
+static int runtime_core_count(void)
+{
+#if defined(configNUMBER_OF_CORES)
+  return (int)configNUMBER_OF_CORES;
+#elif defined(portNUM_PROCESSORS)
+  return (int)portNUM_PROCESSORS;
+#else
+  return 1;
+#endif
+}
+
+static int current_core_id(void)
+{
+  BaseType_t core = xPortGetCoreID();
+  if(core < 0 || core >= runtime_core_count())
+    return -1;
+  return (int)core;
+}
+
+static int select_job_core_locked(void)
+{
+  int i;
+  int start;
+  int core_count = runtime_core_count();
+  int loads[KSH_MAX_CORES];
+  int best_core;
+  int best_load;
+
+  if(core_count <= 1)
+    return 0;
+  if(core_count > KSH_MAX_CORES)
+    core_count = KSH_MAX_CORES;
+
+  memset(loads, 0, sizeof(loads));
+  for(i = 0; i < KSH_MAX_JOBS; i++){
+    int core;
+    if(!g_jobs[i].used || g_jobs[i].done)
+      continue;
+    core = g_jobs[i].assigned_core;
+    if(core < 0 || core >= core_count)
+      continue;
+    loads[core]++;
+  }
+
+  start = g_next_core_hint % core_count;
+  if(start < 0)
+    start = 0;
+  best_core = start;
+  best_load = loads[start];
+  for(i = 1; i < core_count; i++){
+    int c = (start + i) % core_count;
+    if(loads[c] < best_load){
+      best_load = loads[c];
+      best_core = c;
+    }
+  }
+
+  g_next_core_hint = (best_core + 1) % core_count;
+  return best_core;
+}
+
 static void reap_finished_jobs_locked(void)
 {
   int i;
@@ -2478,6 +2573,14 @@ static void job_task(void *arg)
 {
   ksh_job_task_t *t = (ksh_job_task_t *)arg;
   int exit_code = 127;
+  int running_core = current_core_id();
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  if(t->slot >= 0 && t->slot < KSH_MAX_JOBS && g_jobs[t->slot].used)
+    g_jobs[t->slot].running_core = running_core;
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
 
   if(t->cwd[0])
     (void)xv6_chdir(t->cwd);
@@ -2566,24 +2669,21 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
       return 0;
     }
 
-    if(allow_ctrl_c){
-      int c = hal_console_getc();
-      if(c == 0x03){
-        if(terminate_job_id(id, 130, JOB_REASON_KILLED) == 0){
-          puts_line("^C");
-          if(out_exit_code)
-            *out_exit_code = 130;
-          if(consume){
-            if(g_jobs_lock)
-              (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
-            slot = job_find_slot_by_id(id);
-            if(slot >= 0)
-              memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
-            if(g_jobs_lock)
-              (void)xSemaphoreGive(g_jobs_lock);
-          }
-          return 0;
+    if(allow_ctrl_c && hal_console_poll_ctrl_c()){
+      if(terminate_job_id(id, 130, JOB_REASON_KILLED) == 0){
+        puts_line("^C");
+        if(out_exit_code)
+          *out_exit_code = 130;
+        if(consume){
+          if(g_jobs_lock)
+            (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+          slot = job_find_slot_by_id(id);
+          if(slot >= 0)
+            memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
+          if(g_jobs_lock)
+            (void)xSemaphoreGive(g_jobs_lock);
         }
+        return 0;
       }
     }
 
@@ -2617,6 +2717,7 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
   int slot = -1;
   int id = 0;
   int pos = 0;
+  int assigned_core = 0;
   TaskHandle_t handle = 0;
   ksh_job_task_t *t = 0;
 
@@ -2732,6 +2833,8 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
     return -1;
   }
 
+  assigned_core = select_job_core_locked();
+
   memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
   g_jobs[slot].used = 1;
   g_jobs[slot].id = id;
@@ -2741,6 +2844,8 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
   g_jobs[slot].max_runtime_ms = max_runtime_ms;
   g_jobs[slot].started_ms = (uint32)k_ticks();
   g_jobs[slot].reason = JOB_REASON_NONE;
+  g_jobs[slot].assigned_core = assigned_core;
+  g_jobs[slot].running_core = -1;
   g_jobs[slot].task_ctx = t;
 
   for(i = 0; i < argc; i++){
@@ -2756,7 +2861,9 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
   if(g_jobs_lock)
     (void)xSemaphoreGive(g_jobs_lock);
 
-  if(xTaskCreate(job_task, "xv6_bg", KSH_BG_STACK, t, 5, &handle) != pdPASS){
+  if((runtime_core_count() > 1
+          ? xTaskCreatePinnedToCore(job_task, "xv6_bg", KSH_BG_STACK, t, 5, &handle, assigned_core)
+          : xTaskCreate(job_task, "xv6_bg", KSH_BG_STACK, t, 5, &handle)) != pdPASS){
     if(g_jobs_lock)
       (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
     memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
@@ -2791,11 +2898,12 @@ static int run_foreground_with_limits(int argc, char **argv, int in_fd, int out_
   int rc;
   int job_id = -1;
   int exit_code = 127;
+  int allow_ctrl_c = 1;
 
   rc = spawn_background_ex(argc, argv, in_fd, out_fd, err_fd, 0, 1, max_heap_kb, max_runtime_ms, &job_id);
   if(rc != 0)
     return -1;
-  rc = wait_job_id_ex(job_id, &exit_code, 1, 1);
+  rc = wait_job_id_ex(job_id, &exit_code, 1, allow_ctrl_c);
   if(rc != 0)
     return -1;
   if(exit_code == 124){
@@ -3191,9 +3299,10 @@ static int cmd_ps(void)
 {
   int i;
   int any = 0;
+  int shell_core = current_core_id();
 
-  k_printf("PID STATE EXIT REASON LIMIT(ms/kb) CMD\r\n");
-  k_printf("0 RUN - - - sh\r\n");
+  k_printf("PID STATE EXIT REASON CORE(A/R) LIMIT(ms/kb) CMD\r\n");
+  k_printf("0 RUN - - %d/%d - sh\r\n", shell_core, shell_core);
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -3201,11 +3310,12 @@ static int cmd_ps(void)
     if(!g_jobs[i].used || !g_jobs[i].user_visible)
       continue;
     if(g_jobs[i].done){
-      k_printf("%d DONE %d %s %u/%d %s\r\n", g_jobs[i].id, g_jobs[i].exit_code, job_reason_str(g_jobs[i].reason),
-               (unsigned)g_jobs[i].max_runtime_ms, g_jobs[i].max_heap_kb, g_jobs[i].cmd);
+      k_printf("%d DONE %d %s %d/%d %u/%d %s\r\n", g_jobs[i].id, g_jobs[i].exit_code, job_reason_str(g_jobs[i].reason),
+               g_jobs[i].assigned_core, g_jobs[i].running_core, (unsigned)g_jobs[i].max_runtime_ms,
+               g_jobs[i].max_heap_kb, g_jobs[i].cmd);
     } else {
-      k_printf("%d RUN - - %u/%d %s\r\n", g_jobs[i].id, (unsigned)g_jobs[i].max_runtime_ms, g_jobs[i].max_heap_kb,
-               g_jobs[i].cmd);
+      k_printf("%d RUN - - %d/%d %u/%d %s\r\n", g_jobs[i].id, g_jobs[i].assigned_core, g_jobs[i].running_core,
+               (unsigned)g_jobs[i].max_runtime_ms, g_jobs[i].max_heap_kb, g_jobs[i].cmd);
     }
     any = 1;
   }
@@ -3225,10 +3335,21 @@ static int cmd_health(void)
   int jobs_done = 0;
   int jobs_timeout = 0;
   int jobs_killed = 0;
+  int core_count = runtime_core_count();
+  int core_running[KSH_MAX_CORES];
+  int core_spread = 0;
+  char core_load[96];
+  int core_pos = 0;
   uint32 max_running_job_ms = 0;
   uint32 now = (uint32)k_ticks();
   uint64 free_heap = hal_free_heap_bytes();
   uint64 uptime_ms = k_ticks_to_ms_u64((uint64)now);
+
+  if(core_count < 1)
+    core_count = 1;
+  if(core_count > KSH_MAX_CORES)
+    core_count = KSH_MAX_CORES;
+  memset(core_running, 0, sizeof(core_running));
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -3247,6 +3368,8 @@ static int cmd_health(void)
     }
 
     jobs_running++;
+    if(g_jobs[i].assigned_core >= 0 && g_jobs[i].assigned_core < core_count)
+      core_running[g_jobs[i].assigned_core]++;
     elapsed_ms = k_ticks_to_ms_u32((uint32)(now - g_jobs[i].started_ms));
     if(elapsed_ms > max_running_job_ms)
       max_running_job_ms = elapsed_ms;
@@ -3254,12 +3377,35 @@ static int cmd_health(void)
   if(g_jobs_lock)
     (void)xSemaphoreGive(g_jobs_lock);
 
+  if(core_count > 0){
+    int min_jobs = core_running[0];
+    int max_jobs = core_running[0];
+    for(i = 1; i < core_count; i++){
+      if(core_running[i] < min_jobs)
+        min_jobs = core_running[i];
+      if(core_running[i] > max_jobs)
+        max_jobs = core_running[i];
+    }
+    core_spread = max_jobs - min_jobs;
+  }
+
+  core_load[0] = 0;
+  for(i = 0; i < core_count; i++){
+    int n = snprintf(core_load + core_pos, sizeof(core_load) - (unsigned)core_pos, "%s%d:%d", (i ? "," : ""), i,
+                     core_running[i]);
+    if(n <= 0 || core_pos + n >= (int)sizeof(core_load)){
+      core_load[sizeof(core_load) - 1] = 0;
+      break;
+    }
+    core_pos += n;
+  }
+
   k_printf(
       "health: uptime_ms=%llu free_heap_bytes=%llu jobs_used=%d jobs_running=%d jobs_done=%d jobs_timeout=%d jobs_killed=%d "
-      "max_running_job_ms=%u ulimit_ms=%u ulimit_heap_kb=%d\r\n",
+      "max_running_job_ms=%u core_load=%s core_spread=%d ulimit_ms=%u ulimit_heap_kb=%d\r\n",
       (unsigned long long)uptime_ms, (unsigned long long)free_heap, jobs_used, jobs_running, jobs_done, jobs_timeout,
       jobs_killed,
-      (unsigned)max_running_job_ms, (unsigned)g_ulimit_ms, g_ulimit_heap_kb);
+      (unsigned)max_running_job_ms, core_load, core_spread, (unsigned)g_ulimit_ms, g_ulimit_heap_kb);
   return 0;
 }
 
@@ -3906,7 +4052,7 @@ static void register_default_symbols(void)
     { "optopt", (void *)&k_optopt },
     { "optarg", (void *)&k_optarg },
     { "optreset", (void *)&k_optreset },
-    { "__getreent", (void *)__getreent },
+    { "__getreent", (void *)k_getreent },
     { "environ", (void *)&environ },
     { "__environ", (void *)&environ },
   };

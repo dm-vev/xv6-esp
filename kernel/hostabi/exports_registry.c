@@ -144,7 +144,7 @@ static int staged_has_name(const elf_host_symbol_t *staged, int n, const char *n
     return 0;
 
   for(i = n - 1; i >= 0; i--){
-    if(staged[i].name && strcmp(staged[i].name, staged[i].name) == 0)
+    if(staged[i].name && strcmp(staged[i].name, name) == 0)
       return 1;
   }
   return 0;

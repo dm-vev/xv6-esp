@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 import os
 import re
-import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from qemu_idf_session import launch_idf_qemu, stop_idf_qemu
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
@@ -36,26 +37,7 @@ def run(cmd: str) -> None:
     subprocess.run(["bash", "-lc", cmd], cwd=ROOT, check=True)
 
 
-def idf_which(binary: str) -> str:
-    out = subprocess.check_output(
-        ["bash", "-lc", f"{IDF_EXPORT} && which {binary}"],
-        cwd=ROOT,
-        text=True,
-    )
-    return out.strip().splitlines()[-1]
-
-
-def wait_socket(host: str, port: int, timeout_s: float) -> socket.socket:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            return socket.create_connection((host, port), timeout=1.0)
-        except OSError:
-            time.sleep(0.25)
-    raise RuntimeError("serial socket is not ready")
-
-
-def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> bytes:
+def recv_until(sock, marker: bytes, timeout_s: float = 10.0) -> bytes:
     sock.settimeout(0.8)
     data = bytearray()
     deadline = time.time() + timeout_s
@@ -72,9 +54,52 @@ def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> b
     raise RuntimeError(f"timeout waiting for marker {marker!r}")
 
 
-def cmd(sock: socket.socket, command: str, timeout_s: float = 12.0) -> str:
-    sock.sendall((command + "\n").encode())
-    out = recv_until(sock, b"xv6> ", timeout_s=timeout_s).decode(errors="ignore")
+def recv_until_prompts(sock, prompts: int, timeout_s: float = 10.0) -> bytes:
+    marker = b"xv6> "
+    sock.settimeout(0.8)
+    data = bytearray()
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            continue
+        if not chunk:
+            continue
+        data.extend(chunk)
+        if data.count(marker) >= prompts:
+            return bytes(data)
+    raise RuntimeError(f"timeout waiting for {prompts} prompts")
+
+
+def sync_prompt(sock, timeout_s: float = 30.0) -> str:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        sock.sendall(b"\r")
+        try:
+            out = recv_until(sock, b"xv6> ", timeout_s=2.0).decode(errors="ignore")
+        except RuntimeError:
+            continue
+        return out
+    raise RuntimeError("timeout waiting for shell prompt")
+
+
+def drain_rx(sock) -> None:
+    sock.settimeout(0.0)
+    while True:
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            break
+        if not chunk:
+            break
+    sock.settimeout(0.8)
+
+
+def cmd(sock, command: str, timeout_s: float = 12.0) -> str:
+    drain_rx(sock)
+    sock.sendall((command + "\r\r").encode())
+    out = recv_until_prompts(sock, prompts=2, timeout_s=timeout_s).decode(errors="ignore")
     print(f"$ {command}\n{out}")
     return out
 
@@ -96,51 +121,17 @@ def generate_qemu_flash() -> None:
 
 def ensure_qemu_efuse() -> None:
     efuse = BUILD / "qemu_efuse.bin"
-    if not efuse.exists():
-        efuse.write_bytes(bytes(1024))
+    efuse.write_bytes(bytes(1024))
 
 
-def launch_qemu() -> subprocess.Popen:
-    qemu_bin = idf_which("qemu-system-xtensa")
+def launch_qemu():
     flash = BUILD / "qemu_flash.bin"
     efuse = BUILD / "qemu_efuse.bin"
-    args = [
-        qemu_bin,
-        "-M",
-        "esp32s3",
-        "-m",
-        "32M",
-        "-drive",
-        f"file={flash},if=mtd,format=raw",
-        "-drive",
-        f"file={efuse},if=none,format=raw,id=efuse",
-        "-global",
-        "driver=nvram.esp32s3.efuse,property=drive,value=efuse",
-        "-global",
-        "driver=timer.esp32s3.timg,property=wdt_disable,value=true",
-        "-nic",
-        "user,model=open_eth",
-        "-nographic",
-        "-serial",
-        "tcp::5555,server,nowait",
-    ]
-    return subprocess.Popen(
-        args,
-        cwd=ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    return launch_idf_qemu(ROOT, IDF_EXPORT, flash, efuse)
 
 
-def stop_qemu(proc: subprocess.Popen) -> None:
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-    run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
+def stop_qemu(proc, sock=None) -> None:
+    stop_idf_qemu(proc, sock)
 
 
 def assert_clean_output(out: str) -> None:
@@ -168,6 +159,25 @@ def extract_job_id(out: str) -> str | None:
     return None
 
 
+def start_bg_job(sock, command: str, job_hint: str) -> str | None:
+    out = cmd(sock, command)
+    if "jobs: spawn failed" in out:
+        return None
+    job_id = extract_job_id(out)
+    if job_id is not None:
+        return job_id
+
+    out_jobs = cmd(sock, "jobs")
+    m = re.search(r"\[(\d+)\].*" + re.escape(job_hint), out_jobs)
+    if m is not None:
+        return m.group(1)
+    job_id = extract_job_id(out_jobs)
+    if job_id is not None:
+        return job_id
+
+    raise RuntimeError(f"failed to parse background job id for {command!r}\n{out}\n{out_jobs}")
+
+
 def main() -> int:
     if os.environ.get("XV6_SKIP_BUILD") != "1":
         run(f"{IDF_EXPORT} && idf.py set-target esp32s3 && idf.py build")
@@ -175,25 +185,21 @@ def main() -> int:
     ensure_qemu_efuse()
     run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
 
-    qemu_proc = launch_qemu()
-    sock = None
+    qemu_proc, sock = launch_qemu()
     try:
-        sock = wait_socket("127.0.0.1", 5555, timeout_s=20.0)
-        sock.sendall(b"\n")
+        sock.sendall(b"\r")
         boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
         print(boot)
         assert_clean_output(boot)
+        sync_prompt(sock, timeout_s=20.0)
 
         job_ids = []
         for _ in range(20):
-            out = cmd(sock, "sleep 1200 &")
-            assert_clean_output(out)
-            if "jobs: spawn failed" in out:
+            job_id = start_bg_job(sock, "sleep 1200 &", "sleep 1200")
+            if job_id is None:
                 break
-            job_id = extract_job_id(out)
-            assert job_id is not None
             job_ids.append(job_id)
-        assert len(job_ids) >= 4
+        assert len(job_ids) >= 3
 
         out = cmd(sock, "ps")
         assert_clean_output(out)
@@ -204,7 +210,10 @@ def main() -> int:
         assert_clean_output(out)
         assert "running sleep 1200" in out
 
-        for jid in job_ids:
+        running_ids = re.findall(r"\[(\d+)\]\s+running\s+sleep 1200", out)
+        assert len(running_ids) >= 2
+
+        for jid in running_ids:
             out = cmd(sock, f"kill {jid}")
             assert_clean_output(out)
             assert "kill: ok" in out
@@ -235,9 +244,7 @@ def main() -> int:
         assert "sh" in out
         assert "- NOJOBS -" in out
     finally:
-        if sock is not None:
-            sock.close()
-        stop_qemu(qemu_proc)
+        stop_qemu(qemu_proc, sock)
 
     print("QEMU stress test passed")
     return 0

@@ -4,10 +4,7 @@
 #include "esp_rom_sys.h"
 #include "esp_system.h"
 #include "esp_timer.h"
-#include "driver/uart.h"
-#if CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
-#include "driver/usb_serial_jtag.h"
-#endif
+#include "hal/uart_ll.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -22,68 +19,77 @@
  * - System control
  */
 
-#define XV6_CONSOLE_UART UART_NUM_0
-#define XV6_CONSOLE_RX_BUF_SIZE 256
-#define XV6_CONSOLE_TX_BUF_SIZE 1024
-#if CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
-static int g_usb_serial_jtag_ready;
-#endif
+#define XV6_CONSOLE_PUSHBACK_CAP 128
+static uint8 g_console_pushback[XV6_CONSOLE_PUSHBACK_CAP];
+static uint16 g_console_pushback_r;
+static uint16 g_console_pushback_w;
+static uint16 g_console_pushback_n;
 
-void hal_console_init(void)
+static int hal_console_pop_pushback(void)
 {
-  const uart_config_t cfg = {
-    .baud_rate = 115200,
-    .data_bits = UART_DATA_8_BITS,
-    .parity = UART_PARITY_DISABLE,
-    .stop_bits = UART_STOP_BITS_1,
-    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-    .source_clk = UART_SCLK_DEFAULT,
-  };
-
-  (void)uart_driver_install(XV6_CONSOLE_UART, XV6_CONSOLE_RX_BUF_SIZE, XV6_CONSOLE_TX_BUF_SIZE, 0, 0, 0);
-  (void)uart_param_config(XV6_CONSOLE_UART, &cfg);
-  (void)uart_set_pin(XV6_CONSOLE_UART, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE,
-                     UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-
-#if CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
-  if(!usb_serial_jtag_is_driver_installed()){
-    usb_serial_jtag_driver_config_t usj_cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
-    if(usb_serial_jtag_driver_install(&usj_cfg) == ESP_OK)
-      g_usb_serial_jtag_ready = 1;
-  } else {
-    g_usb_serial_jtag_ready = 1;
-  }
-#endif
+  int out;
+  if(g_console_pushback_n == 0)
+    return -1;
+  out = (int)g_console_pushback[g_console_pushback_r];
+  g_console_pushback_r = (uint16)((g_console_pushback_r + 1u) % XV6_CONSOLE_PUSHBACK_CAP);
+  g_console_pushback_n--;
+  return out;
 }
 
-int hal_console_getc(void)
+static void hal_console_pushback_byte(uint8 c)
 {
+  if(g_console_pushback_n >= XV6_CONSOLE_PUSHBACK_CAP)
+    return;
+  g_console_pushback[g_console_pushback_w] = c;
+  g_console_pushback_w = (uint16)((g_console_pushback_w + 1u) % XV6_CONSOLE_PUSHBACK_CAP);
+  g_console_pushback_n++;
+}
+
+static int hal_console_getc_hw(void)
+{
+  uart_dev_t *hw = UART_LL_GET_HW(0);
   uint8 ch = 0;
-  size_t uart_avail = 0;
-
-  if(uart_get_buffered_data_len(XV6_CONSOLE_UART, &uart_avail) == ESP_OK && uart_avail > 0){
-    if(uart_read_bytes(XV6_CONSOLE_UART, &ch, 1, 0) == 1)
-      return (int)ch;
+  if(uart_ll_get_rxfifo_len(hw) > 0){
+    uart_ll_read_rxfifo(hw, &ch, 1);
+    return (int)ch;
   }
-
-#if CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
-  if(g_usb_serial_jtag_ready && usb_serial_jtag_is_connected()){
-    if(usb_serial_jtag_read_bytes(&ch, 1, 0) == 1)
-      return (int)ch;
-  }
-#endif
 
   return -1;
 }
 
+void hal_console_init(void)
+{
+  g_console_pushback_r = 0;
+  g_console_pushback_w = 0;
+  g_console_pushback_n = 0;
+}
+
+int hal_console_getc(void)
+{
+  int c = hal_console_pop_pushback();
+  if(c >= 0)
+    return c;
+  return hal_console_getc_hw();
+}
+
+int hal_console_poll_ctrl_c(void)
+{
+  int c = hal_console_getc_hw();
+  if(c < 0)
+    return 0;
+  if(c == 0x03)
+    return 1;
+  hal_console_pushback_byte((uint8)c);
+  return 0;
+}
+
 void hal_console_putc(int c)
 {
+  uart_dev_t *hw = UART_LL_GET_HW(0);
   const uint8 ch = (uint8)c;
-  (void)uart_write_bytes(XV6_CONSOLE_UART, (const char *)&ch, 1);
-#if CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
-  if(g_usb_serial_jtag_ready && usb_serial_jtag_is_connected())
-    (void)usb_serial_jtag_write_bytes(&ch, 1, 0);
-#endif
+  while(uart_ll_get_txfifo_len(hw) == 0){
+  }
+  uart_ll_write_txfifo(hw, &ch, 1);
 }
 
 void hal_timer_init(void)

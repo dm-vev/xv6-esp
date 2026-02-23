@@ -5,6 +5,11 @@ import subprocess
 from pathlib import Path
 
 VALID_C_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+BLOCKED_SYMBOLS = {
+    # In ESP-IDF + picolibc this is a TLS-backed object from esp_libc.
+    # Exporting it as a plain address causes TLS/non-TLS linker mismatch.
+    "errno",
+}
 
 
 def collect_symbols(nm_bin: str, libs: list[str]) -> list[str]:
@@ -23,6 +28,8 @@ def collect_symbols(nm_bin: str, libs: list[str]) -> list[str]:
         if sym_type not in {"T", "D", "B", "R", "W", "V"}:
             continue
         if not VALID_C_IDENT.match(name):
+            continue
+        if name in BLOCKED_SYMBOLS:
             continue
         symbols.add(name)
     return sorted(symbols)

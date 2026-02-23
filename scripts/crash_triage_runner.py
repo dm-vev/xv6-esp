@@ -5,9 +5,11 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -51,7 +53,10 @@ def main() -> int:
 
     ts = time.strftime("%Y%m%d-%H%M%S")
     root = Path(args.out_dir).resolve()
-    run_dir = root / f"{ts}-{args.name}"
+    run_name = f"{ts}-{args.name}"
+    stage_root = Path(tempfile.mkdtemp(prefix="xv6-triage-")).resolve()
+    run_dir = stage_root / run_name
+    final_run_dir = root / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "output.log"
     cmd_path = run_dir / "command.txt"
@@ -59,7 +64,7 @@ def main() -> int:
 
     cmd_path.write_text(" ".join(shlex.quote(c) for c in cmd) + "\n", encoding="utf-8")
 
-    print(f"[triage] step={args.name} artifacts={run_dir}")
+    print(f"[triage] step={args.name} artifacts={final_run_dir}")
     started = time.time()
     crash_marker = ""
     returncode = 0
@@ -108,14 +113,20 @@ def main() -> int:
         "returncode": returncode,
         "crash_marker": crash_marker or None,
         "ok": returncode == 0 and not crash_marker,
-        "log_file": str(log_path),
+        "log_file": str(final_run_dir / "output.log"),
     }
     result_path.write_text(json.dumps(result, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 
+    final_run_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("output.log", "command.txt", "result.json"):
+        src = run_dir / name
+        if src.exists():
+            shutil.copy2(src, final_run_dir / name)
+
     if returncode != 0:
-        print(f"[triage] step failed rc={returncode}; logs: {log_path}")
+        print(f"[triage] step failed rc={returncode}; logs: {final_run_dir / 'output.log'}")
     else:
-        print(f"[triage] step passed; logs: {log_path}")
+        print(f"[triage] step passed; logs: {final_run_dir / 'output.log'}")
     return returncode
 
 

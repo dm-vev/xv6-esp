@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 import os
 import re
-import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from qemu_idf_session import launch_idf_qemu, stop_idf_qemu
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
@@ -36,26 +37,7 @@ def run(cmd: str) -> None:
     subprocess.run(["bash", "-lc", cmd], cwd=ROOT, check=True)
 
 
-def idf_which(binary: str) -> str:
-    out = subprocess.check_output(
-        ["bash", "-lc", f"{IDF_EXPORT} && which {binary}"],
-        cwd=ROOT,
-        text=True,
-    )
-    return out.strip().splitlines()[-1]
-
-
-def wait_socket(host: str, port: int, timeout_s: float) -> socket.socket:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            return socket.create_connection((host, port), timeout=1.0)
-        except OSError:
-            time.sleep(0.25)
-    raise RuntimeError("serial socket is not ready")
-
-
-def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> bytes:
+def recv_until(sock, marker: bytes, timeout_s: float = 10.0) -> bytes:
     sock.settimeout(0.8)
     data = bytearray()
     deadline = time.time() + timeout_s
@@ -72,9 +54,52 @@ def recv_until(sock: socket.socket, marker: bytes, timeout_s: float = 10.0) -> b
     raise RuntimeError(f"timeout waiting for marker {marker!r}")
 
 
-def cmd(sock: socket.socket, command: str, timeout_s: float = 12.0, verbose: bool = False) -> str:
-    sock.sendall((command + "\n").encode())
-    out = recv_until(sock, b"xv6> ", timeout_s=timeout_s).decode(errors="ignore")
+def recv_until_prompts(sock, prompts: int, timeout_s: float = 10.0) -> bytes:
+    marker = b"xv6> "
+    sock.settimeout(0.8)
+    data = bytearray()
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            continue
+        if not chunk:
+            continue
+        data.extend(chunk)
+        if data.count(marker) >= prompts:
+            return bytes(data)
+    raise RuntimeError(f"timeout waiting for {prompts} prompts")
+
+
+def sync_prompt(sock, timeout_s: float = 30.0) -> str:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        sock.sendall(b"\r")
+        try:
+            out = recv_until(sock, b"xv6> ", timeout_s=2.0).decode(errors="ignore")
+        except RuntimeError:
+            continue
+        return out
+    raise RuntimeError("timeout waiting for shell prompt")
+
+
+def drain_rx(sock) -> None:
+    sock.settimeout(0.0)
+    while True:
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            break
+        if not chunk:
+            break
+    sock.settimeout(0.8)
+
+
+def cmd(sock, command: str, timeout_s: float = 12.0, verbose: bool = False) -> str:
+    drain_rx(sock)
+    sock.sendall((command + "\r\r").encode())
+    out = recv_until_prompts(sock, prompts=2, timeout_s=timeout_s).decode(errors="ignore")
     if verbose:
         print(f"$ {command}\n{out}")
     return out
@@ -97,51 +122,17 @@ def generate_qemu_flash() -> None:
 
 def ensure_qemu_efuse() -> None:
     efuse = BUILD / "qemu_efuse.bin"
-    if not efuse.exists():
-        efuse.write_bytes(bytes(1024))
+    efuse.write_bytes(bytes(1024))
 
 
-def launch_qemu() -> subprocess.Popen:
-    qemu_bin = idf_which("qemu-system-xtensa")
+def launch_qemu():
     flash = BUILD / "qemu_flash.bin"
     efuse = BUILD / "qemu_efuse.bin"
-    args = [
-        qemu_bin,
-        "-M",
-        "esp32s3",
-        "-m",
-        "32M",
-        "-drive",
-        f"file={flash},if=mtd,format=raw",
-        "-drive",
-        f"file={efuse},if=none,format=raw,id=efuse",
-        "-global",
-        "driver=nvram.esp32s3.efuse,property=drive,value=efuse",
-        "-global",
-        "driver=timer.esp32s3.timg,property=wdt_disable,value=true",
-        "-nic",
-        "user,model=open_eth",
-        "-nographic",
-        "-serial",
-        "tcp::5555,server,nowait",
-    ]
-    return subprocess.Popen(
-        args,
-        cwd=ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    return launch_idf_qemu(ROOT, IDF_EXPORT, flash, efuse)
 
 
-def stop_qemu(proc: subprocess.Popen) -> None:
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
-    run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
+def stop_qemu(proc, sock=None) -> None:
+    stop_idf_qemu(proc, sock)
 
 
 def parse_free_heap(out: str) -> int:
@@ -165,7 +156,19 @@ def assert_clean_output(out: str) -> None:
             raise RuntimeError(f"detected failure marker: {marker}")
 
 
-def read_free_heap_or_none(sock: socket.socket) -> int | None:
+def cmd_expect(sock, command: str, expected: str, timeout_s: float = 12.0, retries: int = 3) -> str:
+    last_out = ""
+    for attempt in range(retries):
+        out = cmd(sock, command, timeout_s=timeout_s)
+        assert_clean_output(out)
+        if expected in out:
+            return out
+        last_out = out
+        sync_prompt(sock, timeout_s=5.0)
+    raise AssertionError(f"expected {expected!r} in output for command {command!r}\n{last_out}")
+
+
+def read_free_heap_or_none(sock) -> int | None:
     out = cmd(sock, "mem", verbose=True)
     if "exec: command not found" in out:
         print("mem command is unavailable; skipping heap drift check")
@@ -185,32 +188,25 @@ def main() -> int:
     ensure_qemu_efuse()
     run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
 
-    qemu_proc = launch_qemu()
-    sock = None
+    qemu_proc, sock = launch_qemu()
     try:
-        sock = wait_socket("127.0.0.1", 5555, timeout_s=20.0)
-        sock.sendall(b"\n")
+        sock.sendall(b"\r")
         boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
         print(boot)
+        sync_prompt(sock, timeout_s=20.0)
 
         start_mem = read_free_heap_or_none(sock)
         total_cmds = 1200
 
         for i in range(total_cmds):
             if i % 4 == 0:
-                out = cmd(sock, "head -1 /etc/rc")
-                assert "export PATH=" in out
+                out = cmd_expect(sock, "head -1 /etc/rc", "export PATH=", timeout_s=12.0)
             elif i % 4 == 1:
-                out = cmd(sock, "cat /home/README > /tmp/soak.txt")
-                assert "xv6> " in out
+                out = cmd_expect(sock, "cat /home/README > /tmp/soak.txt", "xv6> ", timeout_s=12.0)
             elif i % 4 == 2:
-                out = cmd(sock, "wc -c /tmp/soak.txt")
-                assert "/tmp/soak.txt" in out
+                out = cmd_expect(sock, "wc -c /tmp/soak.txt", "/tmp/soak.txt", timeout_s=12.0)
             else:
-                out = cmd(sock, "echo abc | tr a A")
-                assert "Abc" in out
-
-            assert_clean_output(out)
+                out = cmd_expect(sock, "echo abc | tr a A", "Abc", timeout_s=12.0)
 
             if (i + 1) % 200 == 0:
                 print(f"soak progress: {i + 1}/{total_cmds}")
@@ -228,9 +224,7 @@ def main() -> int:
                 print(f"heap drift: {drift} bytes")
                 assert drift < 32768
     finally:
-        if sock is not None:
-            sock.close()
-        stop_qemu(qemu_proc)
+        stop_qemu(qemu_proc, sock)
 
     print("QEMU soak test passed")
     return 0
