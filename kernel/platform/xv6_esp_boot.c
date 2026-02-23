@@ -4,8 +4,17 @@
 
 #include "platform/esp_flash_disk.h"
 #include "platform/hal.h"
-#include "shell/shell_runtime.h"
+#include "runtime/shell_runtime.h"
 #include "vfs/xv6fs_ro.h"
+
+/**
+ * @file xv6_esp_boot.c
+ * @brief xv6 ESP32 boot and initialization
+ *
+ * This file handles the xv6 kernel initialization on ESP32 platform.
+ * It coordinates loading the filesystem image, initializing VFS,
+ * loading kernel modules, and starting the shell.
+ */
 
 static const char *TAG = "xv6_boot";
 
@@ -52,15 +61,15 @@ void xv6_boot(void)
     return;
   }
   log_stage("shell_runtime_init_ok");
-  rc = shell_runtime_bootstrap("/bin/sh");
+  rc = shell_runtime_bootstrap("/bin/init");
   if(rc != 0){
-    ESP_LOGE(TAG, "failed to bootstrap /bin/sh");
-    log_stage("shell_bootstrap_failed");
+    ESP_LOGE(TAG, "failed to bootstrap /bin/init");
+    log_stage("init_bootstrap_failed");
     hal_reboot();
     return;
   }
-  ESP_LOGI(TAG, "shell bootstrap returned unexpectedly duration_ms=%llu",
+  ESP_LOGI(TAG, "init returned unexpectedly duration_ms=%llu",
            (unsigned long long)((hal_ticks() - boot_start_ticks) * 10ull));
-  log_stage("shell_bootstrap_returned");
+  log_stage("init_returned");
   hal_reboot();
 }

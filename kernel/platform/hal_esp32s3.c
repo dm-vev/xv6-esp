@@ -11,6 +11,17 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+/**
+ * @file hal_esp32s3.c
+ * @brief Hardware Abstraction Layer for ESP32-S3
+ *
+ * Provides platform-specific implementations for:
+ * - Console I/O (UART/USB)
+ * - Time and delays
+ * - Memory management
+ * - System control
+ */
+
 #define XV6_CONSOLE_UART UART_NUM_0
 #define XV6_CONSOLE_RX_BUF_SIZE 256
 #define XV6_CONSOLE_TX_BUF_SIZE 1024

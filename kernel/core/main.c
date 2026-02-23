@@ -4,6 +4,15 @@
 #include "arch/riscv.h"
 #include "core/defs.h"
 
+/**
+ * @file main.c
+ * @brief Kernel main entry point
+ *
+ * Main entry point called from start(). Initializes all kernel
+ * subsystems including console, memory allocator, VFS, process
+ * table, and scheduler. Runs only on CPU 0.
+ */
+
 volatile static int started = 0;
 
 // start() jumps here in supervisor mode on all CPUs.

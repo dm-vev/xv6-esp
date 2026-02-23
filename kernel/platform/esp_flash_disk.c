@@ -8,6 +8,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+/**
+ * @file esp_flash_disk.c
+ * @brief ESP32 flash-based disk implementation
+ *
+ * Implements a block device interface using ESP32's flash partition.
+ * Provides read/write/erase operations for the xv6 filesystem
+ * using the ESP-IDF partition API.
+ */
+
 static const char *TAG = "xv6_flash_disk";
 static const char *XV6_PARTITION_LABEL = "xv6fs";
 static const uint32 XV6_FLASH_ERASE_SIZE = 4096U;

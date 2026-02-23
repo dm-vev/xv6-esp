@@ -4,6 +4,14 @@
 #include "arch/riscv.h"
 #include "core/defs.h"
 
+/**
+ * @file start.c
+ * @brief Kernel startup code for RISC-V
+ *
+ * Entry point from boot ROM. Sets up stack, initializes timer,
+ * and jumps to main() in supervisor mode.
+ */
+
 void main();
 void timerinit();
 
