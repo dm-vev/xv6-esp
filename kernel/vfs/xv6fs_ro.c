@@ -1159,6 +1159,10 @@ int xv6fs_ro_init(void)
     g_vfs_lock = xSemaphoreCreateMutex();
   if(g_ctx_lock == 0)
     g_ctx_lock = xSemaphoreCreateMutex();
+  if(g_vfs_lock == 0 || g_ctx_lock == 0){
+    ESP_LOGE(TAG, "mutex init failed");
+    return -1;
+  }
   memset(&g_sb, 0, sizeof(g_sb));
 
   if(read_block(1, blk) != 0)
@@ -1196,21 +1200,39 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
   uint32 off;
   int seen = 0;
   int rc = -1;
+  int err = ENOENT;
 
-  if(index < 0 || name_out == 0 || name_out_len <= 1 || !g_ready)
+  task_ctx_clear_errno();
+  if(index < 0 || name_out == 0 || name_out_len <= 1){
+    task_ctx_set_errno(EINVAL);
     return -1;
-  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0)
+  }
+  if(!g_ready){
+    task_ctx_set_errno(ENODEV);
     return -1;
+  }
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
   vfs_lock();
-  if(path_lookup(abs_path, &dir_inum, &dir) != 0 || dir.type != T_DIR)
+  if(path_lookup(abs_path, &dir_inum, &dir) != 0){
+    err = ENOENT;
     goto out;
+  }
+  if(dir.type != T_DIR){
+    err = ENOTDIR;
+    goto out;
+  }
 
   for(off = 0; off + sizeof(struct dirent) <= dir.size; off += sizeof(struct dirent)){
     struct dirent de;
     struct dinode ent;
     char name[DIRSIZ + 1];
-    if(inode_read_range(&dir, off, &de, sizeof(de)) != 0)
+    if(inode_read_range(&dir, off, &de, sizeof(de)) != 0){
+      err = EIO;
       goto out;
+    }
     if(de.inum == 0)
       continue;
     memset(name, 0, sizeof(name));
@@ -1222,8 +1244,10 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
 
     strncpy(name_out, name, name_out_len - 1);
     name_out[name_out_len - 1] = 0;
-    if(read_inode(de.inum, &ent) != 0)
+    if(read_inode(de.inum, &ent) != 0){
+      err = EIO;
       goto out;
+    }
     if(type_out)
       *type_out = ent.type;
     if(size_out)
@@ -1234,6 +1258,8 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
 
 out:
   vfs_unlock();
+  if(rc != 0)
+    task_ctx_set_errno(err);
   return rc;
 }
 
@@ -1244,24 +1270,46 @@ int xv6fs_read_file_alloc_path(const char *path, void **out_data, uint32 *out_si
   struct dinode ip;
   void *buf;
   int rc = -1;
+  int err = EIO;
 
-  if(path == 0 || out_data == 0 || out_size == 0 || !g_ready)
+  task_ctx_clear_errno();
+  if(path == 0 || out_data == 0 || out_size == 0){
+    task_ctx_set_errno(EINVAL);
     return -1;
-  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0)
+  }
+  if(!g_ready){
+    task_ctx_set_errno(ENODEV);
     return -1;
-  if(is_dev_node(abs_path))
-    return dev_read_alloc(abs_path, out_data, out_size);
+  }
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
+  if(is_dev_node(abs_path)){
+    rc = dev_read_alloc(abs_path, out_data, out_size);
+    if(rc != 0)
+      task_ctx_set_errno(EIO);
+    return rc;
+  }
   vfs_lock();
-  if(path_lookup(abs_path, &inum, &ip) != 0 || ip.type != T_FILE)
+  if(path_lookup(abs_path, &inum, &ip) != 0){
+    err = ENOENT;
     goto out_unlock;
+  }
+  if(ip.type != T_FILE){
+    err = EISDIR;
+    goto out_unlock;
+  }
 
   buf = malloc(ip.size ? ip.size : 1);
   if(buf == 0){
+    err = ENOMEM;
     rc = -1;
     goto out_unlock;
   }
   if(ip.size > 0 && inode_read_range(&ip, 0, buf, ip.size) != 0){
     free(buf);
+    err = EIO;
     rc = -1;
     goto out_unlock;
   }
@@ -1271,6 +1319,8 @@ int xv6fs_read_file_alloc_path(const char *path, void **out_data, uint32 *out_si
 
 out_unlock:
   vfs_unlock();
+  if(rc != 0)
+    task_ctx_set_errno(err);
   return rc;
 }
 
@@ -1369,43 +1419,79 @@ int xv6fs_write_file_path(const char *path, const void *data, uint32 size)
   int lookup_rc;
   int created = 0;
   int linked = 0;
+  int err = EIO;
 
-  if(path == 0 || data == 0 || !g_ready)
+  task_ctx_clear_errno();
+  if(path == 0 || data == 0){
+    task_ctx_set_errno(EINVAL);
     return -1;
-  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0)
+  }
+  if(!g_ready){
+    task_ctx_set_errno(ENODEV);
     return -1;
-  if(is_dev_node(abs_path))
-    return dev_write(abs_path, data, size);
+  }
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
+  if(is_dev_node(abs_path)){
+    rc = dev_write(abs_path, data, size);
+    if(rc < 0)
+      task_ctx_set_errno(EIO);
+    return rc;
+  }
   vfs_lock();
-  if(path_parent(abs_path, &pinum, name) != 0)
-    goto out;
-
-  lookup_rc = dir_lookup_inum(pinum, name, &inum, &ip);
-  if(lookup_rc == 1){
-    if(alloc_inode(T_FILE, &inum) != 0)
-      goto out;
-    created = 1;
-    if(read_inode(inum, &ip) != 0)
-      goto out;
-    if(dir_add_entry(pinum, name, inum) != 0)
-      goto out;
-    linked = 1;
-  } else if(lookup_rc != 0 || ip.type != T_FILE){
+  if(path_parent(abs_path, &pinum, name) != 0){
+    err = ENOENT;
     goto out;
   }
 
-  if(inode_truncate(inum, &ip) != 0)
+  lookup_rc = dir_lookup_inum(pinum, name, &inum, &ip);
+  if(lookup_rc == 1){
+    if(alloc_inode(T_FILE, &inum) != 0){
+      err = ENOSPC;
+      goto out;
+    }
+    created = 1;
+    if(read_inode(inum, &ip) != 0){
+      err = EIO;
+      goto out;
+    }
+    if(dir_add_entry(pinum, name, inum) != 0){
+      err = ENOSPC;
+      goto out;
+    }
+    linked = 1;
+  } else if(lookup_rc != 0){
+    err = EIO;
     goto out;
-  if(read_inode(inum, &ip) != 0)
+  } else if(ip.type != T_FILE){
+    err = EISDIR;
     goto out;
-  if(size > 0 && inode_write_range(&ip, 0, data, size) != 0)
+  }
+
+  if(inode_truncate(inum, &ip) != 0){
+    err = EIO;
     goto out;
+  }
+  if(read_inode(inum, &ip) != 0){
+    err = EIO;
+    goto out;
+  }
+  if(size > 0 && inode_write_range(&ip, 0, data, size) != 0){
+    err = EIO;
+    goto out;
+  }
   rc = write_inode(inum, &ip);
+  if(rc != 0)
+    err = EIO;
 
 out:
   if(rc != 0 && created && !linked)
     inode_reclaim_orphan_locked(inum);
   vfs_unlock();
+  if(rc != 0)
+    task_ctx_set_errno(err);
   return rc;
 }
 
