@@ -31,10 +31,14 @@
 #ifndef DT_REG
 #define DT_REG 8
 #endif
+#ifndef DT_LNK
+#define DT_LNK 10
+#endif
 
 #define XV6_KSTAT_T_DIR 1
 #define XV6_KSTAT_T_FILE 2
 #define XV6_KSTAT_T_DEVICE 3
+#define XV6_KSTAT_T_SYMLINK 4
 #define HOSTABI_DIR_MAGIC 0x48445231u
 
 /**
@@ -90,6 +94,8 @@ static int dirent_type_from_xv6(uint16 type)
     return DT_REG;
   if(type == XV6_KSTAT_T_DEVICE)
     return DT_CHR;
+  if(type == XV6_KSTAT_T_SYMLINK)
+    return DT_LNK;
   return DT_UNKNOWN;
 }
 

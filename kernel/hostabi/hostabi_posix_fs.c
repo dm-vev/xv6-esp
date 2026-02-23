@@ -20,7 +20,9 @@
 #include "vfs/xv6fs_ro.h"
 
 #define XV6_KSTAT_T_DIR 1
+#define XV6_KSTAT_T_FILE 2
 #define XV6_KSTAT_T_DEVICE 3
+#define XV6_KSTAT_T_SYMLINK 4
 
 /**
  * @brief Map xv6 errno to POSIX errno with fallback
@@ -80,13 +82,24 @@ static int map_open_flags(int flags)
  * - XV6_KSTAT_T_DEVICE -> S_IFCHR
  * - otherwise -> S_IFREG
  */
-static mode_t mode_from_xv6_type(uint16 type)
+static mode_t mode_from_xv6(const xv6_kstat_t *kst)
 {
-  if(type == XV6_KSTAT_T_DIR)
-    return (mode_t)(S_IFDIR | 0777);
-  if(type == XV6_KSTAT_T_DEVICE)
-    return (mode_t)(S_IFCHR | 0666);
-  return (mode_t)(S_IFREG | 0666);
+  mode_t type_bits = S_IFREG;
+  mode_t perm_bits;
+
+  if(kst == 0)
+    return (mode_t)(S_IFREG | 0666);
+  if(kst->type == XV6_KSTAT_T_DIR)
+    type_bits = S_IFDIR;
+  else if(kst->type == XV6_KSTAT_T_DEVICE)
+    type_bits = S_IFCHR;
+  else if(kst->type == XV6_KSTAT_T_SYMLINK)
+    type_bits = S_IFLNK;
+  else if(kst->type == XV6_KSTAT_T_FILE)
+    type_bits = S_IFREG;
+
+  perm_bits = (mode_t)(kst->mode & 07777u);
+  return (mode_t)(type_bits | perm_bits);
 }
 
 /**
@@ -106,8 +119,10 @@ static int fill_host_stat(const xv6_kstat_t *kst, struct stat *st)
   memset(st, 0, sizeof(*st));
   st->st_ino = (ino_t)kst->ino;
   st->st_nlink = (nlink_t)(kst->nlink ? kst->nlink : 1);
-  st->st_mode = mode_from_xv6_type(kst->type);
+  st->st_mode = mode_from_xv6(kst);
   st->st_size = (off_t)kst->size;
+  st->st_uid = (uid_t)kst->uid;
+  st->st_gid = (gid_t)kst->gid;
   return 0;
 }
 
@@ -497,7 +512,22 @@ int hostabi_posix_fs_stat(const char *path, struct stat *st)
  */
 int hostabi_posix_fs_lstat(const char *path, struct stat *st)
 {
-  return hostabi_posix_fs_stat(path, st);
+  xv6_kstat_t kst;
+
+  path = (const char *)elf_loader_translate_ptr(path);
+  st = (struct stat *)elf_loader_translate_ptr(st);
+  if(path == 0 || st == 0){
+    errno = EINVAL;
+    return -1;
+  }
+
+  if(xv6_lstat_path(path, &kst) != 0)
+    return set_errno_from_xv6_or(ENOENT);
+  if(fill_host_stat(&kst, st) != 0){
+    errno = EIO;
+    return -1;
+  }
+  return 0;
 }
 
 /**
@@ -505,19 +535,25 @@ int hostabi_posix_fs_lstat(const char *path, struct stat *st)
  * @param path Link path
  * @param buf Buffer for target
  * @param bufsz Buffer size
- * @return -1 (not implemented)
- *
- * Not implemented - returns ENOSYS.
+ * @return Bytes copied on success, -1 on failure
  */
 int hostabi_posix_fs_readlink(const char *path, char *buf, size_t bufsz)
 {
+  int rc;
+
   path = (const char *)elf_loader_translate_ptr(path);
-  (void)buf;
-  (void)bufsz;
-  if(path == 0){
+  buf = (char *)elf_loader_translate_ptr(buf);
+  if(path == 0 || buf == 0 || bufsz == 0){
     errno = EINVAL;
     return -1;
   }
-  errno = ENOSYS;
-  return -1;
+  if(bufsz > 0xffffffffu){
+    errno = EINVAL;
+    return -1;
+  }
+
+  rc = xv6fs_readlink_path(path, buf, (uint32)bufsz);
+  if(rc < 0)
+    return set_errno_from_xv6_or(EINVAL);
+  return rc;
 }

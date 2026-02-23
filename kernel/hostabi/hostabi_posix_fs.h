@@ -158,8 +158,6 @@ int hostabi_posix_fs_lstat(const char *path, struct stat *st);
  * @param buf Buffer for link target
  * @param bufsz Size of buffer
  * @return Bytes written on success, -1 on failure
- *
- * Currently not implemented - returns ENOSYS.
  */
 int hostabi_posix_fs_readlink(const char *path, char *buf, size_t bufsz);
 
