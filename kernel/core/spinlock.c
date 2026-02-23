@@ -25,9 +25,9 @@
 void
 initlock(struct spinlock *lk, char *name)
 {
-  lk->name = name;
-  lk->locked = 0;
-  lk->cpu = 0;
+  lk->name = name;      // Set the name for debugging
+  lk->locked = 0;       // Initialize as unlocked (0 = free, 1 = held)
+  lk->cpu = 0;          // No CPU holds the lock initially
 }
 
 /**
@@ -51,24 +51,25 @@ initlock(struct spinlock *lk, char *name)
 void
 acquire(struct spinlock *lk)
 {
-  push_off(); // disable interrupts to avoid deadlock.
-  if(holding(lk))
+  push_off(); // Disable interrupts to avoid deadlock - prevents context switch while holding lock
+  if(holding(lk))  // Check if we already hold this lock - would cause deadlock
     panic("acquire");
 
   // On RISC-V, sync_lock_test_and_set turns into an atomic swap:
   //   a5 = 1
   //   s1 = &lk->locked
   //   amoswap.w.aq a5, a5, (s1)
+  // Atomically: swap 1 into locked, return old value
+  // Spin until old value was 0 (lock was free)
   while(__sync_lock_test_and_set(&lk->locked, 1) != 0)
-    ;
+    ;  // Spin - lock is held by another CPU
 
-  // Tell the C compiler and the processor to not move loads or stores
-  // past this point, to ensure that the critical section's memory
-  // references happen strictly after the lock is acquired.
-  // On RISC-V, this emits a fence instruction.
+  // Memory barrier - prevents reordering of memory operations
+  // Ensures all memory reads/writes happen after lock acquisition
+  // On RISC-V: generates fence instruction
   __sync_synchronize();
 
-  // Record info about lock acquisition for holding() and debugging.
+  // Record which CPU holds this lock - needed for debugging and holding() check
   lk->cpu = mycpu();
 }
 
@@ -93,29 +94,23 @@ acquire(struct spinlock *lk)
 void
 release(struct spinlock *lk)
 {
-  if(!holding(lk))
+  if(!holding(lk))  // Verify we actually hold the lock - prevents accidental release
     panic("release");
 
+  // Clear CPU holder - lock is no longer held
   lk->cpu = 0;
 
-  // Tell the C compiler and the CPU to not move loads or stores
-  // past this point, to ensure that all the stores in the critical
-  // section are visible to other CPUs before the lock is released,
-  // and that loads in the critical section occur strictly before
-  // the lock is released.
-  // On RISC-V, this emits a fence instruction.
+  // Memory barrier - ensures all our writes are visible before releasing lock
+  // Prevents reordering of writes past the lock release
   __sync_synchronize();
 
-  // Release the lock, equivalent to lk->locked = 0.
-  // This code doesn't use a C assignment, since the C standard
-  // implies that an assignment might be implemented with
-  // multiple store instructions.
-  // On RISC-V, sync_lock_release turns into an atomic swap:
-  //   s1 = &lk->locked
-  //   amoswap.w zero, zero, (s1)
+  // Release the lock atomically
+  // Using atomic release instead of simple assignment ensures
+  // the release is visible to other CPUs immediately
+  // On RISC-V: amoswap.w zero, zero, (s1) - atomic write of 0
   __sync_lock_release(&lk->locked);
 
-  pop_off();
+  pop_off();  // Restore interrupt state to what it was before acquire()
 }
 
 /**
@@ -133,6 +128,8 @@ int
 holding(struct spinlock *lk)
 {
   int r;
+  // Check both: lock is marked as held AND held by current CPU
+  // Both conditions must be true for valid lock ownership
   r = (lk->locked && lk->cpu == mycpu());
   return r;
 }
@@ -157,14 +154,17 @@ holding(struct spinlock *lk)
 void
 push_off(void)
 {
-  int old = intr_get();
+  int old = intr_get();  // Save current interrupt state
 
-  // disable interrupts to prevent an involuntary context
-  // switch while using mycpu().
+  // Disable interrupts - prevents involuntary context switch
+  // while using mycpu() to get current CPU structure
   intr_off();
 
+  // If this is first push_off() call, remember original interrupt state
   if(mycpu()->noff == 0)
-    mycpu()->intena = old;
+    mycpu()->intena = old;  // Save whether interrupts were enabled
+  
+  // Increment nesting count - tracks how many times we've disabled interrupts
   mycpu()->noff += 1;
 }
 
@@ -187,12 +187,22 @@ push_off(void)
 void
 pop_off(void)
 {
-  struct cpu *c = mycpu();
+  struct cpu *c = mycpu();  // Get current CPU structure
+  
+  // Panic if interrupts are already enabled - would indicate imbalance
   if(intr_get())
     panic("pop_off - interruptible");
+  
+  // Panic if noff is 0 or negative - would indicate imbalance
   if(c->noff < 1)
     panic("pop_off");
+  
+  // Decrement nesting count
   c->noff -= 1;
+  
+  // Only re-enable interrupts if:
+  // 1. This was the final pop_off() (noff reached 0)
+  // 2. Interrupts were originally enabled (intena was true)
   if(c->noff == 0 && c->intena)
     intr_on();
 }

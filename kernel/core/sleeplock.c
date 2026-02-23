@@ -26,9 +26,16 @@
 void
 initsleeplock(struct sleeplock *lk, char *name)
 {
+  // Initialize the underlying spinlock that protects sleep lock state
   initlock(&lk->lk, "sleep lock");
+  
+  // Set the debugging name for this lock
   lk->name = name;
+  
+  // Initialize as unlocked (0 = free)
   lk->locked = 0;
+  
+  // No process holds the lock initially
   lk->pid = 0;
 }
 
@@ -50,12 +57,22 @@ initsleeplock(struct sleeplock *lk, char *name)
 void
 acquiresleep(struct sleeplock *lk)
 {
+  // Acquire the underlying spinlock to modify sleep lock state
   acquire(&lk->lk);
+  
+  // While lock is held by another process, sleep and release spinlock
+  // This allows other processes to run while waiting
   while (lk->locked) {
-    sleep(lk, &lk->lk);
+    sleep(lk, &lk->lk);  // Sleep on this lock, release spinlock
   }
+  
+  // Lock is now free - mark as held
   lk->locked = 1;
+  
+  // Record our PID so we can check ownership later
   lk->pid = myproc()->pid;
+  
+  // Release the underlying spinlock - we now own the sleep lock
   release(&lk->lk);
 }
 
@@ -76,10 +93,19 @@ acquiresleep(struct sleeplock *lk)
 void
 releasesleep(struct sleeplock *lk)
 {
+  // Acquire underlying spinlock to modify state
   acquire(&lk->lk);
+  
+  // Mark lock as free
   lk->locked = 0;
+  
+  // Clear the holder PID
   lk->pid = 0;
+  
+  // Wake up all processes waiting on this lock
   wakeup(lk);
+  
+  // Release the underlying spinlock
   release(&lk->lk);
 }
 
@@ -97,8 +123,14 @@ holdingsleep(struct sleeplock *lk)
 {
   int r;
   
+  // Must acquire spinlock to safely read sleep lock state
   acquire(&lk->lk);
+  
+  // Check if lock is held AND held by current process
   r = lk->locked && (lk->pid == myproc()->pid);
+  
+  // Release spinlock after reading state
   release(&lk->lk);
+  
   return r;
 }

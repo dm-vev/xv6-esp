@@ -31,6 +31,7 @@
 
 /**
  * @brief Converts control character to control code.
+ * Converts e.g. Ctrl+A to value 1
  */
 #define C(x)  ((x)-'@')
 
@@ -38,14 +39,14 @@
  * @brief Console input buffer structure.
  */
 struct {
-  struct spinlock lock;
+  struct spinlock lock;  // Protects the buffer
   
   // input circular buffer
 #define INPUT_BUF_SIZE 128
-  char buf[INPUT_BUF_SIZE];
-  uint r;  // Read index
-  uint w;  // Write index
-  uint e;  // Edit index
+  char buf[INPUT_BUF_SIZE];  // Ring buffer for input characters
+  uint r;  // Read index - where consoleread reads from
+  uint w;  // Write index - where consoleintr writes to (line complete)
+  uint e;  // Edit index - where consoleintr writes to (current line)
 } cons;
 
 /**
@@ -64,9 +65,13 @@ void
 consputc(int c)
 {
   if(c == BACKSPACE){
-    // if the user typed backspace, overwrite with a space.
-    uartputc_sync('\b'); uartputc_sync(' '); uartputc_sync('\b');
+    // If user typed backspace, overwrite last char with space, then backspace again
+    // This visually erases the character on terminal
+    uartputc_sync('\b'); // Move cursor back
+    uartputc_sync(' '); // Write space to overwrite character
+    uartputc_sync('\b'); // Move cursor back again
   } else {
+    // Normal character - just output it
     uartputc_sync(c);
   }
 }
@@ -87,20 +92,26 @@ consputc(int c)
 int
 consolewrite(int user_src, uint64 src, int n)
 {
-  char buf[32]; // move batches from user space to uart.
-  int i = 0;
+  char buf[32]; // Local buffer for batch copying
+  int i = 0;    // Bytes processed
 
+  // Process in batches to reduce copyin calls
   while(i < n){
+    // Determine batch size (min of buffer size and remaining bytes)
     int nn = sizeof(buf);
     if(nn > n - i)
       nn = n - i;
+    
+    // Copy batch from user/kernel memory
     if(either_copyin(buf, user_src, src+i, nn) == -1)
-      break;
+      break;  // Stop on error
+      
+    // Write batch to UART
     uartwrite(buf, nn);
     i += nn;
   }
 
-  return i;
+  return i;  // Return bytes written
 }
 
 /**
@@ -123,56 +134,63 @@ consolewrite(int user_src, uint64 src, int n)
 int
 consoleread(int user_dst, uint64 dst, int n)
 {
-  int target;
-  int c;
-  char cbuf;
+  int target;  // Original requested byte count
+  int c;        // Character being processed
+  char cbuf;    // Temporary buffer for single character
 
   target = n;
+  
+  // Acquire lock to safely access buffer
   acquire(&cons.lock);
+  
+  // Loop until we have data or can return
   while(n > 0){
-    // wait until interrupt handler has put some
-    // input into cons.buffer.
+    // Wait until there's data in buffer
+    // (write index != read index means buffer has data)
     while(cons.r == cons.w){
+      // Check if current process was killed - if so, exit gracefully
       if(killed(myproc())){
         release(&cons.lock);
         return -1;
       }
+      // Sleep waiting for input - releases lock while waiting
       sleep(&cons.r, &cons.lock);
     }
 
-    c = cons.buf[cons.r++ % INPUT_BUF_SIZE];
+    // Get next character from buffer
+    c = cons.buf[cons.r++ % INPUT_BUF_SIZE];  // Advance read index
 
+    // Handle EOF (Ctrl+D)
     if(c == C('D')){  // end-of-file
       if(n < target){
-        // Save ^D for next time, to make sure
-        // caller gets a 0-byte result.
+        // Not at start of buffer - put the ^D back for next read
         cons.r--;
       }
-      break;
+      break;  // Return what we have
     }
 
-    // copy the input byte to the user-space buffer.
+    // Copy character to user buffer
     cbuf = c;
     if(either_copyout(user_dst, dst, &cbuf, 1) == -1){
-      if(n == target)
+      if(n == target)  // Failed on first char - return error
         n = -1;
       break;
     }
 
-    dst++;
-    --n;
+    dst++;  // Advance destination
+    --n;    // Decrement remaining count
 
+    // Handle newline - line is complete
     if(c == '\n'){
-      // a whole line has arrived, return to
-      // the user-level read().
-      break;
+      break;  // Return the line
     }
   }
   release(&cons.lock);
 
+  // Return error or bytes read
   if(n < 0)
     return -1;
-  return target - n;
+  return target - n;  // Bytes successfully read
 }
 
 /**
@@ -198,38 +216,44 @@ consoleintr(int c)
 {
   acquire(&cons.lock);
 
+  // Handle special control characters
   switch(c){
-  case C('P'):  // Print process list.
+  case C('P'):  // Print process list (Ctrl+P)
     procdump();
     break;
-  case C('U'):  // Kill line.
+  case C('U'):  // Kill line (Ctrl+U)
+    // Delete characters back to beginning of line
     while(cons.e != cons.w &&
           cons.buf[(cons.e-1) % INPUT_BUF_SIZE] != '\n'){
       cons.e--;
-      consputc(BACKSPACE);
+      consputc(BACKSPACE);  // Visually erase
     }
     break;
-  case C('H'): // Backspace
+  case C('H'): // Backspace (Ctrl+H)
   case '\x7f': // Delete key
+    // Delete one character if available
     if(cons.e != cons.w){
       cons.e--;
       consputc(BACKSPACE);
     }
     break;
   default:
+    // Regular character - only accept if buffer has room
     if(c != 0 && cons.e-cons.r < INPUT_BUF_SIZE){
+      // Convert carriage return to newline
       c = (c == '\r') ? '\n' : c;
 
-      // echo back to the user.
+      // Echo character back to user (so they can see what they typed)
       consputc(c);
 
-      // store for consumption by consoleread().
+      // Store in buffer for consumption
       cons.buf[cons.e++ % INPUT_BUF_SIZE] = c;
 
+      // If line is complete (newline, EOF, or buffer full), wake reader
       if(c == '\n' || c == C('D') || cons.e-cons.r == INPUT_BUF_SIZE){
-        // wake up consoleread() if a whole line (or end-of-file)
-        // has arrived.
+        // Mark write position - reader can now read this line
         cons.w = cons.e;
+        // Wake up any waiting readers
         wakeup(&cons.r);
       }
     }
@@ -254,12 +278,14 @@ consoleintr(int c)
 void
 consoleinit(void)
 {
+  // Initialize the console lock
   initlock(&cons.lock, "cons");
 
+  // Initialize UART hardware
   uartinit();
 
-  // connect read and write system calls
-  // to consoleread and consolewrite.
+  // Register console with device switch table
+  // so read/write system calls go to our functions
   devsw[CONSOLE].read = consoleread;
   devsw[CONSOLE].write = consolewrite;
 }
