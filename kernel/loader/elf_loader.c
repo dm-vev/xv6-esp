@@ -1379,9 +1379,9 @@ int elf_module_call_main_ex(elf_module_t *mod, int argc, char **argv, char **env
     module_unlock();
     return -1;
   }
-  fn = (main_fn_t)mod->entry_addr;
+  fn = (main_fn_t)elf_module_find_symbol(mod, "main");
   if(fn == 0)
-    fn = (main_fn_t)elf_module_find_symbol(mod, "main");
+    fn = (main_fn_t)mod->entry_addr;
   if(fn == 0){
     module_unlock();
     return -1;

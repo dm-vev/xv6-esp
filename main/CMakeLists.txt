@@ -13,7 +13,11 @@ idf_component_register(
     "../kernel/hostabi/hostabi_posix_io.c"
     "../kernel/hostabi/hostabi_pty.c"
     "../kernel/modules/module_manager.c"
-    "../kernel/vfs/xv6fs_ro.c"
+    "../kernel/vfs/vfs.c"
+    "../kernel/vfs/task_ctx.c"
+    "../kernel/vfs/vfs_fd.c"
+    "../kernel/vfs/vfs_pty.c"
+    "../kernel/vfs/vfs_dev.c"
     "runtime/shell_runtime.c"
   INCLUDE_DIRS
     "."
