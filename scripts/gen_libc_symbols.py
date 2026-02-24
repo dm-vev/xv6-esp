@@ -23,6 +23,12 @@ BLOCKED_NEEDED_SYMBOLS = {
     "errno",
 }
 
+NONFORCED_SYMBOLS = {
+    # Some ESP-IDF/newlib link pipelines do not expose this internal ctype
+    # object as a regular host symbol. Keep it weak to avoid hard link failures.
+    "_ctype_",
+}
+
 COMPAT_ALIASES = {
     # ESP-IDF no-rtti picolibc exports _ctype_b but some applets reference _ctype_.
     "_ctype_": "_ctype_b",
@@ -154,7 +160,11 @@ def main() -> int:
             needed_elf_paths.append(str(so))
 
     needed_symbols = collect_needed_symbols(args.nm, needed_elf_paths)
-    forced_symbols = {sym for sym in symbols if sym in needed_symbols and sym in strong_symbols}
+    forced_symbols = {
+        sym
+        for sym in symbols
+        if sym in needed_symbols and sym in strong_symbols and sym not in NONFORCED_SYMBOLS
+    }
 
     alias_map: dict[str, str] = {}
     for alias, target in COMPAT_ALIASES.items():
