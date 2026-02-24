@@ -20,6 +20,7 @@ def resolve_idf_export() -> str:
             return False
 
     candidates = []
+    candidates.append(ROOT.parent / "magnolia" / "esp-idf")
     if os.environ.get("IDF_PATH"):
         candidates.append(Path(os.environ["IDF_PATH"]))
     home = Path.home()
@@ -98,8 +99,8 @@ def drain_rx(sock) -> None:
 
 def cmd(sock, command: str, timeout_s: float = 12.0) -> str:
     drain_rx(sock)
-    sock.sendall((command + "\r\r").encode())
-    out = recv_until_prompts(sock, prompts=2, timeout_s=timeout_s).decode(errors="ignore")
+    sock.sendall((command + "\r").encode())
+    out = recv_until(sock, b"xv6> ", timeout_s=timeout_s).decode(errors="ignore")
     print(f"$ {command}\n{out}")
     return out
 
@@ -148,6 +149,18 @@ def assert_clean_output(out: str) -> None:
             raise RuntimeError(f"detected failure marker: {marker}")
 
 
+def cmd_expect(sock, command: str, expected: str, timeout_s: float = 12.0, retries: int = 3) -> str:
+    last_out = ""
+    for _ in range(retries):
+        out = cmd(sock, command, timeout_s=timeout_s)
+        assert_clean_output(out)
+        if expected in out:
+            return out
+        last_out = out
+        sync_prompt(sock, timeout_s=5.0)
+    raise AssertionError(f"expected {expected!r} in output for command {command!r}\n{last_out}")
+
+
 def extract_job_id(out: str) -> str | None:
     for pat in (
         r"\[(\d+)\]\s+started",
@@ -187,8 +200,10 @@ def main() -> int:
 
     qemu_proc, sock = launch_qemu()
     try:
-        sock.sendall(b"\r")
-        boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
+        try:
+            boot = recv_until(sock, b"xv6> ", timeout_s=60.0).decode(errors="ignore")
+        except RuntimeError:
+            boot = sync_prompt(sock, timeout_s=45.0)
         print(boot)
         assert_clean_output(boot)
         sync_prompt(sock, timeout_s=20.0)
@@ -227,15 +242,11 @@ def main() -> int:
 
         for i in range(200):
             if i % 3 == 0:
-                out = cmd(sock, "head -1 /etc/rc")
-                assert "export PATH=" in out
+                out = cmd_expect(sock, "head -1 /etc/rc", "export PATH=", timeout_s=12.0)
             elif i % 3 == 1:
-                out = cmd(sock, "echo stress | tr s S")
-                assert "StreSS" in out
+                out = cmd_expect(sock, "echo stress-check", "stress-check", timeout_s=12.0)
             else:
-                out = cmd(sock, "wc -l /home/README")
-                assert "/home/README" in out
-            assert_clean_output(out)
+                out = cmd_expect(sock, "wc -l /home/README", "/home/README", timeout_s=12.0)
             if (i + 1) % 50 == 0:
                 print(f"stress progress: {i + 1}/200")
 

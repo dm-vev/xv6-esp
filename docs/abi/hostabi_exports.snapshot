@@ -158,6 +158,8 @@ times
 __xv6_host_times
 time
 __xv6_host_time
+exit
+_Exit
 _exit
 fchmod
 chown

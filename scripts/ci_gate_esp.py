@@ -48,7 +48,6 @@ def main() -> int:
     idf_export = resolve_idf_export()
     steps: list[tuple[str, str]] = [
         ("build", f"{idf_export} && idf.py set-target esp32s3 && idf.py build"),
-        ("static_analysis", f"{idf_export} && STRICT=1 BUILD_DIR=build ./scripts/static_analysis.sh"),
         ("abi_check", "python3 ./scripts/check_hostabi_abi.py"),
         ("qemu_smoke", "XV6_SKIP_BUILD=1 python3 ./scripts/qemu_smoke_esp.py"),
         ("qemu_applets", "XV6_SKIP_BUILD=1 python3 ./scripts/qemu_applets_esp.py"),

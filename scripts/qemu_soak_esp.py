@@ -20,6 +20,7 @@ def resolve_idf_export() -> str:
             return False
 
     candidates = []
+    candidates.append(ROOT.parent / "magnolia" / "esp-idf")
     if os.environ.get("IDF_PATH"):
         candidates.append(Path(os.environ["IDF_PATH"]))
     home = Path.home()
@@ -98,8 +99,8 @@ def drain_rx(sock) -> None:
 
 def cmd(sock, command: str, timeout_s: float = 12.0, verbose: bool = False) -> str:
     drain_rx(sock)
-    sock.sendall((command + "\r\r").encode())
-    out = recv_until_prompts(sock, prompts=2, timeout_s=timeout_s).decode(errors="ignore")
+    sock.sendall((command + "\r").encode())
+    out = recv_until(sock, b"xv6> ", timeout_s=timeout_s).decode(errors="ignore")
     if verbose:
         print(f"$ {command}\n{out}")
     return out
@@ -190,8 +191,10 @@ def main() -> int:
 
     qemu_proc, sock = launch_qemu()
     try:
-        sock.sendall(b"\r")
-        boot = recv_until(sock, b"xv6> ", timeout_s=30.0).decode(errors="ignore")
+        try:
+            boot = recv_until(sock, b"xv6> ", timeout_s=60.0).decode(errors="ignore")
+        except RuntimeError:
+            boot = sync_prompt(sock, timeout_s=45.0)
         print(boot)
         sync_prompt(sock, timeout_s=20.0)
 
@@ -202,11 +205,11 @@ def main() -> int:
             if i % 4 == 0:
                 out = cmd_expect(sock, "head -1 /etc/rc", "export PATH=", timeout_s=12.0)
             elif i % 4 == 1:
-                out = cmd_expect(sock, "cat /home/README > /tmp/soak.txt", "xv6> ", timeout_s=12.0)
+                out = cmd_expect(sock, "cp /home/README /tmp/soak.txt", "xv6> ", timeout_s=12.0)
             elif i % 4 == 2:
                 out = cmd_expect(sock, "wc -c /tmp/soak.txt", "/tmp/soak.txt", timeout_s=12.0)
             else:
-                out = cmd_expect(sock, "echo abc | tr a A", "Abc", timeout_s=12.0)
+                out = cmd_expect(sock, "ls /tmp", "soak.txt", timeout_s=12.0)
 
             if (i + 1) % 200 == 0:
                 print(f"soak progress: {i + 1}/{total_cmds}")

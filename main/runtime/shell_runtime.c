@@ -4033,6 +4033,8 @@ static void register_default_symbols(void)
     { "__xv6_host_times", (void *)k_times },
     { "time", (void *)k_time },
     { "__xv6_host_time", (void *)k_time },
+    { "exit", (void *)k_exit },
+    { "_Exit", (void *)k_exit },
     { "_exit", (void *)k__exit },
     { "fchmod", (void *)k_fchmod },
     { "chown", (void *)k_chown },

@@ -20,6 +20,7 @@ def resolve_idf_export() -> str:
             return False
 
     candidates = []
+    candidates.append(ROOT.parent / "magnolia" / "esp-idf")
     if os.environ.get("IDF_PATH"):
         candidates.append(Path(os.environ["IDF_PATH"]))
     home = Path.home()

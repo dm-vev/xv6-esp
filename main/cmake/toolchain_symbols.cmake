@@ -1,22 +1,23 @@
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   execute_process(
-    COMMAND ${CMAKE_C_COMPILER} -print-file-name=libc.a
+    COMMAND ${CMAKE_C_COMPILER} -fno-rtti -print-file-name=libc.a
     OUTPUT_VARIABLE LIBC_A_PATH
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
   execute_process(
-    COMMAND ${CMAKE_C_COMPILER} -print-file-name=libm.a
+    COMMAND ${CMAKE_C_COMPILER} -fno-rtti -print-file-name=libm.a
     OUTPUT_VARIABLE LIBM_A_PATH
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
   execute_process(
-    COMMAND ${CMAKE_C_COMPILER} -print-file-name=libgcc.a
-    OUTPUT_VARIABLE LIBGCC_A_PATH
+    COMMAND ${CMAKE_C_COMPILER} -fno-rtti -print-file-name=libnosys.a
+    OUTPUT_VARIABLE LIBNOSYS_A_PATH
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
+
   execute_process(
-    COMMAND ${CMAKE_C_COMPILER} -print-file-name=libnosys.a
-    OUTPUT_VARIABLE LIBNOSYS_A_PATH
+    COMMAND ${CMAKE_C_COMPILER} -fno-rtti -print-file-name=libgcc.a
+    OUTPUT_VARIABLE LIBGCC_A_PATH
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
 
@@ -59,9 +60,12 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
             --lib ${LIBM_A_PATH}
             --lib ${LIBGCC_A_PATH}
             --lib ${LIBNOSYS_A_PATH}
+            --needed-elf ${XV6_LIBC_SO}
+            --needed-elf ${XV6_LIBDEMO_SO}
+            --needed-elf-dir ${APPLET_BUILD_DIR}
             --out ${LIBC_SYMBOLS_C}
             --header ${PROJECT_DIR}/kernel/loader/elf_loader.h
-    DEPENDS ${LIBC_SYMBOLS_GEN} ${LIBC_A_PATH} ${LIBM_A_PATH} ${LIBGCC_A_PATH} ${LIBNOSYS_A_PATH}
+    DEPENDS ${LIBC_SYMBOLS_GEN} ${LIBC_A_PATH} ${LIBM_A_PATH} ${LIBGCC_A_PATH} ${LIBNOSYS_A_PATH} ${FSROOT_STAMP}
     VERBATIM
   )
   set_source_files_properties(${LIBC_SYMBOLS_C} PROPERTIES GENERATED TRUE)
