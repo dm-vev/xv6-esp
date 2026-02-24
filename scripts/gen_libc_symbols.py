@@ -33,27 +33,30 @@ SHIM_SYMBOLS = {
 }
 
 
-def collect_symbols(nm_bin: str, libs: list[str]) -> list[str]:
+def collect_symbols(nm_bin: str, libs: list[str]) -> tuple[list[str], set[str]]:
     out = subprocess.check_output(
         [nm_bin, "--defined-only", "-g", *libs],
         text=True,
         stderr=subprocess.STDOUT,
     )
     symbols: set[str] = set()
+    strong_symbols: set[str] = set()
     for line in out.splitlines():
         parts = line.strip().split()
         if len(parts) < 3:
             continue
         sym_type = parts[-2]
         name = parts[-1]
-        if sym_type not in {"T", "D", "B", "R", "W", "V"}:
+        if sym_type not in {"T", "D", "B", "R", "A", "W", "V"}:
             continue
         if not VALID_C_IDENT.match(name):
             continue
         if name in BLOCKED_EXPORT_SYMBOLS:
             continue
         symbols.add(name)
-    return sorted(symbols)
+        if sym_type in {"T", "D", "B", "R", "A"}:
+            strong_symbols.add(name)
+    return sorted(symbols), strong_symbols
 
 
 def collect_needed_symbols(nm_bin: str, elf_paths: list[str]) -> set[str]:
@@ -139,7 +142,7 @@ def main() -> int:
     parser.add_argument("--needed-elf-dir", action="append", default=[])
     args = parser.parse_args()
 
-    symbols = collect_symbols(args.nm, args.lib)
+    symbols, strong_symbols = collect_symbols(args.nm, args.lib)
     symbol_set = set(symbols)
 
     needed_elf_paths = list(args.needed_elf)
@@ -151,7 +154,7 @@ def main() -> int:
             needed_elf_paths.append(str(so))
 
     needed_symbols = collect_needed_symbols(args.nm, needed_elf_paths)
-    forced_symbols = {sym for sym in symbols if sym in needed_symbols}
+    forced_symbols = {sym for sym in symbols if sym in needed_symbols and sym in strong_symbols}
 
     alias_map: dict[str, str] = {}
     for alias, target in COMPAT_ALIASES.items():
@@ -162,7 +165,8 @@ def main() -> int:
         if target not in symbol_set:
             continue
         alias_map[alias] = target
-        forced_symbols.add(target)
+        if target in strong_symbols:
+            forced_symbols.add(target)
 
     shim_map: dict[str, str] = {}
     for sym_name, shim_name in SHIM_SYMBOLS.items():
