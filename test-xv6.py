@@ -23,7 +23,6 @@ from subprocess import run
 
 ROOT = Path(__file__).resolve().parent
 BUILD = ROOT / "build"
-IDF_EXPORT_SCRIPT = (ROOT / ".." / "magnolia" / "esp-idf" / "export.sh").resolve()
 
 parser = argparse.ArgumentParser()
 parser.add_argument("testrex", help="test name or regular expression")
@@ -35,9 +34,30 @@ def run_shell(cmd: str) -> None:
     run(["bash", "-lc", cmd], cwd=ROOT, check=True)
 
 
+def resolve_idf_export_script() -> Path:
+    def has_export_script(base: Path) -> bool:
+        try:
+            return (base / "export.sh").exists()
+        except OSError:
+            return False
+
+    candidates = []
+    candidates.append(ROOT.parent / "magnolia" / "esp-idf")
+    if os.environ.get("IDF_PATH"):
+        candidates.append(Path(os.environ["IDF_PATH"]))
+    home = Path.home()
+    candidates.extend((home / "esp-idf", Path("/opt/esp-idf"), Path("/root/esp-idf"), Path("/tmp/esp-idf")))
+    for p in candidates:
+        if p and has_export_script(p):
+            return (p / "export.sh").resolve()
+    searched = ", ".join(str(p) for p in candidates)
+    raise RuntimeError(f"ESP-IDF export script not found. Searched: {searched}")
+
+
+IDF_EXPORT_SCRIPT = resolve_idf_export_script()
+
+
 def idf_export_cmd() -> str:
-    if not IDF_EXPORT_SCRIPT.exists():
-        raise RuntimeError(f"ESP-IDF export script not found: {IDF_EXPORT_SCRIPT}")
     return f"source {shlex.quote(str(IDF_EXPORT_SCRIPT))} >/dev/null"
 
 

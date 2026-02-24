@@ -25,14 +25,32 @@ jobs:
             gcc-riscv64-unknown-elf \
             qemu-system-misc
 
+      - name: Cache ESP-IDF
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.espressif
+            ~/esp-idf
+          key: ${{ runner.os }}-espidf-v6.0-riscv-ci-v1
+
+      - name: Prepare ESP-IDF
+        run: |
+          if [ ! -d "$HOME/esp-idf/.git" ]; then
+            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          fi
+          cd "$HOME/esp-idf"
+          ./install.sh esp32s3
+
       - name: Build kernel + fs image
         run: |
           make kernel/kernel fs.img
 
       - name: Quick user tests
         run: |
+          source "$HOME/esp-idf/export.sh"
           python3 ./test-xv6.py -q usertests
 
       - name: Crash recovery tests
         run: |
+          source "$HOME/esp-idf/export.sh"
           python3 ./test-xv6.py crash
