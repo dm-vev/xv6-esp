@@ -485,7 +485,7 @@ static int read_flash_image(uint32 sector, uint32 sector_count, uint8 **out, uin
     return -1;
 
   if(esp_flash_disk_read(sector, buf, sector_count) != 0){
-    free(buf);
+    heap_caps_free(buf);
     return -1;
   }
 
@@ -576,16 +576,16 @@ static void module_reset(elf_module_t *m)
 
   for(i = 0; i < m->seg_count; i++){
     if(m->segs[i].mem){
-      free(m->segs[i].mem);
+      heap_caps_free(m->segs[i].mem);
       m->segs[i].mem = 0;
     }
     if(m->segs[i].shadow_mem){
-      free(m->segs[i].shadow_mem);
+      heap_caps_free(m->segs[i].shadow_mem);
       m->segs[i].shadow_mem = 0;
     }
   }
   if(m->image){
-    free(m->image);
+    heap_caps_free(m->image);
     m->image = 0;
   }
   memset(m, 0, sizeof(*m));
@@ -673,7 +673,7 @@ static int parse_segments(elf_module_t *m, const elf32_ehdr_t *eh)
       m->segs[m->seg_count].shadow_mem = (uint8 *)alloc_data_mem(ph->p_memsz);
       if(m->segs[m->seg_count].shadow_mem == 0){
         ESP_LOGE(TAG, "shadow alloc failed: memsz=%u", (unsigned)ph->p_memsz);
-        free(dst);
+        heap_caps_free(dst);
         return -1;
       }
       memcpy(m->segs[m->seg_count].shadow_mem, dst, ph->p_memsz);
@@ -1301,7 +1301,7 @@ int elf_module_load_from_flash(const char *name, uint32 sector, uint32 sector_co
   if(read_flash_image(sector, sector_count, &image, &image_size) != 0)
     return -1;
   rc = elf_module_load_from_image(name, image, image_size, out_mod);
-  free(image);
+  heap_caps_free(image);
   return rc;
 }
 

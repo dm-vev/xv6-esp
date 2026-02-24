@@ -1,5 +1,6 @@
 #include "platform/hal.h"
 
+#include "driver/usb_serial_jtag.h"
 #include "esp_heap_caps.h"
 #include "esp_rom_sys.h"
 #include "esp_system.h"
@@ -7,6 +8,7 @@
 #include "hal/uart_ll.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "soc/soc_caps.h"
 
 /**
  * @file hal_esp32s3.c
@@ -24,6 +26,7 @@ static uint8 g_console_pushback[XV6_CONSOLE_PUSHBACK_CAP];
 static uint16 g_console_pushback_r;
 static uint16 g_console_pushback_w;
 static uint16 g_console_pushback_n;
+static int g_usb_console_driver_ready;
 
 static int hal_console_pop_pushback(void)
 {
@@ -45,7 +48,7 @@ static void hal_console_pushback_byte(uint8 c)
   g_console_pushback_n++;
 }
 
-static int hal_console_getc_hw(void)
+static int hal_console_getc_uart(void)
 {
   uart_dev_t *hw = UART_LL_GET_HW(0);
   uint8 ch = 0;
@@ -57,11 +60,99 @@ static int hal_console_getc_hw(void)
   return -1;
 }
 
+static void hal_console_putc_uart(uint8 ch)
+{
+  uart_dev_t *hw = UART_LL_GET_HW(0);
+  while(uart_ll_get_txfifo_len(hw) == 0){
+  }
+  uart_ll_write_txfifo(hw, &ch, 1);
+}
+
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+static int hal_console_usb_connected(void)
+{
+  if(!g_usb_console_driver_ready)
+    return 0;
+  return usb_serial_jtag_is_connected() ? 1 : 0;
+}
+
+static int hal_console_getc_usb(void)
+{
+  uint8 ch = 0;
+  int n = usb_serial_jtag_read_bytes(&ch, 1, 0);
+  if(n > 0)
+    return (int)ch;
+  return -1;
+}
+
+static void hal_console_putc_usb(uint8 ch)
+{
+  (void)usb_serial_jtag_write_bytes(&ch, 1, 0);
+}
+#else
+static int hal_console_usb_connected(void)
+{
+  return 0;
+}
+
+static int hal_console_getc_usb(void)
+{
+  return -1;
+}
+
+static void hal_console_putc_usb(uint8 ch)
+{
+  (void)ch;
+}
+#endif
+
+static int hal_console_getc_hw(void)
+{
+  if(hal_console_usb_connected()){
+    int c = hal_console_getc_usb();
+    if(c >= 0)
+      return c;
+    return -1;
+  }
+
+  return hal_console_getc_uart();
+}
+
+static void hal_console_putc_hw(uint8 ch)
+{
+  if(hal_console_usb_connected()){
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    hal_console_putc_usb(ch);
+#endif
+    return;
+  }
+
+  hal_console_putc_uart(ch);
+}
+
+static void hal_console_init_usb(void)
+{
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+  if(usb_serial_jtag_is_driver_installed()){
+    g_usb_console_driver_ready = 1;
+    return;
+  }
+
+  {
+    usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    if(usb_serial_jtag_driver_install(&cfg) == ESP_OK)
+      g_usb_console_driver_ready = 1;
+  }
+#endif
+}
+
 void hal_console_init(void)
 {
   g_console_pushback_r = 0;
   g_console_pushback_w = 0;
   g_console_pushback_n = 0;
+  g_usb_console_driver_ready = 0;
+  hal_console_init_usb();
 }
 
 int hal_console_getc(void)
@@ -85,11 +176,8 @@ int hal_console_poll_ctrl_c(void)
 
 void hal_console_putc(int c)
 {
-  uart_dev_t *hw = UART_LL_GET_HW(0);
   const uint8 ch = (uint8)c;
-  while(uart_ll_get_txfifo_len(hw) == 0){
-  }
-  uart_ll_write_txfifo(hw, &ch, 1);
+  hal_console_putc_hw(ch);
 }
 
 void hal_timer_init(void)

@@ -40,6 +40,21 @@ def run(cmd: str) -> None:
     subprocess.run(["bash", "-lc", cmd], cwd=ROOT, check=True)
 
 
+def flash_cmd(port: str) -> str:
+    quoted_port = port.replace("'", "'\"'\"'")
+    if "ttyACM" in port:
+        return f"{IDF_EXPORT} && idf.py -D ESPTOOLPY_AFTER=no_reset -p '{quoted_port}' flash"
+    return f"{IDF_EXPORT} && idf.py -p '{quoted_port}' flash"
+
+
+def serial_write(ser: "serial.Serial", data: bytes) -> None:
+    try:
+        ser.write(data)
+        ser.flush()
+    except Exception as exc:
+        raise RuntimeError(f"serial write failed: {exc}") from exc
+
+
 def read_until(ser: "serial.Serial", marker: bytes, timeout_s: float = 12.0) -> str:
     start = time.time()
     data = bytearray()
@@ -57,8 +72,7 @@ def read_until(ser: "serial.Serial", marker: bytes, timeout_s: float = 12.0) -> 
 def sync_prompt(ser: "serial.Serial", timeout_s: float = 30.0) -> str:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        ser.write(b"\n")
-        ser.flush()
+        serial_write(ser, b"\n")
         try:
             return read_until(ser, b"xv6> ", timeout_s=1.5)
         except RuntimeError:
@@ -67,16 +81,14 @@ def sync_prompt(ser: "serial.Serial", timeout_s: float = 30.0) -> str:
 
 
 def cmd(ser: "serial.Serial", command: str, timeout_s: float = 20.0) -> str:
-    ser.write((command + "\n").encode())
-    ser.flush()
+    serial_write(ser, (command + "\n").encode())
     out = read_until(ser, b"xv6> ", timeout_s=timeout_s)
     print(f"$ {command}\n{out}")
     return out
 
 
 def send_ctrl_c(ser: "serial.Serial") -> str:
-    ser.write(b"\x03")
-    ser.flush()
+    serial_write(ser, b"\x03")
     out = read_until(ser, b"xv6> ", timeout_s=12.0)
     print("^C\n" + out)
     return out
@@ -138,9 +150,9 @@ def main() -> int:
     if os.environ.get("XV6_SKIP_BUILD") != "1":
         run(f"{IDF_EXPORT} && idf.py set-target esp32s3 && idf.py build")
     if args.flash:
-        run(f"{IDF_EXPORT} && idf.py -p {args.port} flash")
+        run(flash_cmd(args.port))
 
-    ser = serial.Serial(args.port, args.baud, timeout=0.2)
+    ser = serial.Serial(args.port, args.baud, timeout=0.2, write_timeout=1.0, dsrdtr=False, rtscts=False, xonxoff=False)
     try:
         ser.reset_input_buffer()
         boot = sync_prompt(ser, timeout_s=45.0)
@@ -225,8 +237,7 @@ def main() -> int:
         out = cmd(ser, f"wait {kill_id}")
         expect_contains(out, "wait: done 137", "wait killed job")
 
-        ser.write(b"sleep 5000\n")
-        ser.flush()
+        serial_write(ser, b"sleep 5000\n")
         time.sleep(0.2)
         out = send_ctrl_c(ser)
         expect_contains(out, "^C", "ctrl-c")

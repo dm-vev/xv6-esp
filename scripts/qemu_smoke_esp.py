@@ -90,7 +90,7 @@ def cmd(sock, command: str, retries: int = 3) -> str:
         if command in out:
             print(f"$ {command}\n{out}")
             return out
-        if token and (token in out or (len(token) > 1 and token[1:] in out)):
+        if token and token in out:
             print(f"$ {command}\n{out}")
             return out
 
@@ -111,14 +111,14 @@ def interrupt_foreground(sock, command: str, retries: int = 4) -> str:
 
     for _ in range(retries):
         drain_rx(sock)
-        sock.sendall((command + "\r\r").encode())
+        sock.sendall((command + "\r").encode())
         time.sleep(0.2)
         out = send_ctrl_c(sock)
         last_out = out
 
         if "command not found" in out:
             continue
-        if token and (token in out or (len(token) > 1 and token[1:] in out)):
+        if token and token in out:
             return out
 
     raise AssertionError(f"failed to interrupt foreground command {command!r}: {last_out}")

@@ -49,6 +49,13 @@ def run(cmd: str) -> None:
     subprocess.run(["bash", "-lc", cmd], cwd=ROOT, check=True)
 
 
+def flash_cmd(port: str) -> str:
+    quoted_port = port.replace("'", "'\"'\"'")
+    if "ttyACM" in port:
+        return f"{IDF_EXPORT} && idf.py -D ESPTOOLPY_AFTER=no_reset -p '{quoted_port}' flash"
+    return f"{IDF_EXPORT} && idf.py -p '{quoted_port}' flash"
+
+
 def parse_manifest_applets() -> list[str]:
     names: list[str] = []
     for manifest in sorted(APPLETS_DIR.glob("*/applet.cmake")):
@@ -405,7 +412,7 @@ def main() -> int:
 
     if args.flash:
         log(f"flashing firmware on {args.port}")
-        run(f"{IDF_EXPORT} && idf.py -p {args.port} flash")
+        run(flash_cmd(args.port))
 
     applets = parse_manifest_applets()
     matrix = test_matrix()

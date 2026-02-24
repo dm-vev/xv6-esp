@@ -565,7 +565,10 @@ def main() -> int:
 
     qemu_proc, sock = launch_qemu()
     try:
-        _boot = sync_prompt(sock, timeout_s=30.0)
+        try:
+            _boot = recv_until(sock, b"xv6> ", timeout_s=60.0).decode(errors="ignore")
+        except RuntimeError:
+            _boot = sync_prompt(sock, timeout_s=60.0)
         cmd_retry_contains(sock, "export PATH=/bin:/usr/bin:.", "xv6> ")
 
         # Binary presence smoke for every enabled applet.

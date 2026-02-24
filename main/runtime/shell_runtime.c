@@ -101,10 +101,19 @@ static volatile int g_runtime_started = 0;
 static SemaphoreHandle_t g_jobs_lock;
 static SemaphoreHandle_t g_loader_lock;
 static ksh_env_t g_env[KSH_MAX_ENV];
+static TaskHandle_t g_interactive_task;
 
 static int dispatch_command(int argc, char **argv, int run_bg);
 static int eval_line_inner(const char *line, int *exit_code);
 static int k_dup2(int oldfd, int newfd);
+
+static int shell_allow_ctrl_c_poll(void)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  if(self == 0 || g_interactive_task == 0)
+    return 0;
+  return (self == g_interactive_task) ? 1 : 0;
+}
 
 static void k_copy_cstr(char *dst, int dst_len, const char *src)
 {
@@ -2898,7 +2907,7 @@ static int run_foreground_with_limits(int argc, char **argv, int in_fd, int out_
   int rc;
   int job_id = -1;
   int exit_code = 127;
-  int allow_ctrl_c = 1;
+  int allow_ctrl_c = shell_allow_ctrl_c_poll();
 
   rc = spawn_background_ex(argc, argv, in_fd, out_fd, err_fd, 0, 1, max_heap_kb, max_runtime_ms, &job_id);
   if(rc != 0)
@@ -3222,7 +3231,7 @@ static int run_pipeline(int argc, char **argv, int run_bg, int max_heap_kb, uint
     }
     for(i = 0; i < njobs; i++){
       int stage_rc = 0;
-      if(wait_job_id_ex(jobs[i], &stage_rc, 1, 1) != 0)
+      if(wait_job_id_ex(jobs[i], &stage_rc, 1, shell_allow_ctrl_c_poll()) != 0)
         continue;
       if(stage_rc == 130){
         cleanup_spawned_jobs(jobs + i + 1, njobs - (i + 1));
@@ -3447,7 +3456,7 @@ static int cmd_wait(int argc, char **argv)
       puts_line("wait: no such job");
       return 1;
     }
-    if(wait_job_id_ex((int)id, &exit_code, 1, 1) != 0){
+    if(wait_job_id_ex((int)id, &exit_code, 1, shell_allow_ctrl_c_poll()) != 0){
       puts_line("wait: no such job");
       return 1;
     }
@@ -3495,7 +3504,7 @@ static int cmd_fg(int argc, char **argv)
     puts_line("fg: no such job");
     return 1;
   }
-  if(wait_job_id_ex((int)id, &exit_code, 1, 1) != 0){
+  if(wait_job_id_ex((int)id, &exit_code, 1, shell_allow_ctrl_c_poll()) != 0){
     puts_line("fg: no such job");
     return 1;
   }
@@ -4244,6 +4253,7 @@ int shell_runtime_init(void)
   g_loader_lock = xSemaphoreCreateRecursiveMutex();
   if(g_loader_lock == 0)
     goto fail;
+  g_interactive_task = 0;
   register_default_symbols();
   xv6_vfs_reset();
   hostabi_posix_io_init();
@@ -4307,6 +4317,7 @@ int shell_runtime_run_interactive(void)
   char line[256];
   int len = 0;
 
+  g_interactive_task = xTaskGetCurrentTaskHandle();
   tty_puts("xv6> ");
   for(;;){
     int c;

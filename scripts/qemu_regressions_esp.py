@@ -143,8 +143,10 @@ def main() -> int:
 
     qemu_proc, sock = launch_qemu()
     try:
-        sock.sendall(b"\r")
-        boot = recv_until(sock, b"xv6> ", timeout_s=45.0).decode(errors="ignore")
+        try:
+            boot = recv_until(sock, b"xv6> ", timeout_s=45.0).decode(errors="ignore")
+        except RuntimeError:
+            boot = sync_prompt(sock, timeout_s=45.0)
         print(boot)
         assert_clean_output(boot)
         sync_prompt(sock, timeout_s=20.0)
