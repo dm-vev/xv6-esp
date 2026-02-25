@@ -31,6 +31,7 @@ static void check_eq(const char *name, int a, int b)
 int main(void)
 {
   void *p;
+  void *tmp;
   void *blocks[50];
   char *s;
   int i;
@@ -75,9 +76,13 @@ int main(void)
   p = malloc(50);
   if(p){
     memset(p, 0xAA, 50);
-    p = realloc(p, 100);
-    check("realloc_grow", p != 0);
-    if(p){
+    tmp = realloc(p, 100);
+    check("realloc_grow", tmp != 0);
+    if(!tmp){
+      free(p);
+      p = 0;
+    } else {
+      p = tmp;
       char *cp = (char *)p;
       int i;
       for(i = 0; i < 50; i++){
@@ -93,9 +98,13 @@ int main(void)
   p = malloc(100);
   if(p){
     memset(p, 0xBB, 100);
-    p = realloc(p, 50);
-    check("realloc_shrink", p != 0);
-    if(p){
+    tmp = realloc(p, 50);
+    check("realloc_shrink", tmp != 0);
+    if(!tmp){
+      free(p);
+      p = 0;
+    } else {
+      p = tmp;
       char *cp = (char *)p;
       int i;
       for(i = 0; i < 50; i++){
