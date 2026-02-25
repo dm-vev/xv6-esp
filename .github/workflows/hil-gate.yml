@@ -57,6 +57,12 @@ jobs:
           python3 -m pip install pyserial
 
       - name: Run HIL gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PORT: ${{ inputs.port || '' }}
+          INPUT_BAUD: ${{ inputs.baud || '' }}
+          INPUT_CYCLES: ${{ inputs.cycles || '' }}
+          INPUT_FLASH_FIRST: ${{ inputs.flash_first || '' }}
         run: |
           source "$HOME/esp-idf/export.sh"
 
@@ -65,21 +71,21 @@ jobs:
           CYCLES="$HIL_CYCLES"
           FLASH_ARG="--flash-first"
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.flash_first }}" = "false" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_FLASH_FIRST" = "false" ]; then
             FLASH_ARG=""
           fi
-          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ "${{ vars.HIL_FLASH_FIRST }}" = "0" ]; then
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$HIL_FLASH_FIRST" = "0" ]; then
             FLASH_ARG=""
           fi
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ -n "${{ inputs.port }}" ]; then
-              PORT="${{ inputs.port }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$INPUT_PORT" ]; then
+              PORT="$INPUT_PORT"
             fi
-            if [ -n "${{ inputs.baud }}" ]; then
-              BAUD="${{ inputs.baud }}"
+            if [ -n "$INPUT_BAUD" ]; then
+              BAUD="$INPUT_BAUD"
             fi
-            if [ -n "${{ inputs.cycles }}" ]; then
-              CYCLES="${{ inputs.cycles }}"
+            if [ -n "$INPUT_CYCLES" ]; then
+              CYCLES="$INPUT_CYCLES"
             fi
           fi
 
