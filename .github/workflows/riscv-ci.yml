@@ -48,9 +48,11 @@ jobs:
       - name: Quick user tests
         run: |
           source "$HOME/esp-idf/export.sh"
+          rm -rf build
           python3 ./test-xv6.py -q usertests
 
       - name: Crash recovery tests
         run: |
           source "$HOME/esp-idf/export.sh"
+          rm -rf build
           python3 ./test-xv6.py crash
