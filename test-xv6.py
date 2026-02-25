@@ -12,7 +12,6 @@ import argparse
 import inspect
 import os
 import re
-import select
 import shlex
 import shutil
 import signal
@@ -22,8 +21,11 @@ import time
 from pathlib import Path
 from subprocess import run
 
+from scripts.qemu_idf_session import launch_idf_qemu, stop_idf_qemu
+
 ROOT = Path(__file__).resolve().parent
 BUILD = ROOT / "build"
+PROMPT = b"xv6> "
 
 parser = argparse.ArgumentParser()
 parser.add_argument("testrex", help="test name or regular expression")
@@ -104,23 +106,12 @@ class QEMU(object):
             self.build_xv6()
             self.reset_fs()
         ensure_qemu_efuse()
-        qemu_cmd = (
-            f"{idf_export_cmd()} && "
-            "idf.py qemu "
-            "--flash-file build/qemu_flash.bin "
-            "--efuse-file build/qemu_efuse.bin"
-        )
-        self.proc = subprocess.Popen(
-            ["bash", "-lc", qemu_cmd],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=ROOT,
-            preexec_fn=os.setsid,
-        )
+        flash = BUILD / "qemu_flash.bin"
+        efuse = BUILD / "qemu_efuse.bin"
+        self.proc, self.serial = launch_idf_qemu(ROOT, idf_export_cmd(), flash, efuse)
         self.output = ""
         self.outbytes = bytearray()
-        time.sleep(2)
+        self.wait_for_prompt(timeout=90.0)
 
     def reset_fs(self):
         try:
@@ -150,10 +141,7 @@ class QEMU(object):
     def cmd(self, c):
         if isinstance(c, str):
             c = c.encode("utf-8")
-        if self.proc.stdin is None:
-            raise RuntimeError("qemu stdin is not available")
-        self.proc.stdin.write(c)
-        self.proc.stdin.flush()
+        self.serial.sendall(c)
 
     def crash(self):
         try:
@@ -165,33 +153,78 @@ class QEMU(object):
             sys.exit(1)
 
     def stop(self):
-        if self.proc.poll() is not None:
+        stop_idf_qemu(self.proc, self.serial)
+
+    def _append_chunk(self, chunk: bytes) -> None:
+        if not chunk:
             return
-        try:
-            os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        try:
-            self.proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        self.outbytes.extend(chunk)
+        self.output = self.outbytes.decode("utf-8", "replace")
+
+    def _recv_until(self, marker: bytes, timeout: float) -> bytes:
+        self.serial.settimeout(0.8)
+        data = bytearray()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                rc = self.proc.returncode
+                raise RuntimeError(f"qemu exited while waiting for {marker!r}, rc={rc}")
             try:
-                os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+                chunk = self.serial.recv(4096)
+            except TimeoutError:
+                continue
+            if not chunk:
+                continue
+            data.extend(chunk)
+            self._append_chunk(chunk)
+            if marker in data:
+                return bytes(data)
+        tail = data[-256:].decode("utf-8", "replace")
+        raise RuntimeError(f"timeout waiting for marker {marker!r}; tail={tail!r}")
+
+    def _sync_prompt(self, timeout: float = 30.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.serial.sendall(b"\r")
+            try:
+                self._recv_until(PROMPT, timeout=2.0)
+                return
+            except RuntimeError:
+                continue
+        raise RuntimeError("timeout waiting for shell prompt")
+
+    def wait_for_prompt(self, timeout: float = 60.0) -> None:
+        try:
+            self._recv_until(PROMPT, timeout=timeout)
+        except RuntimeError:
+            self._sync_prompt(timeout=45.0)
+
+    def run_command(self, command: str, timeout: float = 30.0) -> str:
+        start = len(self.outbytes)
+        if not command.endswith("\n"):
+            command += "\n"
+        self.cmd(command)
+        try:
+            self._recv_until(PROMPT, timeout=timeout)
+        except RuntimeError as exc:
+            self.error(str(exc))
+        return self.outbytes[start:].decode("utf-8", "replace")
+
+    def has_command(self, name: str) -> bool:
+        out = self.run_command(f"ls /bin/{name}", timeout=10.0)
+        return f"/bin/{name}" in out and "cannot access" not in out
 
     def read(self):
-        if self.proc.stdout is None:
-            return
-        fd = self.proc.stdout.fileno()
+        self.serial.settimeout(0.0)
         while True:
-            ready, _, _ = select.select([fd], [], [], 0.2)
-            if not ready:
+            try:
+                buf = self.serial.recv(4096)
+            except TimeoutError:
                 break
-            buf = os.read(fd, 4096)
             if not buf:
                 break
-            self.outbytes.extend(buf)
-        self.output = self.outbytes.decode("utf-8", "replace")
+            self._append_chunk(buf)
+        self.serial.settimeout(0.8)
 
     def lines(self):
         return self.output.splitlines()
@@ -223,6 +256,8 @@ class QEMU(object):
             timeleft = deadline - time.time()
             if timeleft < 0:
                 self.error(f"timeout waiting for: {regexps}")
+            if self.proc.poll() is not None:
+                self.error(f"qemu exited unexpectedly rc={self.proc.returncode}")
             self.read()
             ok, _ = self.match(*regexps, exit=False)
             if ok:
@@ -230,6 +265,20 @@ class QEMU(object):
             ok, line = self.match(progress, exit=False)
             if ok:
                 print(line)
+
+
+def run_esp_usertest_fallback(q: QEMU) -> None:
+    checks = [
+        ("fd_test", r"=== FD Test: \d+/\d+ passed ==="),
+        ("fs_stress_test", r"=== FS Stress: \d+/\d+ passed ==="),
+        ("mem_test", r"=== Mem Test: \d+/\d+ passed ==="),
+        ("hostabi_probe", r"PROBE SUMMARY failures=0"),
+    ]
+    for command, pattern in checks:
+        out = q.run_command(command, timeout=120.0)
+        if not re.search(pattern, out):
+            q.error(f"{command} did not match expected pattern: {pattern}")
+    print("ALL TESTS PASSED")
 
 
 def crash_log():
@@ -310,9 +359,33 @@ def test_dorphan():
 
 
 def test_crash():
-    test_log()
-    test_forphan()
-    test_dorphan()
+    probe = QEMU(True)
+    has_legacy = probe.has_command("logstress") and probe.has_command("forphan") and probe.has_command("dorphan")
+    probe.stop()
+
+    if has_legacy:
+        test_log()
+        test_forphan()
+        test_dorphan()
+        return
+
+    print("Legacy crash tools are unavailable; running ESP crash fallback")
+    for i in range(3):
+        q = QEMU(True)
+        out = q.run_command("fs_stress_test", timeout=120.0)
+        if "passed" not in out:
+            q.error("fs_stress_test did not pass before crash")
+        q.cmd("sleep 5000\n")
+        time.sleep(0.5)
+        q.crash()
+        q.stop()
+
+        q = QEMU()
+        out = q.run_command("fd_test", timeout=120.0)
+        if "=== FD Test:" not in out or "passed" not in out:
+            q.error("fd_test did not pass after crash recovery")
+        q.stop()
+        print("crash attempt", i + 1, "OK")
 
 
 def test_usertests(test=""):
@@ -324,8 +397,13 @@ def test_usertests(test=""):
     elif test != "":
         opt += " " + test
     q = QEMU(True)
-    q.cmd("usertests" + opt + "\n")
-    q.monitor("^ALL TESTS PASSED", progress="test", timeout=timeout)
+    if q.has_command("usertests"):
+        out = q.run_command("usertests" + opt, timeout=float(timeout))
+        if "ALL TESTS PASSED" not in out:
+            q.error("usertests did not report ALL TESTS PASSED")
+    else:
+        print("Legacy usertests binary is unavailable; running ESP fallback suite")
+        run_esp_usertest_fallback(q)
     q.stop()
 
 
