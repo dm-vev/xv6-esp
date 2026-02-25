@@ -30,6 +30,8 @@ jobs:
 
       - name: Prepare ESP-IDF
         run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-2.0-0 || sudo apt-get install -y libsdl2-2.0-0t64
           if [ ! -d "$HOME/esp-idf/.git" ]; then
             git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
           fi
