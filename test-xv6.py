@@ -14,6 +14,7 @@ import os
 import re
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -76,6 +77,18 @@ def generate_qemu_flash() -> None:
     run_shell(merge)
 
 
+def ensure_cmake_build_dir() -> None:
+    if not BUILD.exists():
+        return
+    if BUILD.is_dir() and (BUILD / "CMakeCache.txt").exists():
+        return
+    if BUILD.is_symlink() or BUILD.is_file():
+        BUILD.unlink()
+        return
+    if BUILD.is_dir():
+        shutil.rmtree(BUILD)
+
+
 def ensure_qemu_efuse() -> None:
     efuse = BUILD / "qemu_efuse.bin"
     efuse.parent.mkdir(parents=True, exist_ok=True)
@@ -120,6 +133,7 @@ class QEMU(object):
         if QEMU._built:
             return
         try:
+            ensure_cmake_build_dir()
             run_shell(f"{idf_export_cmd()} && idf.py set-target esp32s3 && idf.py build")
             QEMU._built = True
         except subprocess.CalledProcessError as e:

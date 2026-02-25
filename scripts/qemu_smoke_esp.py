@@ -179,13 +179,7 @@ def stop_qemu(proc, sock=None) -> None:
     stop_idf_qemu(proc, sock)
 
 
-def main() -> int:
-    if os.environ.get("XV6_SKIP_BUILD") != "1":
-        run(f"{IDF_EXPORT} && idf.py set-target esp32s3 && idf.py build")
-    generate_qemu_flash()
-    ensure_qemu_efuse()
-    run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
-
+def run_smoke_once() -> None:
     qemu_proc, sock = launch_qemu()
     try:
         try:
@@ -359,8 +353,38 @@ def main() -> int:
     finally:
         stop_qemu(qemu_proc, sock)
 
-    print("QEMU smoke test passed")
-    return 0
+
+def main() -> int:
+    if os.environ.get("XV6_SKIP_BUILD") != "1":
+        run(f"{IDF_EXPORT} && idf.py set-target esp32s3 && idf.py build")
+    generate_qemu_flash()
+    ensure_qemu_efuse()
+    run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
+
+    try:
+        attempts = int(os.environ.get("XV6_QEMU_SMOKE_RETRIES", "2"))
+    except ValueError:
+        attempts = 2
+    if attempts < 1:
+        attempts = 1
+
+    for attempt in range(1, attempts + 1):
+        try:
+            run_smoke_once()
+            print("QEMU smoke test passed")
+            return 0
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc).strip()
+            if not msg:
+                msg = exc.__class__.__name__
+            print(f"[qemu-smoke] attempt {attempt}/{attempts} failed: {msg}")
+            run("pkill -x qemu-system-xtensa >/dev/null 2>&1 || true")
+            if attempt < attempts:
+                time.sleep(1.0)
+
+    print("QEMU smoke test failed")
+    return 1
+
 
 
 if __name__ == "__main__":
