@@ -37,38 +37,57 @@ jobs:
     timeout-minutes: 90
     env:
       DO_STATIC: ${{ github.event_name != 'workflow_dispatch' || inputs.run_static }}
+      IDF_TOOLS_PATH: ${{ runner.temp }}/.espressif
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Cache ESP-IDF and tools
-        if: env.DO_STATIC == 'true'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.espressif
-            ~/esp-idf
-          key: ${{ runner.os }}-espidf-v6.0-static-v2
-
       - name: Install static analysis dependencies
         if: env.DO_STATIC == 'true'
         run: |
+          set -euo pipefail
+          install_one_of() {
+            local ok=1
+            for pkg in "$@"; do
+              if sudo apt-get install -y "$pkg"; then
+                ok=0
+                break
+              fi
+            done
+            return "$ok"
+          }
+
           sudo apt-get update
           sudo apt-get install -y cppcheck clang-tidy codespell
+          install_one_of libsdl2-2.0-0 libsdl2-2.0-0t64
+          install_one_of libslirp0 libslirp0t64 || true
+          sudo apt-get install -y libglib2.0-0 libpixman-1-0 libgcrypt20
           python3 -m pip install --upgrade pip
           python3 -m pip install semgrep ruff bandit
 
       - name: Prepare ESP-IDF (compile_commands)
         if: env.DO_STATIC == 'true'
         run: |
-          if [ ! -d "$HOME/esp-idf/.git" ]; then
-            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
-          fi
-          "$HOME/esp-idf/install.sh" esp32s3
+          set -euo pipefail
+          retry() {
+            local n=0
+            local max=3
+            until "$@"; do
+              n=$((n + 1))
+              if [ "$n" -ge "$max" ]; then
+                return 1
+              fi
+              sleep 5
+            done
+          }
+
+          rm -rf "$HOME/esp-idf"
+          retry git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          retry "$HOME/esp-idf/install.sh" esp32s3
           source "$HOME/esp-idf/export.sh"
           idf.py --version
           idf.py set-target esp32s3
-          idf.py build
+          idf.py reconfigure
 
       - name: Run static analysis
         if: env.DO_STATIC == 'true'
@@ -91,32 +110,52 @@ jobs:
       INPUT_RETRIES: ${{ github.event_name == 'workflow_dispatch' && inputs.qemu_retries || '' }}
       INPUT_STRESS: ${{ github.event_name == 'workflow_dispatch' && inputs.stress_iterations || '' }}
       INPUT_SOAK: ${{ github.event_name == 'workflow_dispatch' && inputs.soak_iterations || '' }}
+      IDF_TOOLS_PATH: ${{ runner.temp }}/.espressif
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Cache ESP-IDF and tools
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.espressif
-            ~/esp-idf
-          key: ${{ runner.os }}-espidf-v6.0-qemu-v2
-
       - name: Install system dependencies
         run: |
+          set -euo pipefail
+          install_one_of() {
+            local ok=1
+            for pkg in "$@"; do
+              if sudo apt-get install -y "$pkg"; then
+                ok=0
+                break
+              fi
+            done
+            return "$ok"
+          }
+
           sudo apt-get update
           sudo apt-get install -y bc
-          sudo apt-get install -y libsdl2-2.0-0 || sudo apt-get install -y libsdl2-2.0-0t64
-          sudo apt-get install -y libslirp0 || true
+          install_one_of libsdl2-2.0-0 libsdl2-2.0-0t64
+          install_one_of libslirp0 libslirp0t64 || true
+          sudo apt-get install -y libglib2.0-0 libpixman-1-0 libgcrypt20
 
       - name: Prepare ESP-IDF and QEMU
         run: |
-          if [ ! -d "$HOME/esp-idf/.git" ]; then
-            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
-          fi
-          "$HOME/esp-idf/install.sh" esp32s3
-          python3 "$HOME/esp-idf/tools/idf_tools.py" install qemu-xtensa
+          set -euo pipefail
+          retry() {
+            local n=0
+            local max=3
+            until "$@"; do
+              n=$((n + 1))
+              if [ "$n" -ge "$max" ]; then
+                return 1
+              fi
+              sleep 5
+            done
+          }
+
+          rm -rf "$HOME/esp-idf"
+          retry git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          retry "$HOME/esp-idf/install.sh" esp32s3
+          retry python3 "$HOME/esp-idf/tools/idf_tools.py" install qemu-xtensa
+          source "$HOME/esp-idf/export.sh"
+          qemu-system-xtensa --version
 
       - name: Build firmware and filesystem once
         run: |
