@@ -41,6 +41,54 @@ SHIM_SYMBOLS = {
     "__errno": "xv6_libc_shim___errno",
 }
 
+INTERNAL_FALLBACKS = {
+    # Some ESP-IDF/newlib variants do not expose _ctype_ as a link-visible
+    # host symbol. Provide a built-in ASCII table fallback for applets that
+    # emit relocations against _ctype_ (+1 addressing model).
+    "_ctype_": "xv6_ctype_fallback",
+}
+
+
+def build_ctype_fallback_table() -> list[int]:
+    # Matches newlib ctype bit layout from <ctype.h>.
+    FLAG_U = 0x01
+    FLAG_L = 0x02
+    FLAG_N = 0x04
+    FLAG_S = 0x08
+    FLAG_P = 0x10
+    FLAG_C = 0x20
+    FLAG_X = 0x40
+    FLAG_B = 0x80
+
+    table = [0]
+    for ch in range(256):
+        flags = 0
+        if ch < 0x20 or ch == 0x7F:
+            flags |= FLAG_C
+        if ch in (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20):
+            flags |= FLAG_S
+        if ch == 0x20:
+            flags |= FLAG_B
+        if 0x30 <= ch <= 0x39:
+            flags |= FLAG_N | FLAG_X
+        if 0x41 <= ch <= 0x5A:
+            flags |= FLAG_U
+            if ch <= 0x46:
+                flags |= FLAG_X
+        if 0x61 <= ch <= 0x7A:
+            flags |= FLAG_L
+            if ch <= 0x66:
+                flags |= FLAG_X
+        if (
+            0x21 <= ch <= 0x7E
+            and not (0x30 <= ch <= 0x39)
+            and not (0x41 <= ch <= 0x5A)
+            and not (0x61 <= ch <= 0x7A)
+        ):
+            flags |= FLAG_P
+        table.append(flags)
+    return table
+
 
 def collect_symbols(nm_bin: str, libs: list[str]) -> tuple[list[str], set[str]]:
     out = subprocess.check_output(
@@ -96,6 +144,7 @@ def render(
     forced_symbols: set[str],
     alias_map: dict[str, str],
     extra_weak_symbols: set[str],
+    internal_fallbacks: set[str],
     shim_map: dict[str, str],
     header_path: str,
 ) -> str:
@@ -110,6 +159,14 @@ def render(
         lines.append("{")
         lines.append("  return &errno;")
         lines.append("}")
+        lines.append("")
+    if "xv6_ctype_fallback" in internal_fallbacks:
+        ctype_table = build_ctype_fallback_table()
+        lines.append("static const unsigned char xv6_ctype_fallback[257] = {")
+        for i in range(0, len(ctype_table), 16):
+            row = ", ".join(f"0x{b:02x}" for b in ctype_table[i : i + 16])
+            lines.append(f"  {row},")
+        lines.append("};")
         lines.append("")
     lines.append("#pragma GCC diagnostic push")
     lines.append("#pragma GCC diagnostic ignored \"-Wbuiltin-declaration-mismatch\"")
@@ -174,15 +231,20 @@ def main() -> int:
 
     alias_map: dict[str, str] = {}
     extra_weak_symbols: set[str] = set()
+    internal_fallbacks: set[str] = set()
     for alias, target in COMPAT_ALIASES.items():
         if alias in symbol_set:
             continue
         if alias not in needed_symbols and alias not in ALWAYS_COMPAT_ALIASES:
             continue
-        alias_map[alias] = target
+        mapped_target = target
+        if target not in symbol_set and alias in INTERNAL_FALLBACKS:
+            mapped_target = INTERNAL_FALLBACKS[alias]
+            internal_fallbacks.add(mapped_target)
+        alias_map[alias] = mapped_target
         if target in strong_symbols:
             forced_symbols.add(target)
-        elif target not in symbol_set:
+        elif target not in symbol_set and mapped_target == target:
             extra_weak_symbols.add(target)
 
     shim_map: dict[str, str] = {}
@@ -196,7 +258,7 @@ def main() -> int:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
-        render(symbols, forced_symbols, alias_map, extra_weak_symbols, shim_map, args.header),
+        render(symbols, forced_symbols, alias_map, extra_weak_symbols, internal_fallbacks, shim_map, args.header),
         encoding="utf-8",
     )
     return 0
