@@ -43,7 +43,7 @@ This document defines target boundaries for the runtime architecture.
 - POSIX FS host ABI has been extracted to `kernel/hostabi/hostabi_posix_fs.c`
   (`open/read/write/close/dup/dup2/lseek/stat/lstat/fstat/readlink/pipe`), while `shell_runtime.c`
   keeps thin adapters and shell-specific logic.
-- Runtime kernel modules are managed by `kernel/modules/module_manager.c` (`kmod` shell command),
+- Runtime kernel modules are managed by `kernel/modules/module_manager_*.c` (`kmod` shell command),
   with autoload manifest support from `/etc/modules.conf`.
 
 ## Invariants
