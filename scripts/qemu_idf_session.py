@@ -6,6 +6,7 @@ import select
 import shlex
 import signal
 import subprocess
+import time
 import tty
 from pathlib import Path
 
@@ -24,7 +25,16 @@ class PtySerial:
             raise OSError("serial endpoint is closed")
         view = memoryview(data)
         sent = 0
+        deadline: float | None = None
+        if self._timeout is not None:
+            deadline = time.time() + self._timeout
         while sent < len(data):
+            wait_s: float | None = None
+            if deadline is not None:
+                wait_s = max(0.0, deadline - time.time())
+            _, writable, _ = select.select([], [self._fd], [], wait_s)
+            if not writable:
+                raise TimeoutError()
             n = os.write(self._fd, view[sent:])
             if n <= 0:
                 raise OSError("failed to write to qemu tty")

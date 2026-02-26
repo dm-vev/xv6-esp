@@ -17,21 +17,23 @@ BLOCKED_EXPORT_SYMBOLS = {
     "_Exit",
     "abort",
     "quick_exit",
+    # In picolibc/newlib builds this may exist in libc.a but be absent from the
+    # final linked image. Export it via alias to _ctype_b instead.
+    "_ctype_",
 }
 
 BLOCKED_NEEDED_SYMBOLS = {
     "errno",
 }
 
-NONFORCED_SYMBOLS = {
-    # Some ESP-IDF/newlib link pipelines do not expose this internal ctype
-    # object as a regular host symbol. Keep it weak to avoid hard link failures.
-    "_ctype_",
-}
+NONFORCED_SYMBOLS = set()
 
 COMPAT_ALIASES = {
     # ESP-IDF no-rtti picolibc exports _ctype_b but some applets reference _ctype_.
     "_ctype_": "_ctype_b",
+}
+ALWAYS_COMPAT_ALIASES = {
+    "_ctype_",
 }
 
 SHIM_SYMBOLS = {
@@ -92,6 +94,7 @@ def render(
     symbols: list[str],
     forced_symbols: set[str],
     alias_map: dict[str, str],
+    extra_weak_symbols: set[str],
     shim_map: dict[str, str],
     header_path: str,
 ) -> str:
@@ -115,6 +118,8 @@ def render(
             lines.append(f"extern char {s};")
         else:
             lines.append(f"extern char {s} __attribute__((weak));")
+    for s in sorted(extra_weak_symbols):
+        lines.append(f"extern char {s} __attribute__((weak));")
     lines.append("#pragma GCC diagnostic pop")
     lines.append("")
     lines.append("static const elf_host_symbol_t g_libc_host_syms[] = {")
@@ -167,16 +172,17 @@ def main() -> int:
     }
 
     alias_map: dict[str, str] = {}
+    extra_weak_symbols: set[str] = set()
     for alias, target in COMPAT_ALIASES.items():
         if alias in symbol_set:
             continue
-        if alias not in needed_symbols:
-            continue
-        if target not in symbol_set:
+        if alias not in needed_symbols and alias not in ALWAYS_COMPAT_ALIASES:
             continue
         alias_map[alias] = target
         if target in strong_symbols:
             forced_symbols.add(target)
+        elif target not in symbol_set:
+            extra_weak_symbols.add(target)
 
     shim_map: dict[str, str] = {}
     for sym_name, shim_name in SHIM_SYMBOLS.items():
@@ -188,7 +194,10 @@ def main() -> int:
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render(symbols, forced_symbols, alias_map, shim_map, args.header), encoding="utf-8")
+    out_path.write_text(
+        render(symbols, forced_symbols, alias_map, extra_weak_symbols, shim_map, args.header),
+        encoding="utf-8",
+    )
     return 0
 
 

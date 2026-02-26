@@ -126,7 +126,7 @@ run_bandit() {
 run_codespell() {
   require_cmd codespell || return 0
   log "codespell"
-  codespell --config .codespellrc -f -H -q 2
+  codespell --config .codespellrc -f -H -q 2 --ignore-words-list "Mitake,Tung,mitake,tung"
 }
 
 main() {

@@ -236,7 +236,16 @@ class QemuShell:
             raise RuntimeError("qemu socket is not initialized")
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            self.sock.sendall(b"\r")
+            if self.proc is not None and self.proc.poll() is not None:
+                raise RuntimeError(f"qemu exited early rc={self.proc.returncode}")
+            try:
+                self.sock.sendall(b"\r")
+            except TimeoutError:
+                continue
+            except OSError as exc:
+                if self.proc is not None and self.proc.poll() is not None:
+                    raise RuntimeError(f"qemu exited early rc={self.proc.returncode}") from exc
+                continue
             try:
                 out = self.recv_until(PROMPT, timeout_s=2.0).decode(errors="ignore")
                 return clean_output(out)
@@ -254,7 +263,7 @@ class QemuShell:
             self.assert_clean(out, "recover_prompt")
             print("^C\n" + out)
             return
-        except (OSError, RuntimeError) as exc:
+        except (OSError, TimeoutError, RuntimeError) as exc:
             print(f"[qemu-ci] recover_prompt fallback: {exc}")
         self.sync_prompt(timeout_s=20.0)
 
@@ -264,7 +273,14 @@ class QemuShell:
         last_err = ""
         for attempt in range(1, retries + 1):
             self.drain_rx()
-            self.sock.sendall((command + "\r").encode())
+            try:
+                self.sock.sendall((command + "\r").encode())
+            except (OSError, TimeoutError) as exc:
+                last_err = f"send failed for {command!r}: {exc}"
+                if attempt < retries:
+                    self.recover_prompt()
+                    continue
+                raise RuntimeError(last_err) from exc
             try:
                 out = self.recv_until(PROMPT, timeout_s=timeout_s).decode(errors="ignore")
             except RuntimeError as exc:
