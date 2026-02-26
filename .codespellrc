@@ -1,3 +1,4 @@
 [codespell]
-skip = .git,build,.vscode,.venv_static,.tools,fs.img,*.asm,*.sym
-ignore-words-list = iput,copyin,hart,stati,sie,inout,fo,inlin,ser,wronly,Mitake,Tung
+skip = .git,build,.vscode,.venv_static,.tools,fs.img,*.asm,*.sym,.codespellrc,.codespell-ignore-words
+ignore-words = .codespell-ignore-words
+ignore-words-list = iput,copyin,hart,stati,sie,inout,fo,inlin,ser,wronly
