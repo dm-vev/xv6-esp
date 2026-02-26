@@ -59,7 +59,7 @@ jobs:
             --commit "${GITHUB_SHA}"
 
       - name: Upload release bundle artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: release-bundle-${{ github.ref_name }}
           path: dist/releases/${{ github.ref_name }}
