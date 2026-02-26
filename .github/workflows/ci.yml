@@ -37,10 +37,15 @@ jobs:
     timeout-minutes: 90
     env:
       DO_STATIC: ${{ github.event_name != 'workflow_dispatch' || inputs.run_static }}
-      IDF_TOOLS_PATH: ${{ runner.temp }}/.espressif
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Configure IDF tools path
+        if: env.DO_STATIC == 'true'
+        run: |
+          echo "IDF_TOOLS_PATH=$RUNNER_TEMP/.espressif" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/.espressif"
 
       - name: Install static analysis dependencies
         if: env.DO_STATIC == 'true'
@@ -110,10 +115,14 @@ jobs:
       INPUT_RETRIES: ${{ github.event_name == 'workflow_dispatch' && inputs.qemu_retries || '' }}
       INPUT_STRESS: ${{ github.event_name == 'workflow_dispatch' && inputs.stress_iterations || '' }}
       INPUT_SOAK: ${{ github.event_name == 'workflow_dispatch' && inputs.soak_iterations || '' }}
-      IDF_TOOLS_PATH: ${{ runner.temp }}/.espressif
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Configure IDF tools path
+        run: |
+          echo "IDF_TOOLS_PATH=$RUNNER_TEMP/.espressif" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/.espressif"
 
       - name: Install system dependencies
         run: |
