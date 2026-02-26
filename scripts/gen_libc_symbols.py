@@ -29,8 +29,9 @@ BLOCKED_NEEDED_SYMBOLS = {
 NONFORCED_SYMBOLS = set()
 
 COMPAT_ALIASES = {
-    # ESP-IDF no-rtti picolibc exports _ctype_b but some applets reference _ctype_.
-    "_ctype_": "_ctype_b",
+    # Applets reference _ctype_ as an external data symbol. Keep a late-bound
+    # weak reference so link succeeds even if toolchain archives don't expose it.
+    "_ctype_": "_ctype_",
 }
 ALWAYS_COMPAT_ALIASES = {
     "_ctype_",

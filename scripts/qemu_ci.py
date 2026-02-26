@@ -204,13 +204,16 @@ class QemuShell:
         data = bytearray()
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            if self.proc is not None and self.proc.poll() is not None:
-                raise RuntimeError(f"qemu exited early rc={self.proc.returncode}")
             try:
                 chunk = self.sock.recv(4096)
             except TimeoutError:
-                continue
+                chunk = b""
             if not chunk:
+                if self.proc is not None and self.proc.poll() is not None:
+                    tail = clean_output(data[-512:].decode(errors="ignore"))
+                    raise RuntimeError(
+                        f"qemu exited early rc={self.proc.returncode}; serial tail={tail!r}"
+                    )
                 continue
             data.extend(chunk)
             if marker in data:
