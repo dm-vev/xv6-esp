@@ -51,41 +51,41 @@ INTERNAL_FALLBACKS = {
 
 def build_ctype_fallback_table() -> list[int]:
     # Matches newlib ctype bit layout from <ctype.h>.
-    FLAG_U = 0x01
-    FLAG_L = 0x02
-    FLAG_N = 0x04
-    FLAG_S = 0x08
-    FLAG_P = 0x10
-    FLAG_C = 0x20
-    FLAG_X = 0x40
-    FLAG_B = 0x80
+    flag_u = 0x01
+    flag_l = 0x02
+    flag_n = 0x04
+    flag_s = 0x08
+    flag_p = 0x10
+    flag_c = 0x20
+    flag_x = 0x40
+    flag_b = 0x80
 
     table = [0]
     for ch in range(256):
         flags = 0
         if ch < 0x20 or ch == 0x7F:
-            flags |= FLAG_C
+            flags |= flag_c
         if ch in (0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20):
-            flags |= FLAG_S
+            flags |= flag_s
         if ch == 0x20:
-            flags |= FLAG_B
+            flags |= flag_b
         if 0x30 <= ch <= 0x39:
-            flags |= FLAG_N | FLAG_X
+            flags |= flag_n | flag_x
         if 0x41 <= ch <= 0x5A:
-            flags |= FLAG_U
+            flags |= flag_u
             if ch <= 0x46:
-                flags |= FLAG_X
+                flags |= flag_x
         if 0x61 <= ch <= 0x7A:
-            flags |= FLAG_L
+            flags |= flag_l
             if ch <= 0x66:
-                flags |= FLAG_X
+                flags |= flag_x
         if (
             0x21 <= ch <= 0x7E
             and not (0x30 <= ch <= 0x39)
             and not (0x41 <= ch <= 0x5A)
             and not (0x61 <= ch <= 0x7A)
         ):
-            flags |= FLAG_P
+            flags |= flag_p
         table.append(flags)
     return table
 
