@@ -1,0 +1,195 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      qemu_suites:
+        description: "Comma-separated suites (smoke,applets,regressions,stress,soak,all)"
+        required: false
+        default: "all"
+      qemu_retries:
+        description: "Retries per suite"
+        required: false
+        default: "2"
+      stress_iterations:
+        description: "Stress suite iterations"
+        required: false
+        default: "200"
+      soak_iterations:
+        description: "Soak suite iterations"
+        required: false
+        default: "1200"
+      run_static:
+        description: "Run static analysis"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      DO_STATIC: ${{ github.event_name != 'workflow_dispatch' || inputs.run_static }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache ESP-IDF and tools
+        if: env.DO_STATIC == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.espressif
+            ~/esp-idf
+          key: ${{ runner.os }}-espidf-v6.0-static-v2
+
+      - name: Install static analysis dependencies
+        if: env.DO_STATIC == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck clang-tidy codespell
+          python3 -m pip install --upgrade pip
+          python3 -m pip install semgrep ruff bandit
+
+      - name: Prepare ESP-IDF (compile_commands)
+        if: env.DO_STATIC == 'true'
+        run: |
+          if [ ! -d "$HOME/esp-idf/.git" ]; then
+            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          fi
+          "$HOME/esp-idf/install.sh" esp32s3
+          source "$HOME/esp-idf/export.sh"
+          idf.py --version
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Run static analysis
+        if: env.DO_STATIC == 'true'
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          STRICT=1 BUILD_DIR=build ./scripts/static_analysis.sh
+
+  esp-build-and-qemu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 210
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [smoke, applets, regressions, stress, soak]
+    env:
+      DEFAULT_QEMU_RETRIES: "2"
+      DEFAULT_STRESS_ITERATIONS: "200"
+      DEFAULT_SOAK_ITERATIONS: "1200"
+      INPUT_SUITES: ${{ github.event_name == 'workflow_dispatch' && inputs.qemu_suites || 'all' }}
+      INPUT_RETRIES: ${{ github.event_name == 'workflow_dispatch' && inputs.qemu_retries || '' }}
+      INPUT_STRESS: ${{ github.event_name == 'workflow_dispatch' && inputs.stress_iterations || '' }}
+      INPUT_SOAK: ${{ github.event_name == 'workflow_dispatch' && inputs.soak_iterations || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache ESP-IDF and tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.espressif
+            ~/esp-idf
+          key: ${{ runner.os }}-espidf-v6.0-qemu-v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc
+          sudo apt-get install -y libsdl2-2.0-0 || sudo apt-get install -y libsdl2-2.0-0t64
+          sudo apt-get install -y libslirp0 || true
+
+      - name: Prepare ESP-IDF and QEMU
+        run: |
+          if [ ! -d "$HOME/esp-idf/.git" ]; then
+            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          fi
+          "$HOME/esp-idf/install.sh" esp32s3
+          python3 "$HOME/esp-idf/tools/idf_tools.py" install qemu-xtensa
+
+      - name: Build firmware and filesystem once
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          idf.py --version
+          qemu-system-xtensa --version
+          idf.py set-target esp32s3
+          idf.py build
+          XV6_SKIP_BUILD=1 python3 ./scripts/qemu_ci.py --skip-build --prepare-only
+
+      - name: Run suite from matrix
+        env:
+          MATRIX_SUITE: ${{ matrix.suite }}
+        run: |
+          source "$HOME/esp-idf/export.sh"
+          SUITE_LIST="$INPUT_SUITES"
+          SUITE="$MATRIX_SUITE"
+
+          if [ "$SUITE_LIST" != "all" ]; then
+            MATCHED=0
+            IFS=',' read -ra WANT <<< "$SUITE_LIST"
+            for raw in "${WANT[@]}"; do
+              one="$(echo "$raw" | xargs)"
+              if [ "$one" = "$SUITE" ]; then
+                MATCHED=1
+                break
+              fi
+            done
+            if [ "$MATCHED" -ne 1 ]; then
+              echo "skip suite=$SUITE (filtered by qemu_suites=$SUITE_LIST)"
+              exit 0
+            fi
+          fi
+
+          RETRIES="${INPUT_RETRIES:-$DEFAULT_QEMU_RETRIES}"
+          STRESS_ITERS="${INPUT_STRESS:-$DEFAULT_STRESS_ITERATIONS}"
+          SOAK_ITERS="${INPUT_SOAK:-$DEFAULT_SOAK_ITERATIONS}"
+
+          XV6_SKIP_BUILD=1 python3 ./scripts/qemu_ci.py \
+            --skip-build \
+            --suite "$SUITE" \
+            --retries "$RETRIES" \
+            --stress-iterations "$STRESS_ITERS" \
+            --soak-iterations "$SOAK_ITERS"
+
+      - name: Upload triage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-${{ matrix.suite }}-${{ github.run_id }}
+          path: build/triage
+          if-no-files-found: ignore
+
+  riscv-compat-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install RISC-V toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            binutils-riscv64-unknown-elf \
+            gcc-riscv64-unknown-elf \
+            qemu-system-misc
+
+      - name: Build classic xv6 kernel+fs image
+        run: |
+          make kernel/kernel fs.img
+
+      - name: Validate QEMU binary availability
+        run: |
+          qemu-system-riscv64 --version

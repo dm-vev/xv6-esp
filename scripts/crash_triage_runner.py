@@ -78,7 +78,9 @@ def main() -> int:
             bufsize=1,
             preexec_fn=os.setsid if os.name == "posix" else None,
         )
-        assert proc.stdout is not None
+        if proc.stdout is None:
+            terminate_process(proc)
+            raise RuntimeError("failed to capture command output stream")
         for line in proc.stdout:
             sys.stdout.write(line)
             log.write(line)
