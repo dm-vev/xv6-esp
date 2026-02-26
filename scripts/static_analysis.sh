@@ -65,6 +65,7 @@ run_cppcheck() {
     --inline-suppr \
     --suppress=missingIncludeSystem \
     --suppress=unusedFunction \
+    --suppress=normalCheckLevelMaxBranches \
     -I kernel \
     -I applets/include \
     -I main \
