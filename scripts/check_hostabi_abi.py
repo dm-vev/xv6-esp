@@ -47,7 +47,7 @@ def write_snapshot(path: Path, symbols: list[str]) -> None:
     lines = [
         "# Host ABI export snapshot for applet/newlib runtime.",
         "# Order is intentionally fixed and treated as ABI-significant.",
-        "# Generated from main/runtime/shell_runtime.c register_default_symbols().",
+        "# Generated from kernel/runtime/shell_runtime_shell.inc register_default_symbols().",
         *symbols,
         "",
     ]
@@ -59,7 +59,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Check/freeze host ABI export surface.")
     parser.add_argument(
         "--exports-source",
-        default=str(root / "main" / "runtime" / "shell_runtime.c"),
+        default=str(root / "kernel" / "runtime" / "shell_runtime_shell.inc"),
         help="path to source file that defines register_default_symbols()",
     )
     parser.add_argument(

@@ -26,4 +26,10 @@ typedef struct {
 typedef const xv6_module_desc_t *(*xv6_module_describe_fn_t)(void);
 typedef int (*xv6_module_lifecycle_fn_t)(void);
 
+/*
+ * Optional module dependency metadata:
+ *   const char *xv6_module_depends[] = { "core", "/lib/modules/net.so" };
+ *   int xv6_module_depends_count = sizeof(xv6_module_depends) / sizeof(xv6_module_depends[0]);
+ */
+
 #endif

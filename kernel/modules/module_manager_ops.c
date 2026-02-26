@@ -1,15 +1,72 @@
 #include "modules/module_manager_internal.h"
 
 /*
- * Runtime operations for already loaded modules: unload/reload/list/verify.
- * All slot table mutations are serialized under kmod_lock.
+ * Runtime operations for loaded modules: unload/reload/list/verify.
+ * Refcount model: total_ref = ext_refcnt + number_of_dependents.
  */
+
+static int kmod_unload_slot_locked(int idx, int force)
+{
+  kmod_slot_t slot;
+  int rc;
+
+  if(idx < 0 || idx >= KMOD_MAX_TRACKED || !g_slots[idx].used)
+    return -1;
+
+  slot = g_slots[idx];
+
+  if(!force && slot.fini_fn && slot.fini_fn() != 0){
+    set_last_error("kmod unload: module fini failed");
+    return -1;
+  }
+
+  rc = dlclose(slot.handle);
+  if(rc != 0){
+    set_last_error("kmod unload: %s", dlerror() ? dlerror() : "dlclose failed");
+    return -1;
+  }
+
+  if(hostabi_export_remove_module(slot.module_id) != 0){
+    set_last_error("kmod unload: symbol cleanup failed");
+    return -1;
+  }
+
+  remove_dependencies_from_module_locked(idx);
+  remove_all_edges_to_module_locked(idx);
+  memset(&g_slots[idx], 0, sizeof(g_slots[idx]));
+  return 0;
+}
+
+static int kmod_gc_orphans_locked(void)
+{
+  int progress;
+
+  do {
+    int i;
+    progress = 0;
+
+    for(i = 0; i < KMOD_MAX_TRACKED; i++){
+      if(!g_slots[i].used)
+        continue;
+      if(g_slots[i].ext_refcnt != 0)
+        continue;
+      if(dependency_refcnt_locked(i) != 0)
+        continue;
+
+      if(kmod_unload_slot_locked(i, 0) != 0)
+        return -1;
+      progress = 1;
+      break;
+    }
+  } while(progress);
+
+  return 0;
+}
+
 int kmod_unload(int module_id, int force)
 {
   int idx;
-  int rc;
-  int module_id_local;
-  int sym_rc;
+  int incoming_refs;
 
   kmod_lock();
 
@@ -26,24 +83,38 @@ int kmod_unload(int module_id, int force)
     return -1;
   }
 
-  if(!force && g_slots[idx].fini_fn && g_slots[idx].fini_fn() != 0){
-    set_last_error("kmod unload: module fini failed");
+  incoming_refs = dependency_refcnt_locked(idx);
+
+  if(!force){
+    if(g_slots[idx].ext_refcnt <= 0){
+      set_last_error("kmod unload: no external refs");
+      kmod_unlock();
+      return -1;
+    }
+
+    if(g_slots[idx].ext_refcnt - 1 + incoming_refs > 0){
+      g_slots[idx].ext_refcnt--;
+      set_last_error("kmod unload: decremented refcnt");
+      kmod_unlock();
+      return 0;
+    }
+
+    g_slots[idx].ext_refcnt = 0;
+    if(incoming_refs != 0){
+      set_last_error("kmod unload: module busy");
+      kmod_unlock();
+      return -1;
+    }
+  } else {
+    g_slots[idx].ext_refcnt = 0;
+  }
+
+  if(kmod_unload_slot_locked(idx, force) != 0){
     kmod_unlock();
     return -1;
   }
 
-  module_id_local = g_slots[idx].module_id;
-  rc = dlclose(g_slots[idx].handle);
-  if(rc != 0){
-    set_last_error("kmod unload: %s", dlerror() ? dlerror() : "dlclose failed");
-    kmod_unlock();
-    return -1;
-  }
-
-  sym_rc = hostabi_export_remove_module(module_id_local);
-  memset(&g_slots[idx], 0, sizeof(g_slots[idx]));
-  if(sym_rc != 0){
-    set_last_error("kmod unload: symbol cleanup failed");
+  if(kmod_gc_orphans_locked() != 0){
     kmod_unlock();
     return -1;
   }
@@ -69,6 +140,11 @@ int kmod_reload(int module_id, int *new_module_id_out)
     kmod_unlock();
     return -1;
   }
+  if(g_slots[idx].ext_refcnt != 1 || dependency_refcnt_locked(idx) != 0){
+    set_last_error("kmod reload: module busy");
+    kmod_unlock();
+    return -1;
+  }
   copy_cstr(path, sizeof(path), g_slots[idx].path);
   prio = g_slots[idx].priority;
   kmod_unlock();
@@ -89,8 +165,14 @@ int kmod_reload_path(const char *path, int priority, int *module_id_out)
 
   kmod_lock();
   idx = slot_index_by_path_locked(path);
-  if(idx >= 0)
+  if(idx >= 0){
+    if(g_slots[idx].ext_refcnt != 1 || dependency_refcnt_locked(idx) != 0){
+      set_last_error("kmod reload: module busy");
+      kmod_unlock();
+      return -1;
+    }
     old_id = g_slots[idx].module_id;
+  }
   kmod_unlock();
 
   if(old_id > 0 && kmod_unload(old_id, 0) != 0)
@@ -117,7 +199,7 @@ int kmod_list(kmod_info_t *out, int cap, int *count_out)
       out[n].priority = g_slots[i].priority;
       out[n].loaded = 1;
       out[n].signed_ok = g_slots[i].signed_ok;
-      out[n].refcnt = 1;
+      out[n].refcnt = total_refcnt_locked(i);
       copy_cstr(out[n].name, sizeof(out[n].name), g_slots[i].name);
       copy_cstr(out[n].path, sizeof(out[n].path), g_slots[i].path);
     }

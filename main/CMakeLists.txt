@@ -27,13 +27,16 @@ idf_component_register(
     "../kernel/vfs/vfs_fd.c"
     "../kernel/vfs/vfs_pty.c"
     "../kernel/vfs/vfs_dev.c"
-    "runtime/shell_runtime.c"
+    "../kernel/runtime/shell_runtime.c"
   INCLUDE_DIRS
     "."
     "../kernel"
 )
 
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)
+  option(XV6_ENABLE_DUCKTAPE_DEMO "Build optional Duktape demo applet" OFF)
+  set(XV6_DUCKTAPE_SOURCE_DIR "" CACHE PATH "Path to Duktape dist source dir containing duktape.c and duktape.h")
+
   set(XV6FS_BLOCKS 896)
   set(XV6FS_ROOT_DIR "${PROJECT_DIR}/fsroot")
   set(APPLET_BUILD_DIR "${CMAKE_BINARY_DIR}/applets")

@@ -97,3 +97,37 @@ int register_module_symbols(int module_id, int base_priority, const xv6_module_d
 
   return 0;
 }
+
+int collect_module_dependencies(void *handle, const char *const **deps_out, int *count_out)
+{
+  int *count_ptr;
+  const char *const *deps;
+  int count;
+  int i;
+
+  if(handle == 0 || deps_out == 0 || count_out == 0)
+    return -1;
+
+  *deps_out = 0;
+  *count_out = 0;
+
+  count_ptr = (int *)dlsym(handle, "xv6_module_depends_count");
+  deps = (const char *const *)dlsym(handle, "xv6_module_depends");
+  if(count_ptr == 0 && deps == 0)
+    return 0;
+  if(count_ptr == 0 || deps == 0)
+    return -1;
+
+  count = *count_ptr;
+  if(count < 0 || count > KMOD_MAX_TRACKED)
+    return -1;
+
+  for(i = 0; i < count; i++){
+    if(deps[i] == 0 || deps[i][0] == 0)
+      return -1;
+  }
+
+  *deps_out = deps;
+  *count_out = count;
+  return 0;
+}

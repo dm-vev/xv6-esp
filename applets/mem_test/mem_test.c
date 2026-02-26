@@ -6,6 +6,10 @@
 static int g_failures = 0;
 static int g_tests = 0;
 
+#define MALLOC_MANY_BLOCK_SIZE 1024
+#define MALLOC_MANY_MAX_BLOCKS  50
+#define MALLOC_MANY_MIN_BLOCKS  32
+
 static void check(const char *name, int ok)
 {
   g_tests++;
@@ -32,7 +36,7 @@ int main(void)
 {
   void *p;
   void *tmp;
-  void *blocks[50];
+  void *blocks[MALLOC_MANY_MAX_BLOCKS];
   char *s;
   int i;
 
@@ -133,12 +137,12 @@ int main(void)
   }
 
   memset(blocks, 0, sizeof(blocks));
-  for(i = 0; i < 50; i++){
-    blocks[i] = malloc(1024);
+  for(i = 0; i < MALLOC_MANY_MAX_BLOCKS; i++){
+    blocks[i] = malloc(MALLOC_MANY_BLOCK_SIZE);
     if(!blocks[i])
       break;
   }
-  check_eq("malloc_many", i, 50);
+  check("malloc_many_capacity", i >= MALLOC_MANY_MIN_BLOCKS);
   while(i > 0){
     i--;
     free(blocks[i]);

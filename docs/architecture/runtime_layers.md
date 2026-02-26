@@ -33,7 +33,7 @@ This document defines target boundaries for the runtime architecture.
   - `applet_pipeline.cmake`
   - `fs_image.cmake`
   - `test_targets.cmake`
-- Runtime code is still partially concentrated in `main/runtime/shell_runtime.c` and `kernel/vfs/xv6fs_ro.c`.
+- Runtime code is still partially concentrated in `kernel/runtime/shell_runtime.c` and `kernel/vfs/xv6fs_ro.c`.
 - ABI export registry has moved to `kernel/hostabi/exports_registry.c`
   with support for module-driven extension/override and priority ordering.
 - `dirent` host ABI has been extracted to `kernel/hostabi/hostabi_dirent.c`

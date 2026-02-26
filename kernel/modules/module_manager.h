@@ -15,6 +15,9 @@
  * - Module name for identification
  * - Default priority for symbol resolution
  * - Exported symbols with kind and priority
+ * - Optional dependencies via exported symbols:
+ *   - `xv6_module_depends` (const char*[])
+ *   - `xv6_module_depends_count` (int)
  *
  * Symbol kinds:
  * - EXTENSION: Adds new functionality
