@@ -6,6 +6,25 @@ static int shell_allow_ctrl_c_poll(void)
   return (self == g_interactive_task) ? 1 : 0;
 }
 
+#ifndef POLLIN
+#define POLLIN 0x0001
+#endif
+#ifndef POLLOUT
+#define POLLOUT 0x0004
+#endif
+#ifndef POLLERR
+#define POLLERR 0x0008
+#endif
+#ifndef POLLHUP
+#define POLLHUP 0x0010
+#endif
+
+struct pollfd {
+  int fd;
+  short events;
+  short revents;
+};
+
 static void k_copy_cstr(char *dst, int dst_len, const char *src)
 {
   if(dst == 0 || dst_len <= 0)
@@ -805,6 +824,162 @@ static int k_posix_recv(int fd, void *buf, size_t len, int flags)
   return (int)recv(fd, buf, len, flags);
 }
 
+static int k_posix_sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen)
+{
+  if(len > 0){
+    buf = elf_loader_translate_ptr(buf);
+    if(buf == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(addr != 0){
+    addr = (const struct sockaddr *)elf_loader_translate_ptr(addr);
+    if(addr == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return (int)sendto(fd, buf, len, flags, addr, addrlen);
+}
+
+static int k_posix_recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen)
+{
+  if(len > 0){
+    buf = (void *)elf_loader_translate_ptr(buf);
+    if(buf == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(addr != 0){
+    addr = (struct sockaddr *)elf_loader_translate_ptr(addr);
+    if(addr == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(addrlen != 0){
+    addrlen = (socklen_t *)elf_loader_translate_ptr(addrlen);
+    if(addrlen == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return (int)recvfrom(fd, buf, len, flags, addr, addrlen);
+}
+
+static int k_posix_poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+  fd_set rfds;
+  fd_set wfds;
+  fd_set efds;
+  struct timeval tv;
+  struct timeval *tvp = 0;
+  int maxfd = -1;
+  int ready = 0;
+  nfds_t i;
+  int rc;
+
+  if(nfds > 0){
+    fds = (struct pollfd *)elf_loader_translate_ptr(fds);
+    if(fds == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(timeout < -1){
+    errno = EINVAL;
+    return -1;
+  }
+
+  FD_ZERO(&rfds);
+  FD_ZERO(&wfds);
+  FD_ZERO(&efds);
+
+  for(i = 0; i < nfds; i++){
+    int fd = fds[i].fd;
+    short events = fds[i].events;
+    fds[i].revents = 0;
+    if(fd < 0)
+      continue;
+    if(fd >= FD_SETSIZE){
+      errno = EINVAL;
+      return -1;
+    }
+    if((events & POLLIN) != 0)
+      FD_SET(fd, &rfds);
+    if((events & POLLOUT) != 0)
+      FD_SET(fd, &wfds);
+    if((events & (POLLERR | POLLHUP)) != 0)
+      FD_SET(fd, &efds);
+    if(fd > maxfd)
+      maxfd = fd;
+  }
+
+  if(timeout >= 0){
+    tv.tv_sec = timeout / 1000;
+    tv.tv_usec = (timeout % 1000) * 1000;
+    tvp = &tv;
+  }
+
+  rc = select(maxfd + 1, &rfds, &wfds, &efds, tvp);
+  if(rc <= 0)
+    return rc;
+
+  for(i = 0; i < nfds; i++){
+    int fd = fds[i].fd;
+    short revents = 0;
+
+    if(fd < 0)
+      continue;
+    if(FD_ISSET(fd, &rfds))
+      revents = (short)(revents | POLLIN);
+    if(FD_ISSET(fd, &wfds))
+      revents = (short)(revents | POLLOUT);
+    if(FD_ISSET(fd, &efds))
+      revents = (short)(revents | POLLERR);
+    fds[i].revents = revents;
+    if(revents != 0)
+      ready++;
+  }
+
+  return ready;
+}
+
+static int k_posix_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
+{
+  if(readfds != 0){
+    readfds = (fd_set *)elf_loader_translate_ptr(readfds);
+    if(readfds == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(writefds != 0){
+    writefds = (fd_set *)elf_loader_translate_ptr(writefds);
+    if(writefds == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(exceptfds != 0){
+    exceptfds = (fd_set *)elf_loader_translate_ptr(exceptfds);
+    if(exceptfds == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(timeout != 0){
+    timeout = (struct timeval *)elf_loader_translate_ptr(timeout);
+    if(timeout == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return select(nfds, readfds, writefds, exceptfds, timeout);
+}
+
 static int k_posix_shutdown(int fd, int how)
 {
   return shutdown(fd, how);
@@ -944,6 +1119,50 @@ static ssize_t k_recv(int fd, void *buf, size_t len, int flags)
   (void)buf;
   (void)len;
   (void)flags;
+  errno = ENOSYS;
+  return -1;
+}
+
+static ssize_t k_sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen)
+{
+  (void)fd;
+  (void)buf;
+  (void)len;
+  (void)flags;
+  (void)addr;
+  (void)addrlen;
+  errno = ENOSYS;
+  return -1;
+}
+
+static ssize_t k_recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen)
+{
+  (void)fd;
+  (void)buf;
+  (void)len;
+  (void)flags;
+  (void)addr;
+  (void)addrlen;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+  (void)fds;
+  (void)nfds;
+  (void)timeout;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
+{
+  (void)nfds;
+  (void)readfds;
+  (void)writefds;
+  (void)exceptfds;
+  (void)timeout;
   errno = ENOSYS;
   return -1;
 }

@@ -103,6 +103,14 @@ send
 __xv6_posix_send
 recv
 __xv6_posix_recv
+sendto
+__xv6_posix_sendto
+recvfrom
+__xv6_posix_recvfrom
+poll
+__xv6_posix_poll
+select
+__xv6_posix_select
 shutdown
 __xv6_posix_shutdown
 getsockopt
