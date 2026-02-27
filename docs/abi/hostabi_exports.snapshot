@@ -98,8 +98,6 @@ getsockopt
 setsockopt
 getsockname
 getpeername
-poll
-select
 stat
 __xv6_host_stat
 lstat
