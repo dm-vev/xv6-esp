@@ -61,6 +61,7 @@ APPLET_CASES: dict[str, list[str]] = {
     "mem_test": ["mem_test"],
     "mkdir": ["mkdir -p /tmp/integration/a/b/c"],
     "mv": ["mv -f /tmp/integration/cp.rc /tmp/integration/mv.rc"],
+    "net_diag": ["net_diag stats", "net_diag selftest"],
     "printenv": ["printenv", "printenv PATH"],
     "proc_test": ["proc_test"],
     "pwd": ["pwd"],
