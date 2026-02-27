@@ -33,6 +33,7 @@ ESP/QEMU local triage:
 source "$HOME/esp-idf/export.sh"
 python3 ./scripts/ci_gate_esp.py
 python3 ./scripts/qemu_smoke_esp.py
+python3 ./scripts/qemu_net_diag_esp.py
 python3 ./scripts/qemu_regressions_esp.py
 ```
 
