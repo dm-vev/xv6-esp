@@ -10,6 +10,7 @@
 
 #define NETKMOD_MAX_SOCK 64
 #define NETKMOD_FD_BASE 200
+#define NETKMOD_MAX_POLLFD 128
 
 typedef struct {
   int used;
@@ -57,6 +58,9 @@ extern int __xv6_posix_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
 extern int __xv6_posix_connect(int fd, const struct sockaddr *addr, socklen_t addrlen);
 extern int __xv6_posix_send(int fd, const void *buf, size_t len, int flags);
 extern int __xv6_posix_recv(int fd, void *buf, size_t len, int flags);
+extern int __xv6_posix_sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen);
+extern int __xv6_posix_recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen);
+extern int __xv6_posix_poll(struct pollfd *fds, nfds_t nfds, int timeout);
 extern int __xv6_posix_shutdown(int fd, int how);
 extern int __xv6_posix_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
 extern int __xv6_posix_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen);
@@ -166,18 +170,27 @@ int netkmod_socket(int domain, int type, int protocol)
 {
   int host_fd;
   int slot;
+  int base_type;
 
-  if(domain != AF_INET){
+  if(domain != AF_INET && domain != AF_INET6){
     errno = EAFNOSUPPORT;
     return -1;
   }
-  if((type & 0xff) != SOCK_STREAM){
+  base_type = (type & 0xff);
+  if(base_type != SOCK_STREAM && base_type != SOCK_DGRAM){
     errno = EPROTONOSUPPORT;
     return -1;
   }
-  if(protocol != 0 && protocol != IPPROTO_TCP){
-    errno = EPROTONOSUPPORT;
-    return -1;
+  if(base_type == SOCK_STREAM){
+    if(protocol != 0 && protocol != IPPROTO_TCP){
+      errno = EPROTONOSUPPORT;
+      return -1;
+    }
+  } else {
+    if(protocol != 0 && protocol != IPPROTO_UDP){
+      errno = EPROTONOSUPPORT;
+      return -1;
+    }
   }
 
   host_fd = __xv6_posix_socket(domain, type, protocol);
@@ -332,6 +345,164 @@ int netkmod_recv(int fd, void *buf, size_t len, int flags)
   }
   net_unlock();
 
+  return rc;
+}
+
+int netkmod_sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen)
+{
+  int slot;
+  int rc;
+
+  net_lock();
+  slot = slot_from_fd_locked(fd);
+  if(slot < 0){
+    net_unlock();
+    errno = EBADF;
+    return -1;
+  }
+  rc = __xv6_posix_sendto(g_socks[slot].host_fd, buf, len, flags, addr, addrlen);
+  if(rc > 0){
+    g_stats.tx_packets++;
+    g_stats.tx_bytes += (uint32_t)rc;
+  }
+  net_unlock();
+
+  return rc;
+}
+
+int netkmod_recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen)
+{
+  int slot;
+  int rc;
+
+  net_lock();
+  slot = slot_from_fd_locked(fd);
+  if(slot < 0){
+    net_unlock();
+    errno = EBADF;
+    return -1;
+  }
+  rc = __xv6_posix_recvfrom(g_socks[slot].host_fd, buf, len, flags, addr, addrlen);
+  if(rc > 0){
+    g_stats.rx_packets++;
+    g_stats.rx_bytes += (uint32_t)rc;
+  }
+  net_unlock();
+
+  return rc;
+}
+
+int netkmod_poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+  int orig_fd[NETKMOD_MAX_POLLFD];
+  nfds_t i;
+  int rc;
+
+  if(nfds > 0 && fds == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(nfds > NETKMOD_MAX_POLLFD){
+    errno = EINVAL;
+    return -1;
+  }
+
+  net_lock();
+  for(i = 0; i < nfds; i++){
+    int slot;
+    orig_fd[i] = fds[i].fd;
+    slot = slot_from_fd_locked(fds[i].fd);
+    if(slot >= 0)
+      fds[i].fd = g_socks[slot].host_fd;
+  }
+  rc = __xv6_posix_poll(fds, nfds, timeout);
+  for(i = 0; i < nfds; i++)
+    fds[i].fd = orig_fd[i];
+  net_unlock();
+  return rc;
+}
+
+int netkmod_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
+{
+  struct pollfd pfds[FD_SETSIZE];
+  int fd_map[FD_SETSIZE];
+  int timeout_ms = -1;
+  int poll_n = 0;
+  int fd;
+  int rc;
+  uint64_t timeout64;
+
+  if(nfds < 0 || nfds > FD_SETSIZE){
+    errno = EINVAL;
+    return -1;
+  }
+
+  if(timeout != 0){
+    if(timeout->tv_sec < 0 || timeout->tv_usec < 0){
+      errno = EINVAL;
+      return -1;
+    }
+    timeout64 = ((uint64_t)timeout->tv_sec * 1000ull) + ((uint64_t)timeout->tv_usec / 1000ull);
+    timeout_ms = (timeout64 > 0x7fffffffULL) ? 0x7fffffff : (int)timeout64;
+  }
+
+  net_lock();
+  for(fd = 0; fd < nfds; fd++){
+    int want_read = (readfds != 0 && FD_ISSET(fd, readfds)) ? 1 : 0;
+    int want_write = (writefds != 0 && FD_ISSET(fd, writefds)) ? 1 : 0;
+    int want_except = (exceptfds != 0 && FD_ISSET(fd, exceptfds)) ? 1 : 0;
+    int host_fd = fd;
+    int slot;
+    short events = 0;
+
+    if(!want_read && !want_write && !want_except)
+      continue;
+
+    slot = slot_from_fd_locked(fd);
+    if(slot >= 0)
+      host_fd = g_socks[slot].host_fd;
+    if(host_fd < 0 || poll_n >= FD_SETSIZE){
+      net_unlock();
+      errno = EINVAL;
+      return -1;
+    }
+
+    if(want_read)
+      events = (short)(events | POLLIN);
+    if(want_write)
+      events = (short)(events | POLLOUT);
+    if(want_except)
+      events = (short)(events | POLLERR | POLLHUP);
+
+    pfds[poll_n].fd = host_fd;
+    pfds[poll_n].events = events;
+    pfds[poll_n].revents = 0;
+    fd_map[poll_n] = fd;
+    poll_n++;
+  }
+
+  rc = __xv6_posix_poll(pfds, (nfds_t)poll_n, timeout_ms);
+  if(rc >= 0){
+    if(readfds != 0)
+      FD_ZERO(readfds);
+    if(writefds != 0)
+      FD_ZERO(writefds);
+    if(exceptfds != 0)
+      FD_ZERO(exceptfds);
+
+    for(fd = 0; fd < poll_n; fd++){
+      short rev = pfds[fd].revents;
+      int app_fd = fd_map[fd];
+
+      if(readfds != 0 && (rev & (POLLIN | POLLERR | POLLHUP)) != 0)
+        FD_SET(app_fd, readfds);
+      if(writefds != 0 && (rev & POLLOUT) != 0)
+        FD_SET(app_fd, writefds);
+      if(exceptfds != 0 && (rev & (POLLERR | POLLHUP)) != 0)
+        FD_SET(app_fd, exceptfds);
+    }
+  }
+  net_unlock();
   return rc;
 }
 
@@ -572,6 +743,10 @@ static const xv6_module_symbol_t g_symbols[] = {
   { "connect", (void *)netkmod_connect, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
   { "send", (void *)netkmod_send, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
   { "recv", (void *)netkmod_recv, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
+  { "sendto", (void *)netkmod_sendto, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
+  { "recvfrom", (void *)netkmod_recvfrom, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
+  { "poll", (void *)netkmod_poll, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
+  { "select", (void *)netkmod_select, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
   { "shutdown", (void *)netkmod_shutdown, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
   { "getsockopt", (void *)netkmod_getsockopt, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
   { "setsockopt", (void *)netkmod_setsockopt, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
