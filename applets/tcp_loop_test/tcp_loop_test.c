@@ -1,9 +1,9 @@
-#include <arpa/inet.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
+
+#include "xv6_socket_compat.h"
 
 typedef struct {
   unsigned int sockets_created;
@@ -21,14 +21,25 @@ typedef struct {
 
 extern int netkmod_get_stats(netkmod_stats_export_t *out, unsigned int out_size);
 
+static unsigned short host_to_be16(unsigned short v)
+{
+  return (unsigned short)((v >> 8) | (v << 8));
+}
+
+static unsigned int host_to_be32(unsigned int v)
+{
+  return ((v & 0x000000ffu) << 24) | ((v & 0x0000ff00u) << 8) | ((v & 0x00ff0000u) >> 8) |
+         ((v & 0xff000000u) >> 24);
+}
+
 static int mk_loopback_addr(struct sockaddr_in *sin, unsigned short port)
 {
   if(sin == 0)
     return -1;
   memset(sin, 0, sizeof(*sin));
   sin->sin_family = AF_INET;
-  sin->sin_port = htons(port);
-  sin->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  sin->sin_port = host_to_be16(port);
+  sin->sin_addr.s_addr = host_to_be32(INADDR_LOOPBACK);
   return 0;
 }
 

@@ -799,26 +799,6 @@ static int k_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen)
   return -1;
 }
 
-static int k_poll(struct pollfd *fds, nfds_t nfds, int timeout)
-{
-  (void)fds;
-  (void)nfds;
-  (void)timeout;
-  errno = ENOSYS;
-  return -1;
-}
-
-static int k_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
-{
-  (void)nfds;
-  (void)readfds;
-  (void)writefds;
-  (void)exceptfds;
-  (void)timeout;
-  errno = ENOSYS;
-  return -1;
-}
-
 static int k_fstat(int fd, struct stat *st)
 {
   return hostabi_posix_fs_fstat(fd, st);

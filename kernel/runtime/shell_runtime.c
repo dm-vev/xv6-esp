@@ -13,8 +13,6 @@
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
-#include <poll.h>
-#include <sys/select.h>
 #include <netinet/in.h>
 #include <time.h>
 #include <sys/reent.h>

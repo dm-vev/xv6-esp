@@ -1,17 +1,13 @@
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/ioctl.h>
-#include <sys/select.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include "xv6_module.h"
+#include "xv6_socket_compat.h"
 
 #ifndef INADDR_LOOPBACK
 #define INADDR_LOOPBACK 0x7f000001UL
@@ -107,6 +103,22 @@ static net_socket_t g_socks[NETKMOD_MAX_SOCK];
 static net_stats_t g_stats;
 static uint16_t g_next_ephemeral = NETKMOD_EPHEMERAL_MIN;
 static int g_trace_verbose = 1;
+
+static uint16_t net_be16_to_host(uint16_t v)
+{
+  return (uint16_t)((v >> 8) | (v << 8));
+}
+
+static uint16_t net_host_to_be16(uint16_t v)
+{
+  return net_be16_to_host(v);
+}
+
+static uint32_t net_host_to_be32(uint32_t v)
+{
+  return ((v & 0x000000ffu) << 24) | ((v & 0x0000ff00u) << 8) | ((v & 0x00ff0000u) >> 8) |
+         ((v & 0xff000000u) >> 24);
+}
 
 static void net_lock(void)
 {
@@ -249,7 +261,7 @@ static int parse_sockaddr_port(const struct sockaddr *addr, socklen_t addrlen, u
     return -1;
   }
 
-  *port_out = ntohs(in->sin_port);
+  *port_out = net_be16_to_host(in->sin_port);
   return 0;
 }
 
@@ -268,8 +280,8 @@ static int fill_sockaddr(uint16_t port, struct sockaddr *addr, socklen_t *addrle
 
   memset(&out, 0, sizeof(out));
   out.sin_family = AF_INET;
-  out.sin_port = htons(port);
-  out.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  out.sin_port = net_host_to_be16(port);
+  out.sin_addr.s_addr = net_host_to_be32((uint32_t)INADDR_LOOPBACK);
   memcpy(addr, &out, sizeof(out));
   *addrlen = (socklen_t)sizeof(out);
   return 0;
@@ -362,34 +374,8 @@ static int fcntl_cmd_needs_arg(int cmd)
 
 static int ioctl_cmd_needs_arg(unsigned long req)
 {
-#ifdef FIONBIO
-  if(req == (unsigned long)FIONBIO)
+  if(req == NETKMOD_IOCTL_FIONBIO)
     return 1;
-#endif
-#ifdef TIOCGWINSZ
-  if(req == (unsigned long)TIOCGWINSZ)
-    return 1;
-#endif
-#ifdef TIOCSWINSZ
-  if(req == (unsigned long)TIOCSWINSZ)
-    return 1;
-#endif
-#ifdef TCGETS
-  if(req == (unsigned long)TCGETS)
-    return 1;
-#endif
-#ifdef TCSETS
-  if(req == (unsigned long)TCSETS)
-    return 1;
-#endif
-#ifdef TCSETSW
-  if(req == (unsigned long)TCSETSW)
-    return 1;
-#endif
-#ifdef TCSETSF
-  if(req == (unsigned long)TCSETSF)
-    return 1;
-#endif
   return 0;
 }
 
@@ -911,8 +897,7 @@ int netkmod_ioctl(int fd, unsigned long request, ...)
     return __xv6_host_ioctl(fd, request);
   }
 
-#ifdef FIONBIO
-  if(request == (unsigned long)FIONBIO){
+  if(request == NETKMOD_IOCTL_FIONBIO){
     int on;
     net_unlock();
     va_start(ap, request);
@@ -934,7 +919,6 @@ int netkmod_ioctl(int fd, unsigned long request, ...)
     net_unlock();
     return 0;
   }
-#endif
 
   net_unlock();
   errno = ENOTTY;
@@ -1052,115 +1036,6 @@ int netkmod_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen)
   return fill_sockaddr(port, addr, addrlen);
 }
 
-int netkmod_poll(struct pollfd *fds, nfds_t nfds, int timeout)
-{
-  int ready = 0;
-  int elapsed = 0;
-
-  if(fds == 0 && nfds > 0){
-    errno = EINVAL;
-    return -1;
-  }
-
-  while(1){
-    nfds_t i;
-
-    ready = 0;
-    net_lock();
-    for(i = 0; i < nfds; i++){
-      int slot = slot_from_fd_locked(fds[i].fd);
-      fds[i].revents = 0;
-      if(slot < 0){
-        fds[i].revents = POLLNVAL;
-        ready++;
-        continue;
-      }
-      if((fds[i].events & POLLIN) != 0){
-        if(g_socks[slot].rx_n > 0 || g_socks[slot].peer_eof)
-          fds[i].revents |= POLLIN;
-      }
-      if((fds[i].events & POLLOUT) != 0){
-        if(!g_socks[slot].shut_wr && g_socks[slot].peer_slot >= 0)
-          fds[i].revents |= POLLOUT;
-      }
-      if(g_socks[slot].peer_eof)
-        fds[i].revents |= POLLHUP;
-      if(fds[i].revents != 0)
-        ready++;
-    }
-    net_unlock();
-
-    if(ready > 0)
-      return ready;
-    if(timeout == 0)
-      return 0;
-    if(timeout > 0 && elapsed >= timeout)
-      return 0;
-
-    usleep(1000);
-    elapsed++;
-  }
-}
-
-int netkmod_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
-{
-  int fd;
-  int ready = 0;
-  int elapsed_ms = 0;
-  int timeout_ms = -1;
-
-  if(nfds < 0){
-    errno = EINVAL;
-    return -1;
-  }
-
-  if(timeout){
-    if(timeout->tv_sec < 0 || timeout->tv_usec < 0){
-      errno = EINVAL;
-      return -1;
-    }
-    timeout_ms = (int)(timeout->tv_sec * 1000 + timeout->tv_usec / 1000);
-  }
-
-  while(1){
-    ready = 0;
-    net_lock();
-    for(fd = NETKMOD_FD_BASE; fd < NETKMOD_FD_BASE + NETKMOD_MAX_SOCK && fd < nfds; fd++){
-      int slot = slot_from_fd_locked(fd);
-      if(slot < 0)
-        continue;
-
-      if(readfds && FD_ISSET(fd, readfds)){
-        if(g_socks[slot].rx_n > 0 || g_socks[slot].peer_eof)
-          ready++;
-        else
-          FD_CLR(fd, readfds);
-      }
-
-      if(writefds && FD_ISSET(fd, writefds)){
-        if(!g_socks[slot].shut_wr && g_socks[slot].peer_slot >= 0)
-          ready++;
-        else
-          FD_CLR(fd, writefds);
-      }
-
-      if(exceptfds && FD_ISSET(fd, exceptfds))
-        FD_CLR(fd, exceptfds);
-    }
-    net_unlock();
-
-    if(ready > 0)
-      return ready;
-    if(timeout_ms == 0)
-      return 0;
-    if(timeout_ms > 0 && elapsed_ms >= timeout_ms)
-      return 0;
-
-    usleep(1000);
-    elapsed_ms++;
-  }
-}
-
 int netkmod_get_stats(netkmod_stats_export_t *out, uint32_t out_size)
 {
   netkmod_stats_export_t tmp;
@@ -1228,8 +1103,6 @@ static const xv6_module_symbol_t g_symbols[] = {
   { "setsockopt", (void *)netkmod_setsockopt, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
   { "getsockname", (void *)netkmod_getsockname, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
   { "getpeername", (void *)netkmod_getpeername, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
-  { "poll", (void *)netkmod_poll, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
-  { "select", (void *)netkmod_select, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
   { "close", (void *)netkmod_close, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
   { "fcntl", (void *)netkmod_fcntl, XV6_MODULE_SYMBOL_OVERRIDE, 50 },
   { "ioctl", (void *)netkmod_ioctl, XV6_MODULE_SYMBOL_OVERRIDE, 50 },

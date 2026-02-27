@@ -2384,8 +2384,6 @@ static void register_default_symbols(void)
     { "setsockopt", (void *)k_setsockopt },
     { "getsockname", (void *)k_getsockname },
     { "getpeername", (void *)k_getpeername },
-    { "poll", (void *)k_poll },
-    { "select", (void *)k_select },
     { "stat", (void *)k_stat },
     { "__xv6_host_stat", (void *)k_stat },
     { "lstat", (void *)k_lstat },
