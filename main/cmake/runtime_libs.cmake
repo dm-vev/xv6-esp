@@ -47,4 +47,24 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     VERBATIM
   )
   add_custom_target(xv6_libc_so ALL DEPENDS ${XV6_LIBC_SO})
+
+  add_custom_command(
+    OUTPUT ${XV6_NETKMOD_SO}
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/shared"
+    COMMAND ${CMAKE_C_COMPILER}
+            -Os
+            -ffreestanding
+            -fno-builtin
+            -fno-stack-protector
+            -fPIC
+            -nostdlib
+            -shared
+            -Wl,--unresolved-symbols=ignore-all
+            -I${APPLET_INCLUDE_DIR}
+            -o ${XV6_NETKMOD_SO}
+            ${PROJECT_DIR}/kernel/modules/netkmod/netkmod.c
+    DEPENDS ${PROJECT_DIR}/kernel/modules/netkmod/netkmod.c
+    VERBATIM
+  )
+  add_custom_target(xv6_netkmod_so ALL DEPENDS ${XV6_NETKMOD_SO})
 endif()

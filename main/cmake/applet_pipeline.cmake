@@ -25,6 +25,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     STAMP_DIR "${CMAKE_BINARY_DIR}/applet_stamps"
     DEFAULT_CFLAGS ${ESP_USER_FLAGS}
     FSROOT_SOURCE_FILES ${FSROOT_SOURCE_FILES}
-    EXTRA_RESOURCES "${XV6_LIBC_SO}:/lib/libc.so"
+    EXTRA_RESOURCES
+      "${XV6_LIBC_SO}:/lib/libc.so"
+      "${XV6_NETKMOD_SO}:/lib/modules/netkmod.so"
   )
 endif()
