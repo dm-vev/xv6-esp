@@ -682,6 +682,203 @@ static off_t k_lseek(int fd, off_t offset, int whence)
   return hostabi_posix_fs_lseek(fd, offset, whence);
 }
 
+static int k_posix_close(int fd)
+{
+  return close(fd);
+}
+
+static int k_posix_fcntl(int fd, int cmd, ...)
+{
+  va_list ap;
+  int arg = 0;
+
+  switch(cmd){
+#ifdef F_DUPFD
+  case F_DUPFD:
+#endif
+#ifdef F_DUPFD_CLOEXEC
+  case F_DUPFD_CLOEXEC:
+#endif
+#ifdef F_SETFD
+  case F_SETFD:
+#endif
+#ifdef F_SETFL
+  case F_SETFL:
+#endif
+    va_start(ap, cmd);
+    arg = va_arg(ap, int);
+    va_end(ap);
+    return fcntl(fd, cmd, arg);
+  default:
+    return fcntl(fd, cmd);
+  }
+}
+
+static int k_posix_ioctl(int fd, unsigned long request, ...)
+{
+  va_list ap;
+  void *arg = 0;
+
+  va_start(ap, request);
+  arg = va_arg(ap, void *);
+  va_end(ap);
+
+  if(arg)
+    return ioctl(fd, request, arg);
+  return ioctl(fd, request);
+}
+
+static int k_posix_socket(int domain, int type, int protocol)
+{
+  return socket(domain, type, protocol);
+}
+
+static int k_posix_bind(int fd, const struct sockaddr *addr, socklen_t addrlen)
+{
+  if(addr != 0){
+    addr = (const struct sockaddr *)elf_loader_translate_ptr(addr);
+    if(addr == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return bind(fd, addr, addrlen);
+}
+
+static int k_posix_listen(int fd, int backlog)
+{
+  return listen(fd, backlog);
+}
+
+static int k_posix_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
+{
+  if(addr != 0){
+    addr = (struct sockaddr *)elf_loader_translate_ptr(addr);
+    if(addr == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(addrlen != 0){
+    addrlen = (socklen_t *)elf_loader_translate_ptr(addrlen);
+    if(addrlen == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return accept(fd, addr, addrlen);
+}
+
+static int k_posix_connect(int fd, const struct sockaddr *addr, socklen_t addrlen)
+{
+  if(addr != 0){
+    addr = (const struct sockaddr *)elf_loader_translate_ptr(addr);
+    if(addr == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return connect(fd, addr, addrlen);
+}
+
+static int k_posix_send(int fd, const void *buf, size_t len, int flags)
+{
+  if(len > 0){
+    buf = elf_loader_translate_ptr(buf);
+    if(buf == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return (int)send(fd, buf, len, flags);
+}
+
+static int k_posix_recv(int fd, void *buf, size_t len, int flags)
+{
+  if(len > 0){
+    buf = (void *)elf_loader_translate_ptr(buf);
+    if(buf == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return (int)recv(fd, buf, len, flags);
+}
+
+static int k_posix_shutdown(int fd, int how)
+{
+  return shutdown(fd, how);
+}
+
+static int k_posix_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen)
+{
+  if(optval != 0){
+    optval = (void *)elf_loader_translate_ptr(optval);
+    if(optval == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(optlen != 0){
+    optlen = (socklen_t *)elf_loader_translate_ptr(optlen);
+    if(optlen == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return getsockopt(fd, level, optname, optval, optlen);
+}
+
+static int k_posix_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)
+{
+  if(optval != 0){
+    optval = elf_loader_translate_ptr(optval);
+    if(optval == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return setsockopt(fd, level, optname, optval, optlen);
+}
+
+static int k_posix_getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen)
+{
+  if(addr != 0){
+    addr = (struct sockaddr *)elf_loader_translate_ptr(addr);
+    if(addr == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(addrlen != 0){
+    addrlen = (socklen_t *)elf_loader_translate_ptr(addrlen);
+    if(addrlen == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return getsockname(fd, addr, addrlen);
+}
+
+static int k_posix_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen)
+{
+  if(addr != 0){
+    addr = (struct sockaddr *)elf_loader_translate_ptr(addr);
+    if(addr == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(addrlen != 0){
+    addrlen = (socklen_t *)elf_loader_translate_ptr(addrlen);
+    if(addrlen == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  return getpeername(fd, addr, addrlen);
+}
+
 /*
  * Stable socket ABI stubs.
  * A network kmod can override these symbols at runtime; until then
