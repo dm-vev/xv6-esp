@@ -371,6 +371,13 @@ def parse_bin_applets(out: str) -> list[str]:
     return sorted(names)
 
 
+def parse_counter(out: str, key: str) -> int | None:
+    m = re.search(rf"{re.escape(key)}=(\d+)", out)
+    if m is None:
+        return None
+    return int(m.group(1))
+
+
 def run_suite_smoke(q: QemuShell) -> None:
     q.cmd("export PATH=/bin:/usr/bin:.")
     out = q.cmd("echo xv6-esp > /tmp/motd.txt")
@@ -493,6 +500,39 @@ def run_suite_regressions(q: QemuShell) -> None:
             print(f"[qemu-ci][warn] {msg}; set XV6_HOSTABI_STRICT=1 to fail on this check")
 
 
+def run_suite_net_diag(q: QemuShell) -> None:
+    q.cmd("export PATH=/bin:/usr/bin:.")
+    if not q.command_exists("net_diag"):
+        raise SuiteError("net_diag: /bin/net_diag is missing")
+
+    out = q.cmd("net_diag stats", timeout_s=45.0)
+    expect_contains(out, "net_diag: stats", "net_diag: stats (initial)")
+    if "symbol missing" in out:
+        raise SuiteError("net_diag: stats reported missing netkmod symbol")
+
+    out = q.cmd("net_diag trace on", timeout_s=30.0)
+    expect_contains(out, "net_diag: trace=1", "net_diag: trace on")
+
+    out = q.cmd("net_diag selftest", timeout_s=90.0)
+    expect_contains(out, "net_diag: selftest ok", "net_diag: selftest")
+
+    out = q.cmd("net_diag trace off", timeout_s=30.0)
+    expect_contains(out, "net_diag: trace=0", "net_diag: trace off")
+
+    out = q.cmd("net_diag stats", timeout_s=45.0)
+    expect_contains(out, "net_diag: stats", "net_diag: stats (post-selftest)")
+
+    connect_ok = parse_counter(out, "connect_ok")
+    tx_packets = parse_counter(out, "tx_packets")
+    rx_packets = parse_counter(out, "rx_packets")
+    if connect_ok is None or connect_ok < 1:
+        raise SuiteError(f"net_diag: connect_ok counter is invalid ({connect_ok})")
+    if tx_packets is None or tx_packets < 1:
+        raise SuiteError(f"net_diag: tx_packets counter is invalid ({tx_packets})")
+    if rx_packets is None or rx_packets < 1:
+        raise SuiteError(f"net_diag: rx_packets counter is invalid ({rx_packets})")
+
+
 def run_suite_stress(q: QemuShell, iterations: int) -> None:
     q.cmd("export PATH=/bin:/usr/bin:.")
     for i in range(iterations):
@@ -563,6 +603,8 @@ def run_suite(idf_export: str, suite: str, stress_iterations: int, soak_iteratio
             run_suite_smoke(q)
         elif suite == "regressions":
             run_suite_regressions(q)
+        elif suite == "net_diag":
+            run_suite_net_diag(q)
         elif suite == "stress":
             run_suite_stress(q, stress_iterations)
         elif suite == "soak":
@@ -572,6 +614,8 @@ def run_suite(idf_export: str, suite: str, stress_iterations: int, soak_iteratio
 
 
 SUITE_ORDER = ["smoke", "applets", "regressions", "stress", "soak"]
+EXTRA_SUITES = ["net_diag"]
+SUITE_CHOICES = [*SUITE_ORDER, *EXTRA_SUITES]
 
 
 def resolve_suites(values: list[str]) -> list[str]:
@@ -589,7 +633,7 @@ def resolve_suites(values: list[str]) -> list[str]:
 
 def cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Unified QEMU CI suites for xv6-esp")
-    parser.add_argument("--suite", action="append", choices=["all", *SUITE_ORDER], help="suite to run")
+    parser.add_argument("--suite", action="append", choices=["all", *SUITE_CHOICES], help="suite to run")
     parser.add_argument("--skip-build", action="store_true", help="skip idf.py build")
     parser.add_argument(
         "--prepare-only",
