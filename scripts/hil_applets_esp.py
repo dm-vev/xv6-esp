@@ -159,7 +159,7 @@ def test_matrix() -> dict[str, list[str]]:
             "mv -f /cp_cat /mv_cat",
             "mv /tmp/integration/cmp.a /tmp/integration/cmp.a.moved",
         ],
-        "net_diag": ["net_diag stats", "net_diag selftest"],
+        "net_diag": ["net_diag stats", "net_diag selftest", "net_diag udp", "net_diag poll", "net_diag select"],
         "printenv": ["printenv", "printenv PATH"],
         "pwd": ["pwd"],
         "rev": ["rev /no_such_file"],

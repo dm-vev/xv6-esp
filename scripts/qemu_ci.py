@@ -61,7 +61,7 @@ APPLET_CASES: dict[str, list[str]] = {
     "mem_test": ["mem_test"],
     "mkdir": ["mkdir -p /tmp/integration/a/b/c"],
     "mv": ["mv -f /tmp/integration/cp.rc /tmp/integration/mv.rc"],
-    "net_diag": ["net_diag stats", "net_diag selftest"],
+    "net_diag": ["net_diag stats", "net_diag selftest", "net_diag udp", "net_diag poll", "net_diag select"],
     "printenv": ["printenv", "printenv PATH"],
     "proc_test": ["proc_test"],
     "pwd": ["pwd"],
@@ -514,7 +514,19 @@ def run_suite_net_diag(q: QemuShell) -> None:
     expect_contains(out, "net_diag: trace=1", "net_diag: trace on")
 
     out = q.cmd("net_diag selftest", timeout_s=90.0)
-    expect_contains(out, "net_diag: selftest ok", "net_diag: selftest")
+    expect_contains(out, "net_diag: tcp selftest ok", "net_diag: selftest")
+
+    out = q.cmd("net_diag udp", timeout_s=90.0)
+    expect_contains(out, "net_diag: udp selftest ok", "net_diag: udp")
+
+    out = q.cmd("net_diag udp6", timeout_s=90.0)
+    expect_contains(out, "net_diag: udp6 selftest ok", "net_diag: udp6")
+
+    out = q.cmd("net_diag poll", timeout_s=90.0)
+    expect_contains(out, "net_diag: poll selftest ok", "net_diag: poll")
+
+    out = q.cmd("net_diag select", timeout_s=90.0)
+    expect_contains(out, "net_diag: select selftest ok", "net_diag: select")
 
     out = q.cmd("net_diag trace off", timeout_s=30.0)
     expect_contains(out, "net_diag: trace=0", "net_diag: trace off")

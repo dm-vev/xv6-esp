@@ -46,6 +46,17 @@ static int mk_loopback_addr(struct sockaddr_in *sin, unsigned short port)
   return 0;
 }
 
+static int mk_loopback6_addr(struct sockaddr_in6 *sin6, unsigned short port)
+{
+  if(sin6 == 0)
+    return -1;
+  memset(sin6, 0, sizeof(*sin6));
+  sin6->sin6_family = AF_INET6;
+  sin6->sin6_port = host_to_be16(port);
+  sin6->sin6_addr.s6_addr[15] = 1;
+  return 0;
+}
+
 static int parse_port(const char *s, unsigned short *out)
 {
   long v;
@@ -84,7 +95,7 @@ static void print_stats(void)
          st.rx_packets, st.tx_bytes, st.rx_bytes, st.drops);
 }
 
-static int run_selftest(unsigned short port)
+static int run_tcp_selftest(unsigned short port)
 {
   struct sockaddr_in addr;
   const char *msg = "diag-ping";
@@ -158,7 +169,330 @@ static int run_selftest(unsigned short port)
   if(close(listener) != 0)
     printf("net_diag: close(listener) errno=%d\n", errno);
 
-  printf("net_diag: selftest ok port=%u\n", (unsigned)port);
+  printf("net_diag: tcp selftest ok port=%u\n", (unsigned)port);
+  return 0;
+
+fail:
+  if(server >= 0)
+    (void)close(server);
+  if(client >= 0)
+    (void)close(client);
+  if(listener >= 0)
+    (void)close(listener);
+  return 1;
+}
+
+static int run_udp_selftest(unsigned short port, int ipv6)
+{
+  const char *msg = "diag-udp-ping";
+  char inbuf[96];
+  char outbuf[96];
+  union {
+    struct sockaddr_in v4;
+    struct sockaddr_in6 v6;
+  } addr;
+  union {
+    struct sockaddr_in v4;
+    struct sockaddr_in6 v6;
+  } peer;
+  struct sockaddr *sa = 0;
+  socklen_t sa_len = 0;
+  socklen_t peer_len = 0;
+  int server = -1;
+  int client = -1;
+  int domain = ipv6 ? AF_INET6 : AF_INET;
+  int n;
+
+  if(ipv6){
+    if(mk_loopback6_addr(&addr.v6, port) != 0){
+      puts("net_diag: udp6 bad addr");
+      return 1;
+    }
+    sa = (struct sockaddr *)&addr.v6;
+    sa_len = (socklen_t)sizeof(addr.v6);
+  } else {
+    if(mk_loopback_addr(&addr.v4, port) != 0){
+      puts("net_diag: udp bad addr");
+      return 1;
+    }
+    sa = (struct sockaddr *)&addr.v4;
+    sa_len = (socklen_t)sizeof(addr.v4);
+  }
+
+  server = socket(domain, SOCK_DGRAM, 0);
+  if(server < 0){
+    printf("net_diag: socket(udp server) failed errno=%d\n", errno);
+    return 1;
+  }
+  if(bind(server, sa, sa_len) != 0){
+    printf("net_diag: udp bind failed errno=%d\n", errno);
+    goto fail;
+  }
+
+  client = socket(domain, SOCK_DGRAM, 0);
+  if(client < 0){
+    printf("net_diag: socket(udp client) failed errno=%d\n", errno);
+    goto fail;
+  }
+  if(connect(client, sa, sa_len) != 0){
+    printf("net_diag: udp connect failed errno=%d\n", errno);
+    goto fail;
+  }
+
+  n = send(client, msg, strlen(msg), 0);
+  if(n != (int)strlen(msg)){
+    printf("net_diag: udp send(client) failed n=%d errno=%d\n", n, errno);
+    goto fail;
+  }
+
+  memset(&peer, 0, sizeof(peer));
+  peer_len = (socklen_t)sizeof(peer);
+  memset(inbuf, 0, sizeof(inbuf));
+  n = recvfrom(server, inbuf, sizeof(inbuf) - 1, 0, (struct sockaddr *)&peer, &peer_len);
+  if(n <= 0){
+    printf("net_diag: udp recvfrom(server) failed n=%d errno=%d\n", n, errno);
+    goto fail;
+  }
+  inbuf[n] = 0;
+  if(strcmp(inbuf, msg) != 0){
+    printf("net_diag: udp payload mismatch got='%s' expected='%s'\n", inbuf, msg);
+    goto fail;
+  }
+
+  snprintf(outbuf, sizeof(outbuf), "ack:%s", inbuf);
+  n = sendto(server, outbuf, strlen(outbuf), 0, (const struct sockaddr *)&peer, peer_len);
+  if(n != (int)strlen(outbuf)){
+    printf("net_diag: udp sendto(server) failed n=%d errno=%d\n", n, errno);
+    goto fail;
+  }
+
+  memset(inbuf, 0, sizeof(inbuf));
+  n = recv(client, inbuf, sizeof(inbuf) - 1, 0);
+  if(n <= 0){
+    printf("net_diag: udp recv(client) failed n=%d errno=%d\n", n, errno);
+    goto fail;
+  }
+  inbuf[n] = 0;
+  if(strcmp(inbuf, outbuf) != 0){
+    printf("net_diag: udp ack mismatch got='%s' expected='%s'\n", inbuf, outbuf);
+    goto fail;
+  }
+
+  if(close(client) != 0)
+    printf("net_diag: close(udp client) errno=%d\n", errno);
+  if(close(server) != 0)
+    printf("net_diag: close(udp server) errno=%d\n", errno);
+
+  printf("net_diag: udp%s selftest ok port=%u\n", ipv6 ? "6" : "", (unsigned)port);
+  return 0;
+
+fail:
+  if(client >= 0)
+    (void)close(client);
+  if(server >= 0)
+    (void)close(server);
+  return 1;
+}
+
+static int run_poll_selftest(unsigned short port)
+{
+  struct sockaddr_in addr;
+  const char *msg = "poll-ping";
+  char inbuf[64];
+  struct pollfd pfd;
+  int listener = -1;
+  int client = -1;
+  int server = -1;
+  int n;
+  int rc;
+
+  if(mk_loopback_addr(&addr, port) != 0){
+    puts("net_diag: poll bad addr");
+    return 1;
+  }
+
+  listener = socket(AF_INET, SOCK_STREAM, 0);
+  if(listener < 0){
+    printf("net_diag: poll socket(listener) failed errno=%d\n", errno);
+    return 1;
+  }
+  if(bind(listener, (const struct sockaddr *)&addr, (socklen_t)sizeof(addr)) != 0){
+    printf("net_diag: poll bind failed errno=%d\n", errno);
+    goto fail;
+  }
+  if(listen(listener, 2) != 0){
+    printf("net_diag: poll listen failed errno=%d\n", errno);
+    goto fail;
+  }
+
+  client = socket(AF_INET, SOCK_STREAM, 0);
+  if(client < 0){
+    printf("net_diag: poll socket(client) failed errno=%d\n", errno);
+    goto fail;
+  }
+  if(connect(client, (const struct sockaddr *)&addr, (socklen_t)sizeof(addr)) != 0){
+    printf("net_diag: poll connect failed errno=%d\n", errno);
+    goto fail;
+  }
+
+  server = accept(listener, 0, 0);
+  if(server < 0){
+    printf("net_diag: poll accept failed errno=%d\n", errno);
+    goto fail;
+  }
+
+  pfd.fd = client;
+  pfd.events = POLLOUT;
+  pfd.revents = 0;
+  rc = poll(&pfd, 1, 1000);
+  if(rc <= 0 || (pfd.revents & POLLOUT) == 0){
+    printf("net_diag: poll writable check failed rc=%d revents=%d errno=%d\n", rc, (int)pfd.revents, errno);
+    goto fail;
+  }
+
+  n = send(client, msg, strlen(msg), 0);
+  if(n != (int)strlen(msg)){
+    printf("net_diag: poll send(client) failed n=%d errno=%d\n", n, errno);
+    goto fail;
+  }
+
+  pfd.fd = server;
+  pfd.events = POLLIN;
+  pfd.revents = 0;
+  rc = poll(&pfd, 1, 1000);
+  if(rc <= 0 || (pfd.revents & POLLIN) == 0){
+    printf("net_diag: poll read check failed rc=%d revents=%d errno=%d\n", rc, (int)pfd.revents, errno);
+    goto fail;
+  }
+
+  memset(inbuf, 0, sizeof(inbuf));
+  n = recv(server, inbuf, sizeof(inbuf) - 1, 0);
+  if(n <= 0){
+    printf("net_diag: poll recv(server) failed n=%d errno=%d\n", n, errno);
+    goto fail;
+  }
+  inbuf[n] = 0;
+  if(strcmp(inbuf, msg) != 0){
+    printf("net_diag: poll payload mismatch got='%s' expected='%s'\n", inbuf, msg);
+    goto fail;
+  }
+
+  if(close(server) != 0)
+    printf("net_diag: close(poll server) errno=%d\n", errno);
+  if(close(client) != 0)
+    printf("net_diag: close(poll client) errno=%d\n", errno);
+  if(close(listener) != 0)
+    printf("net_diag: close(poll listener) errno=%d\n", errno);
+
+  printf("net_diag: poll selftest ok port=%u\n", (unsigned)port);
+  return 0;
+
+fail:
+  if(server >= 0)
+    (void)close(server);
+  if(client >= 0)
+    (void)close(client);
+  if(listener >= 0)
+    (void)close(listener);
+  return 1;
+}
+
+static int run_select_selftest(unsigned short port)
+{
+  struct sockaddr_in addr;
+  const char *msg = "select-ping";
+  char inbuf[64];
+  fd_set rfds;
+  fd_set wfds;
+  struct timeval tv;
+  int listener = -1;
+  int client = -1;
+  int server = -1;
+  int maxfd;
+  int rc;
+  int n;
+
+  if(mk_loopback_addr(&addr, port) != 0){
+    puts("net_diag: select bad addr");
+    return 1;
+  }
+
+  listener = socket(AF_INET, SOCK_STREAM, 0);
+  if(listener < 0){
+    printf("net_diag: select socket(listener) failed errno=%d\n", errno);
+    return 1;
+  }
+  if(bind(listener, (const struct sockaddr *)&addr, (socklen_t)sizeof(addr)) != 0){
+    printf("net_diag: select bind failed errno=%d\n", errno);
+    goto fail;
+  }
+  if(listen(listener, 2) != 0){
+    printf("net_diag: select listen failed errno=%d\n", errno);
+    goto fail;
+  }
+
+  client = socket(AF_INET, SOCK_STREAM, 0);
+  if(client < 0){
+    printf("net_diag: select socket(client) failed errno=%d\n", errno);
+    goto fail;
+  }
+  if(connect(client, (const struct sockaddr *)&addr, (socklen_t)sizeof(addr)) != 0){
+    printf("net_diag: select connect failed errno=%d\n", errno);
+    goto fail;
+  }
+  server = accept(listener, 0, 0);
+  if(server < 0){
+    printf("net_diag: select accept failed errno=%d\n", errno);
+    goto fail;
+  }
+
+  n = send(client, msg, strlen(msg), 0);
+  if(n != (int)strlen(msg)){
+    printf("net_diag: select send(client) failed n=%d errno=%d\n", n, errno);
+    goto fail;
+  }
+
+  FD_ZERO(&rfds);
+  FD_ZERO(&wfds);
+  FD_SET(server, &rfds);
+  FD_SET(client, &wfds);
+  maxfd = (server > client) ? server : client;
+  tv.tv_sec = 1;
+  tv.tv_usec = 0;
+  rc = select(maxfd + 1, &rfds, &wfds, 0, &tv);
+  if(rc <= 0){
+    printf("net_diag: select failed rc=%d errno=%d\n", rc, errno);
+    goto fail;
+  }
+  if(!FD_ISSET(server, &rfds)){
+    puts("net_diag: select missing readable server fd");
+    goto fail;
+  }
+  if(!FD_ISSET(client, &wfds)){
+    puts("net_diag: select missing writable client fd");
+    goto fail;
+  }
+
+  memset(inbuf, 0, sizeof(inbuf));
+  n = recv(server, inbuf, sizeof(inbuf) - 1, 0);
+  if(n <= 0){
+    printf("net_diag: select recv(server) failed n=%d errno=%d\n", n, errno);
+    goto fail;
+  }
+  inbuf[n] = 0;
+  if(strcmp(inbuf, msg) != 0){
+    printf("net_diag: select payload mismatch got='%s' expected='%s'\n", inbuf, msg);
+    goto fail;
+  }
+
+  if(close(server) != 0)
+    printf("net_diag: close(select server) errno=%d\n", errno);
+  if(close(client) != 0)
+    printf("net_diag: close(select client) errno=%d\n", errno);
+  if(close(listener) != 0)
+    printf("net_diag: close(select listener) errno=%d\n", errno);
+
+  printf("net_diag: select selftest ok port=%u\n", (unsigned)port);
   return 0;
 
 fail:
@@ -201,7 +535,7 @@ static int set_trace(const char *v)
 
 static void usage(void)
 {
-  puts("usage: net_diag [stats|selftest [port]|trace <0|1|on|off>]");
+  puts("usage: net_diag [stats|selftest [port]|udp [port]|udp6 [port]|poll [port]|select [port]|trace <0|1|on|off>]");
 }
 
 int main(int argc, char **argv)
@@ -210,7 +544,7 @@ int main(int argc, char **argv)
 
   if(argc == 1){
     print_stats();
-    return run_selftest(port);
+    return run_tcp_selftest(port);
   }
 
   if(strcmp(argv[1], "stats") == 0){
@@ -223,7 +557,39 @@ int main(int argc, char **argv)
       puts("net_diag: bad port");
       return 1;
     }
-    return run_selftest(port);
+    return run_tcp_selftest(port);
+  }
+
+  if(strcmp(argv[1], "udp") == 0){
+    if(argc >= 3 && parse_port(argv[2], &port) != 0){
+      puts("net_diag: bad port");
+      return 1;
+    }
+    return run_udp_selftest(port, 0);
+  }
+
+  if(strcmp(argv[1], "udp6") == 0){
+    if(argc >= 3 && parse_port(argv[2], &port) != 0){
+      puts("net_diag: bad port");
+      return 1;
+    }
+    return run_udp_selftest(port, 1);
+  }
+
+  if(strcmp(argv[1], "poll") == 0){
+    if(argc >= 3 && parse_port(argv[2], &port) != 0){
+      puts("net_diag: bad port");
+      return 1;
+    }
+    return run_poll_selftest(port);
+  }
+
+  if(strcmp(argv[1], "select") == 0){
+    if(argc >= 3 && parse_port(argv[2], &port) != 0){
+      puts("net_diag: bad port");
+      return 1;
+    }
+    return run_select_selftest(port);
   }
 
   if(strcmp(argv[1], "trace") == 0){
