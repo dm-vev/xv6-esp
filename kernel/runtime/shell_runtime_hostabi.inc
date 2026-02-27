@@ -682,6 +682,143 @@ static off_t k_lseek(int fd, off_t offset, int whence)
   return hostabi_posix_fs_lseek(fd, offset, whence);
 }
 
+/*
+ * Stable socket ABI stubs.
+ * A network kmod can override these symbols at runtime; until then
+ * they fail with ENOSYS instead of creating unresolved symbols.
+ */
+static int k_socket(int domain, int type, int protocol)
+{
+  (void)domain;
+  (void)type;
+  (void)protocol;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_bind(int fd, const struct sockaddr *addr, socklen_t addrlen)
+{
+  (void)fd;
+  (void)addr;
+  (void)addrlen;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_listen(int fd, int backlog)
+{
+  (void)fd;
+  (void)backlog;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
+{
+  (void)fd;
+  (void)addr;
+  (void)addrlen;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_connect(int fd, const struct sockaddr *addr, socklen_t addrlen)
+{
+  (void)fd;
+  (void)addr;
+  (void)addrlen;
+  errno = ENOSYS;
+  return -1;
+}
+
+static ssize_t k_send(int fd, const void *buf, size_t len, int flags)
+{
+  (void)fd;
+  (void)buf;
+  (void)len;
+  (void)flags;
+  errno = ENOSYS;
+  return -1;
+}
+
+static ssize_t k_recv(int fd, void *buf, size_t len, int flags)
+{
+  (void)fd;
+  (void)buf;
+  (void)len;
+  (void)flags;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_shutdown(int fd, int how)
+{
+  (void)fd;
+  (void)how;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen)
+{
+  (void)fd;
+  (void)level;
+  (void)optname;
+  (void)optval;
+  (void)optlen;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)
+{
+  (void)fd;
+  (void)level;
+  (void)optname;
+  (void)optval;
+  (void)optlen;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen)
+{
+  (void)fd;
+  (void)addr;
+  (void)addrlen;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen)
+{
+  (void)fd;
+  (void)addr;
+  (void)addrlen;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+  (void)fds;
+  (void)nfds;
+  (void)timeout;
+  errno = ENOSYS;
+  return -1;
+}
+
+static int k_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
+{
+  (void)nfds;
+  (void)readfds;
+  (void)writefds;
+  (void)exceptfds;
+  (void)timeout;
+  errno = ENOSYS;
+  return -1;
+}
+
 static int k_fstat(int fd, struct stat *st)
 {
   return hostabi_posix_fs_fstat(fd, st);
@@ -1494,4 +1631,3 @@ static void k_abort(void)
 }
 
 extern char **environ;
-
