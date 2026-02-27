@@ -17,6 +17,17 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     VERBATIM
   )
 
+  set(_xv6_extra_resources
+    "${XV6_LIBC_SO}:/lib/libc.so"
+    "${XV6_NETKMOD_SO}:/lib/modules/netkmod.so"
+  )
+  if(XV6_ENABLE_RUST_POC)
+    list(APPEND _xv6_extra_resources
+      "${XV6_RUST_POC_APPLET_SO}:/bin/rust_poc"
+      "${XV6_RUST_POC_KMOD_SO}:/lib/modules/rustpoc.so"
+    )
+  endif()
+
   xv6_emit_applet_build_graph(
     APPLET_OUT_DIR "${APPLET_BUILD_DIR}"
     FSROOT_ROOT_DIR "${XV6FS_ROOT_DIR}"
@@ -26,7 +37,6 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     DEFAULT_CFLAGS ${ESP_USER_FLAGS}
     FSROOT_SOURCE_FILES ${FSROOT_SOURCE_FILES}
     EXTRA_RESOURCES
-      "${XV6_LIBC_SO}:/lib/libc.so"
-      "${XV6_NETKMOD_SO}:/lib/modules/netkmod.so"
+      ${_xv6_extra_resources}
   )
 endif()
