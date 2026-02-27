@@ -174,6 +174,7 @@ def test_matrix() -> dict[str, list[str]]:
         "sum": ["sum /no_such_file"],
         "tee": ["echo sample | tee -a /tee.out", "echo next | tee -a /tee.out"],
         "touch": ["touch /touch.out", "touch /touch2.out"],
+        "tcp_loop_test": ["tcp_loop_test"],
         "tr": ["echo abc | tr a A", "echo xyz | tr x X"],
         "uname": ["uname", "uname -a", "uname -r"],
         "uniq": [

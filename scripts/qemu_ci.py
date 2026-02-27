@@ -78,6 +78,7 @@ APPLET_CASES: dict[str, list[str]] = {
     "sum": ["sum /tmp/integration/uniq.in"],
     "tee": ["echo tee-line | tee /tmp/integration/tee.out"],
     "touch": ["touch /tmp/integration/touch.out"],
+    "tcp_loop_test": ["tcp_loop_test"],
     "tr": ["echo abc | tr a A", "echo aaabbb | tr -s a"],
     "uname": ["uname", "uname -a"],
     "uniq": [
