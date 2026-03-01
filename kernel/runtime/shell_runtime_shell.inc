@@ -629,6 +629,30 @@ static void free_exec_envp(int envc, char **envp)
   free(envp);
 }
 
+typedef struct {
+  int active;
+  int in_fd;
+  int out_fd;
+  int err_fd;
+} ksh_stdio_state_t;
+
+static void ksh_stdio_state_capture(ksh_stdio_state_t *state)
+{
+  if(state == 0)
+    return;
+  xv6_stdio_get_fds(&state->in_fd, &state->out_fd, &state->err_fd, &state->active);
+}
+
+static void ksh_stdio_state_restore(const ksh_stdio_state_t *state)
+{
+  if(state == 0)
+    return;
+  if(state->active)
+    (void)xv6_stdio_set_fds(state->in_fd, state->out_fd, state->err_fd);
+  else
+    xv6_stdio_reset_fds();
+}
+
 static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int out_fd, int err_fd, int max_heap_kb)
 {
   elf_module_t *m;
@@ -636,20 +660,25 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
   uint32 image_size = 0;
   int retv = 0;
   int rc = -1;
-  int loader_locked = 0;
-  int lock_released_for_exec = 0;
   char **exec_argv_owned = 0;
   char **exec_argv = 0;
   char **exec_envp = 0;
   char **saved_environ = 0;
   int exec_envc = 0;
   char module_name[MAXPATH];
-  static int g_runtime_libs_ready = 0;
   int module_loaded = 0;
   int environ_swapped = 0;
+  int stdio_swapped = 0;
+  ksh_stdio_state_t stdio_saved;
 
   if(argc <= 0 || argv == 0 || argv[0] == 0 || argv[0][0] == 0)
     return -1;
+
+  /*
+   * LWIP in ESP-IDF uses per-thread netconn semaphores for socket API.
+   * Ensure current task has it initialized before any applet socket usage.
+   */
+  netconn_thread_init();
 
   if(exit_code)
     *exit_code = 127;
@@ -699,55 +728,25 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
   environ = exec_envp;
   environ_swapped = 1;
 
+  ksh_stdio_state_capture(&stdio_saved);
   if(xv6_stdio_set_fds(in_fd, out_fd, err_fd) != 0){
     puts_line("exec: no task context");
     goto out;
   }
+  stdio_swapped = 1;
 
-  if(g_loader_lock){
-    (void)xSemaphoreTakeRecursive(g_loader_lock, portMAX_DELAY);
-    loader_locked = 1;
-  }
-  if(!g_runtime_libs_ready){
-    void *rt_img = 0;
-    uint32 rt_sz = 0;
-    elf_module_t *rt_mod = 0;
-    if(elf_module_find("libc") == 0){
-      if(xv6fs_read_file_alloc_path("/lib/libc.so", &rt_img, &rt_sz) == 0 && rt_img != 0){
-        if(elf_module_load_from_bytes("libc", rt_img, rt_sz, &rt_mod) != 0){
-          free(rt_img);
-          puts_line("exec: failed to load /lib/libc.so");
-          goto out;
-        }
-        (void)elf_module_set_global(rt_mod, 1);
-        free(rt_img);
-      } else {
-        puts_line("exec: missing /lib/libc.so");
-        goto out;
-      }
-    }
-    g_runtime_libs_ready = 1;
-  }
   strncpy(module_name, exec_argv[0], sizeof(module_name) - 1);
   module_name[sizeof(module_name) - 1] = 0;
   if(try_read_exec_image(exec_argv[0], &image, &image_size, module_name, sizeof(module_name)) != 0 || image == 0){
     puts_line("exec: command not found");
     goto out;
   }
-  if(elf_module_load_from_bytes(module_name, image, image_size, &m) != 0){
-    free(image);
+  if(elf_module_load_from_owned_bytes(module_name, image, image_size, &m) != 0){
     puts_line("exec: elf load failed");
     goto out;
   }
   (void)elf_module_set_global(m, 0);
-  free(image);
   module_loaded = 1;
-
-  if(loader_locked && g_loader_lock){
-    (void)xSemaphoreGiveRecursive(g_loader_lock);
-    loader_locked = 0;
-    lock_released_for_exec = 1;
-  }
 
   if(elf_module_call_main_ex(m, argc, exec_argv, exec_envp, &retv) != 0){
     puts_line("exec: entry call failed");
@@ -768,16 +767,11 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
 out:
   if(environ_swapped)
     environ = saved_environ;
-  if(lock_released_for_exec && g_loader_lock){
-    (void)xSemaphoreTakeRecursive(g_loader_lock, portMAX_DELAY);
-    loader_locked = 1;
-  }
   if(module_loaded){
     (void)elf_module_unload(module_name);
   }
-  if(loader_locked && g_loader_lock)
-    (void)xSemaphoreGiveRecursive(g_loader_lock);
-  xv6_stdio_reset_fds();
+  if(stdio_swapped)
+    ksh_stdio_state_restore(&stdio_saved);
   free_exec_envp(exec_envc, exec_envp);
   free(exec_argv);
   free_exec_argv(argc, exec_argv_owned);
@@ -951,8 +945,9 @@ static void enforce_job_limits(void)
     if(g_jobs[i].max_runtime_ms > 0 && elapsed_ms > g_jobs[i].max_runtime_ms){
       TaskHandle_t h = g_jobs[i].task;
       if(h){
-        xv6_task_ctx_cleanup_for_handle((void *)h);
         vTaskDelete(h);
+        xv6_task_ctx_cleanup_for_handle((void *)h);
+        k_signal_task_cleanup(h);
       }
       if(nkill < KSH_MAX_JOBS && g_jobs[i].task_ctx)
         kill_ctx[nkill++] = (ksh_job_task_t *)g_jobs[i].task_ctx;
@@ -988,6 +983,7 @@ static void job_task(void *arg)
   if(t->cwd[0])
     (void)xv6_chdir(t->cwd);
   (void)run_elf_command(t->argc, t->argv, &exit_code, t->in_fd, t->out_fd, t->err_fd, t->max_heap_kb);
+  netconn_thread_cleanup();
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -1002,6 +998,7 @@ static void job_task(void *arg)
     (void)xSemaphoreGive(g_jobs_lock);
 
   free_job_ctx(t);
+  k_signal_task_cleanup(xTaskGetCurrentTaskHandle());
   xv6_task_ctx_cleanup();
   vTaskDelete(NULL);
 }
@@ -1021,8 +1018,9 @@ static int terminate_job_id(int id, int exit_code, int reason)
     task = g_jobs[slot].task;
     ctx = (ksh_job_task_t *)g_jobs[slot].task_ctx;
     if(task){
-      xv6_task_ctx_cleanup_for_handle((void *)task);
       vTaskDelete(task);
+      xv6_task_ctx_cleanup_for_handle((void *)task);
+      k_signal_task_cleanup(task);
     }
     g_jobs[slot].done = 1;
     g_jobs[slot].exit_code = exit_code;
@@ -1043,6 +1041,8 @@ static int terminate_job_id(int id, int exit_code, int reason)
 
 static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctrl_c)
 {
+  int interrupt_pending = 0;
+
   while(1){
     int slot;
     int done = 0;
@@ -1072,8 +1072,11 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
       return 0;
     }
 
-    if(allow_ctrl_c && hal_console_poll_ctrl_c()){
-      if(terminate_job_id(id, 130, JOB_REASON_KILLED) == 0){
+    if(allow_ctrl_c && (interrupt_pending || hal_console_poll_ctrl_c())){
+      int term_rc;
+      interrupt_pending = 1;
+      term_rc = terminate_job_id(id, 130, JOB_REASON_KILLED);
+      if(term_rc == 0){
         puts_line("^C");
         if(out_exit_code)
           *out_exit_code = 130;
@@ -1088,6 +1091,7 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
         }
         return 0;
       }
+      interrupt_pending = 0;
     }
 
     enforce_job_limits();
@@ -1315,6 +1319,18 @@ static int run_foreground_with_limits(int argc, char **argv, int in_fd, int out_
       cmd = base + 1;
     if(strcmp(cmd, "duktape_demo") == 0)
       allow_ctrl_c = 0;
+  }
+
+  /*
+   * Keep default foreground execution on the interactive shell task when no
+   * runtime limit is requested. Spawning a worker task for every command
+   * increases stack pressure and can destabilize simple applets.
+   */
+  if(max_runtime_ms == 0){
+    rc = run_elf_command(argc, argv, &exit_code, in_fd, out_fd, err_fd, max_heap_kb);
+    if(rc != 0)
+      return -1;
+    return exit_code;
   }
 
   rc = spawn_background_ex(argc, argv, in_fd, out_fd, err_fd, 0, 1, max_heap_kb, max_runtime_ms, &job_id);
@@ -1829,6 +1845,7 @@ static int cmd_health(void)
 static int cmd_wait(int argc, char **argv)
 {
   if(argc == 1){
+    int allow_ctrl_c = shell_allow_ctrl_c_poll();
     while(1){
       int i;
       int has_running = 0;
@@ -1846,6 +1863,10 @@ static int cmd_wait(int argc, char **argv)
         (void)xSemaphoreGive(g_jobs_lock);
       if(!has_running)
         break;
+      if(allow_ctrl_c && hal_console_poll_ctrl_c()){
+        puts_line("^C");
+        return 130;
+      }
       enforce_job_limits();
       hal_delay_ms(10);
     }
@@ -2284,7 +2305,7 @@ static int cmd_kmod(int argc, char **argv)
   return 2;
 }
 
-static void register_default_symbols(void)
+static int register_default_symbols(void)
 {
   static const elf_host_symbol_t syms[] = {
     { "puts", (void *)k_host_puts },
@@ -2341,6 +2362,7 @@ static void register_default_symbols(void)
     { "k_ticks", (void *)k_ticks },
     { "k_puts", (void *)k_puts },
     { "k_free_heap", (void *)k_free_heap },
+    { "k_total_heap", (void *)k_total_heap },
     { "xv6fs_readdir_path", (void *)k_fs_readdir_path },
     { "xv6fs_read_file_alloc_path", (void *)xv6fs_read_file_alloc_path },
     { "xv6fs_write_file_path", (void *)xv6fs_write_file_path },
@@ -2517,7 +2539,7 @@ static void register_default_symbols(void)
     { "__environ", (void *)&environ },
   };
 
-  (void)hostabi_register_exports(syms, (int)(sizeof(syms) / sizeof(syms[0])));
+  return hostabi_register_exports(syms, (int)(sizeof(syms) / sizeof(syms[0])));
 }
 
 static int is_builtin_command(const char *cmd)
@@ -2602,21 +2624,31 @@ static int dispatch_command(int argc, char **argv, int run_bg)
   if(argc <= 0)
     return 0;
 
+  if(run_bg && is_builtin_command(argv[0]) && strcmp(argv[0], "time") != 0 && strcmp(argv[0], "limit") != 0){
+    puts_line("bg: builtin not supported");
+    return 2;
+  }
+
   if(is_builtin_command(argv[0])){
     base_io.in_fd = 0;
     base_io.out_fd = 1;
     base_io.err_fd = 2;
     int parse_status = 1;
+    ksh_stdio_state_t stdio_saved;
+    int stdio_swapped = 0;
     if(parse_exec_and_redir(argc, argv, &base_io, cmd_argv, KSH_MAX_ARGS, &cmd_argc, &io, &parse_status) != 0)
       return parse_status;
+    ksh_stdio_state_capture(&stdio_saved);
     if(xv6_stdio_set_fds(io.in_fd, io.out_fd, io.err_fd) != 0){
       close_io_custom_fds(&io, &base_io);
       puts_line("exec: no task context");
       return 1;
     }
+    stdio_swapped = 1;
     {
       int rc = dispatch_builtin_command(cmd_argc, cmd_argv, run_bg);
-      xv6_stdio_reset_fds();
+      if(stdio_swapped)
+        ksh_stdio_state_restore(&stdio_saved);
       close_io_custom_fds(&io, &base_io);
       if(rc < 0)
         return 1;
@@ -2697,15 +2729,20 @@ int shell_runtime_init(void)
   if(__sync_lock_test_and_set(&g_runtime_started, 1) != 0)
     return 0;
 
+  if(xv6_network_runtime_init() != 0){
+    eputs_line("network runtime init failed");
+    goto fail;
+  }
+
   elf_loader_init();
   g_jobs_lock = xSemaphoreCreateMutex();
   if(g_jobs_lock == 0)
     goto fail;
-  g_loader_lock = xSemaphoreCreateRecursiveMutex();
-  if(g_loader_lock == 0)
-    goto fail;
   g_interactive_task = 0;
-  register_default_symbols();
+  if(register_default_symbols() != 0){
+    eputs_line("hostabi: failed to register default exports");
+    goto fail;
+  }
   xv6_vfs_reset();
   hostabi_posix_io_init();
   memset(&kcfg, 0, sizeof(kcfg));
@@ -2723,10 +2760,6 @@ int shell_runtime_init(void)
   return 0;
 
 fail:
-  if(g_loader_lock){
-    vSemaphoreDelete(g_loader_lock);
-    g_loader_lock = 0;
-  }
   if(g_jobs_lock){
     vSemaphoreDelete(g_jobs_lock);
     g_jobs_lock = 0;

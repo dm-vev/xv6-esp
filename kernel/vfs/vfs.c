@@ -50,13 +50,18 @@ static uint32 g_data_start;
 static SemaphoreHandle_t g_vfs_lock;
 static SemaphoreHandle_t g_ctx_lock;
 
+#define VFS_PATH_MAX 320
+#define VFS_PATH_MAX_SEGS ((VFS_PATH_MAX / 2) + 2)
+#define VFS_PATH_SRC_FLAG 0x40000000
+#define VFS_PATH_IDX_MASK 0x3fffffff
+
 typedef struct {
   int stdio_active;
   int in_fd;
   int out_fd;
   int err_fd;
   int last_errno;
-  char cwd[MAXPATH];
+  char cwd[VFS_PATH_MAX];
 } xv6_task_ctx_t;
 
 #define XV6_MAX_TASK_CTX XV6_TASK_CTX_CAP
@@ -106,7 +111,7 @@ static int g_next_fd_group = 1;
 #define XV6_DEFAULT_DEV_MODE 0666u
 
 #define XV6_SYMLINK_MAX_DEPTH 8
-#define XV6_SYMLINK_TARGET_MAX MAXPATH
+#define XV6_SYMLINK_TARGET_MAX VFS_PATH_MAX
 
 static void copy_cstr(char *dst, int dst_len, const char *src)
 {
@@ -363,16 +368,18 @@ static int stdio_map_fd(int fd)
 
 static int path_resolve(const char *path, char *out, int out_len)
 {
-  char path_buf[MAXPATH];
+  char path_buf[VFS_PATH_MAX];
   const char *p;
   const char *prefix = "/";
   xv6_task_ctx_t *ctx;
-  int stack[32];
+  int stack[VFS_PATH_MAX_SEGS];
   int nseg = 0;
 
   if(path == 0 || out == 0 || out_len <= 1)
     return -1;
   if(copy_guest_cstr(path, path_buf, sizeof(path_buf)) != 0)
+    return -1;
+  if(path_buf[0] == 0)
     return -1;
   path = path_buf;
 
@@ -419,7 +426,7 @@ static int path_resolve(const char *path, char *out, int out_len)
     }
     if(nseg >= (int)(sizeof(stack) / sizeof(stack[0])))
       return -1;
-    stack[nseg++] = (int)(seg - path) | 0x40000000;
+    stack[nseg++] = (int)(seg - path) | VFS_PATH_SRC_FLAG;
   }
 
   {
@@ -430,8 +437,8 @@ static int path_resolve(const char *path, char *out, int out_len)
       const char *src;
       int len = 0;
       int idx = stack[i];
-      if((idx & 0x40000000) != 0){
-        src = path + (idx & 0x3fffffff);
+      if((idx & VFS_PATH_SRC_FLAG) != 0){
+        src = path + (idx & VFS_PATH_IDX_MASK);
         while(src[len] && src[len] != '/')
           len++;
       } else {
@@ -483,12 +490,31 @@ static int dev_canonical_path(const char *path, char *out, int out_len)
   return 0;
 }
 
+static int parse_pts_id(const char *path, int *out_id);
+
+static int is_known_dev_canon(const char *canon)
+{
+  int pty_id = -1;
+
+  if(canon == 0)
+    return 0;
+  if(strcmp(canon, "/dev") == 0 || strcmp(canon, "/dev/console") == 0 || strcmp(canon, "/dev/tty") == 0 ||
+     strcmp(canon, "/dev/null") == 0 || strcmp(canon, "/dev/zero") == 0 || strcmp(canon, "/dev/full") == 0 ||
+     strcmp(canon, "/dev/random") == 0 || strcmp(canon, "/dev/urandom") == 0 || strcmp(canon, "/dev/stdin") == 0 ||
+     strcmp(canon, "/dev/stdout") == 0 || strcmp(canon, "/dev/stderr") == 0 || strcmp(canon, "/dev/kmsg") == 0 ||
+     strcmp(canon, "/dev/ptmx") == 0 || strcmp(canon, "/dev/pts") == 0)
+    return 1;
+  if(parse_pts_id(canon, &pty_id) == 0)
+    return 1;
+  return 0;
+}
+
 static int is_dev_node(const char *path)
 {
-  char canon[MAXPATH];
+  char canon[VFS_PATH_MAX];
   if(dev_canonical_path(path, canon, sizeof(canon)) != 0)
     return 0;
-  return strncmp(canon, "/dev/", 5) == 0 || strcmp(canon, "/dev") == 0;
+  return is_known_dev_canon(canon);
 }
 
 static int parse_pts_id(const char *path, int *out_id)
@@ -614,7 +640,7 @@ static int dev_prng_fill(void *buf, uint32 n)
 
 static int dev_read(const char *path, uint32 off, void *buf, uint32 size)
 {
-  char canon[MAXPATH];
+  char canon[VFS_PATH_MAX];
   uint8 *p = (uint8 *)buf;
   uint32 i = 0;
 
@@ -651,7 +677,7 @@ static int dev_read(const char *path, uint32 off, void *buf, uint32 size)
 
 static int dev_write(const char *path, const void *data, uint32 size)
 {
-  char canon[MAXPATH];
+  char canon[VFS_PATH_MAX];
   const char *c = (const char *)data;
   uint32 left = size;
 
@@ -1195,7 +1221,7 @@ static int inode_read_symlink_target_locked(const struct dinode *ip, char *out, 
 static int path_resolve_final_symlink_locked_impl(const char *abs_in, char *abs_out, int out_len,
                                                   int allow_missing_final_nonzero)
 {
-  char cur[MAXPATH];
+  char cur[VFS_PATH_MAX];
   int depth;
 
   if(abs_in == 0 || abs_out == 0 || out_len <= 1)
@@ -1234,14 +1260,14 @@ static int path_resolve_final_symlink_locked_impl(const char *abs_in, char *abs_
 
     {
       char target[XV6_SYMLINK_TARGET_MAX];
-      char combined[MAXPATH];
+      char combined[VFS_PATH_MAX];
 
       if(inode_read_symlink_target_locked(&ip, target, sizeof(target), 0) != 0)
         return -1;
       if(target[0] == '/'){
         copy_cstr(combined, sizeof(combined), target);
       } else {
-        char parent[MAXPATH];
+        char parent[VFS_PATH_MAX];
         int n;
         if(path_parent_str(cur, parent, sizeof(parent)) != 0)
           return -1;
@@ -1266,7 +1292,7 @@ static int path_resolve_final_symlink_locked(const char *abs_in, char *abs_out, 
 static int path_lookup_follow_locked(const char *abs_path, int follow_final_nonzero, char *resolved_out, int resolved_len,
                                      uint32 *out_inum, struct dinode *out_ip)
 {
-  char lookup_path[MAXPATH];
+  char lookup_path[VFS_PATH_MAX];
   const char *path_for_lookup = abs_path;
 
   if(abs_path == 0)
@@ -1478,7 +1504,7 @@ int xv6fs_ro_flash_image(const uint8 *image, uint32 image_size)
 
 int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_len, uint16 *type_out, uint32 *size_out)
 {
-  char abs_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
   uint32 dir_inum;
   struct dinode dir;
   uint32 off;
@@ -1551,7 +1577,7 @@ out:
 
 int xv6fs_read_file_alloc_path(const char *path, void **out_data, uint32 *out_size)
 {
-  char abs_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
   uint32 inum;
   struct dinode ip;
   void *buf;
@@ -1612,7 +1638,7 @@ out_unlock:
 
 int xv6fs_mkdir_path(const char *path)
 {
-  char abs_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
   uint32 pinum;
   uint32 inum;
   struct dinode pip;
@@ -1697,7 +1723,7 @@ out_err:
 
 int xv6fs_write_file_path(const char *path, const void *data, uint32 size)
 {
-  char abs_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
   uint32 pinum, inum;
   char name[DIRSIZ + 1];
   struct dinode ip;
@@ -1783,7 +1809,7 @@ out:
 
 int xv6fs_unlink_path(const char *path)
 {
-  char abs_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
   uint32 pinum, inum, off;
   char name[DIRSIZ + 1];
   struct dirent de;
@@ -1852,7 +1878,7 @@ out_fail:
 
 int xv6fs_rmdir_path(const char *path)
 {
-  char abs_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
   uint32 pinum, inum, off;
   char name[DIRSIZ + 1];
   struct dirent de;
@@ -1936,8 +1962,8 @@ out_err:
 
 int xv6fs_rename_path(const char *oldpath, const char *newpath)
 {
-  char old_abs[MAXPATH];
-  char new_abs[MAXPATH];
+  char old_abs[VFS_PATH_MAX];
+  char new_abs[VFS_PATH_MAX];
   char old_name[DIRSIZ + 1];
   char new_name[DIRSIZ + 1];
   struct dirent old_de;
@@ -2125,9 +2151,9 @@ out_fail:
 
 int xv6fs_link_path(const char *oldpath, const char *newpath)
 {
-  char old_abs[MAXPATH];
-  char new_abs[MAXPATH];
-  char old_lookup[MAXPATH];
+  char old_abs[VFS_PATH_MAX];
+  char new_abs[VFS_PATH_MAX];
+  char old_lookup[VFS_PATH_MAX];
   char new_name[DIRSIZ + 1];
   uint32 old_inum = 0;
   uint32 new_parent = 0;
@@ -2210,7 +2236,7 @@ out_fail:
 int xv6fs_symlink_path(const char *target, const char *linkpath)
 {
   char target_buf[XV6_SYMLINK_TARGET_MAX];
-  char abs_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
   char name[DIRSIZ + 1];
   uint32 pinum = 0;
   uint32 inum = 0;
@@ -2294,7 +2320,7 @@ out:
 
 int xv6fs_readlink_path(const char *path, char *buf, uint32 bufsz)
 {
-  char abs_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
   uint32 inum = 0;
   uint32 size = 0;
   uint32 copy_n = 0;
@@ -2479,9 +2505,9 @@ int xv6_open(const char *path, int flags)
   int fd;
   int err = EIO;
   int rc;
-  char abs_path[MAXPATH];
-  char resolved_path[MAXPATH];
-  char canon[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
+  char resolved_path[VFS_PATH_MAX];
+  char canon[VFS_PATH_MAX];
   int pty_id = -1;
   uint32 inum;
   struct dinode ip;
@@ -2801,14 +2827,13 @@ int xv6_read(int fd, void *buf, uint32 size)
   }
 
   if(g_fds[real_fd].kind == VFD_DEV){
-    rc = dev_read_fd(&g_fds[real_fd], buf, size);
-    if(rc < 0){
-      err = EIO;
-      goto fail;
-    }
-    if(rc > 0)
-      g_fds[real_fd].off += (uint32)rc;
+    xv6_vfd_t fd_snapshot = g_fds[real_fd];
     vfs_unlock();
+    rc = dev_read_fd(&fd_snapshot, buf, size);
+    if(rc < 0){
+      task_ctx_set_errno(EIO);
+      return -1;
+    }
     return rc;
   }
 
@@ -3064,8 +3089,8 @@ static void fill_kstat_from_inode_locked(uint32 inum, const struct dinode *ip, x
 
 int xv6_stat_path(const char *path, xv6_kstat_t *st)
 {
-  char abs_path[MAXPATH];
-  char resolved_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
+  char resolved_path[VFS_PATH_MAX];
   uint32 inum;
   struct dinode ip;
   int err = EIO;
@@ -3121,7 +3146,7 @@ out_fail:
 
 int xv6_lstat_path(const char *path, xv6_kstat_t *st)
 {
-  char abs_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
   uint32 inum;
   struct dinode ip;
 
@@ -3238,8 +3263,8 @@ int xv6_access(const char *path, int mode)
 
 int xv6_chmod(const char *path, int mode)
 {
-  char abs_path[MAXPATH];
-  char resolved_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
+  char resolved_path[VFS_PATH_MAX];
   uint32 inum;
   struct dinode ip;
   int err = EIO;
@@ -3286,8 +3311,8 @@ out_fail:
 
 int xv6_chown_path(const char *path, int owner, int group, int follow_final_nonzero)
 {
-  char abs_path[MAXPATH];
-  char lookup_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
+  char lookup_path[VFS_PATH_MAX];
   uint32 inum;
   struct dinode ip;
   int err = EIO;
@@ -3447,8 +3472,8 @@ out_fail:
 
 int xv6_chdir(const char *path)
 {
-  char abs_path[MAXPATH];
-  char resolved_path[MAXPATH];
+  char abs_path[VFS_PATH_MAX];
+  char resolved_path[VFS_PATH_MAX];
   uint32 inum;
   struct dinode ip;
   xv6_task_ctx_t *ctx;
@@ -3636,6 +3661,31 @@ void xv6_stdio_reset_fds(void)
   }
 }
 
+void xv6_stdio_get_fds(int *out_in_fd, int *out_out_fd, int *out_err_fd, int *out_active)
+{
+  xv6_task_ctx_t *ctx = task_ctx_get(0);
+  int active = 0;
+  int in_fd = 0;
+  int out_fd = 1;
+  int err_fd = 2;
+
+  if(ctx && ctx->stdio_active){
+    active = 1;
+    in_fd = ctx->in_fd;
+    out_fd = ctx->out_fd;
+    err_fd = ctx->err_fd;
+  }
+
+  if(out_in_fd)
+    *out_in_fd = in_fd;
+  if(out_out_fd)
+    *out_out_fd = out_fd;
+  if(out_err_fd)
+    *out_err_fd = err_fd;
+  if(out_active)
+    *out_active = active;
+}
+
 int xv6_stdio_is_default_out(void)
 {
   xv6_task_ctx_t *ctx = task_ctx_get(0);
@@ -3685,7 +3735,7 @@ int xv6fs_ro_list(int index, char *name_out, int name_out_len, uint32 *size_out)
 
 int xv6fs_ro_read_file_alloc(const char *name, void **out_data, uint32 *out_size)
 {
-  char path[MAXPATH];
+  char path[VFS_PATH_MAX];
   int n;
   if(name == 0)
     return -1;

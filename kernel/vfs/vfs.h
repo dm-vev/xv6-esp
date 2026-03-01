@@ -343,6 +343,18 @@ int xv6_stdio_set_fds(int in_fd, int out_fd, int err_fd);
 void xv6_stdio_reset_fds(void);
 
 /**
+ * @brief Get current stdio mapping for this task
+ * @param out_in_fd Optional stdin fd output
+ * @param out_out_fd Optional stdout fd output
+ * @param out_err_fd Optional stderr fd output
+ * @param out_active Optional stdio-active flag output (1 if custom mapping is active)
+ *
+ * Returns task-local stdio mapping. If no task context exists, defaults to
+ * 0/1/2 with inactive mapping.
+ */
+void xv6_stdio_get_fds(int *out_in_fd, int *out_out_fd, int *out_err_fd, int *out_active);
+
+/**
  * @brief Check if default stdout is active
  * @return 1 if default stdout, 0 otherwise
  */

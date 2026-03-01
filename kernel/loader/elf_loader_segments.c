@@ -77,6 +77,11 @@ int parse_segments(elf_module_t *m, const elf32_ehdr_t *eh)
       dst = (uint8 *)alloc_data_mem(ph->p_memsz);
     }
     if(dst == 0){
+      /*
+       * Keep allocation failure reporting side-effect free.
+       * Heap capability introspection from this failure path proved unstable
+       * under pressure and could panic before returning the original error.
+       */
       ESP_LOGE(g_elf_loader_tag, "segment alloc failed: memsz=%u flags=0x%x", (unsigned)ph->p_memsz,
                (unsigned)ph->p_flags);
       return -1;
@@ -94,11 +99,15 @@ int parse_segments(elf_module_t *m, const elf32_ehdr_t *eh)
     if(m->segs[m->seg_count].is_exec){
       m->segs[m->seg_count].shadow_mem = (uint8 *)alloc_data_mem(ph->p_memsz);
       if(m->segs[m->seg_count].shadow_mem == 0){
-        ESP_LOGE(g_elf_loader_tag, "shadow alloc failed: memsz=%u", (unsigned)ph->p_memsz);
-        heap_caps_free(dst);
-        return -1;
+        /*
+         * shadow_mem is an optimization for safe data-view access to exec segments.
+         * If unavailable, continue with exec segment only and let map_vaddr_data()
+         * fall back to m->segs[i].mem.
+         */
+        ESP_LOGW(g_elf_loader_tag, "shadow alloc skipped: memsz=%u", (unsigned)ph->p_memsz);
+      } else {
+        memcpy(m->segs[m->seg_count].shadow_mem, dst, ph->p_memsz);
       }
-      memcpy(m->segs[m->seg_count].shadow_mem, dst, ph->p_memsz);
     }
 
     m->seg_count++;
