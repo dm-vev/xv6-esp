@@ -16,6 +16,7 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <time.h>
+#include "lwip/api.h"
 #include <sys/reent.h>
 #include <signal.h>
 #include <unistd.h>
@@ -25,6 +26,7 @@
 #include "freertos/task.h"
 #include "loader/elf_loader.h"
 #include "platform/esp_flash_disk.h"
+#include "platform/xv6_esp_boot.h"
 #include "esp_memory_utils.h"
 #include "platform/hal.h"
 #include "hostabi/hostabi_dirent.h"
@@ -42,7 +44,7 @@
 #define KSH_MAX_ENV 16
 #define KSH_ENV_KEY 24
 #define KSH_ENV_VAL 128
-#define KSH_BG_STACK 16384
+#define KSH_BG_STACK 6144
 #define KSH_MAX_CORES 8
 
 _Static_assert(XV6_TASK_CTX_CAP >= (KSH_MAX_JOBS + 2), "XV6_TASK_CTX_CAP must cover shell + background jobs");
@@ -103,7 +105,6 @@ static uint32 g_ulimit_ms = 0;
 static int g_ulimit_heap_kb = 0;
 static volatile int g_runtime_started = 0;
 static SemaphoreHandle_t g_jobs_lock;
-static SemaphoreHandle_t g_loader_lock;
 static ksh_env_t g_env[KSH_MAX_ENV];
 static TaskHandle_t g_interactive_task;
 

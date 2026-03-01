@@ -100,12 +100,10 @@ void *dlopen(const char *file, int mode)
     return 0;
   }
 
-  if(elf_module_load_from_bytes(namebuf, image, image_size, &mod) != 0){
-    free(image);
+  if(elf_module_load_from_owned_bytes(namebuf, image, image_size, &mod) != 0){
     set_dlerror("dlopen: load failed");
     return 0;
   }
-  free(image);
 
   module_lock();
   if(!module_is_live_locked(mod)){
@@ -212,4 +210,40 @@ const char *dlerror(void)
   msg = g_dlerror_msg;
   g_dlerror_set = 0;
   return msg;
+}
+
+int elf_loader_handle_refstate(void *handle, int *open_count_out, int *active_calls_out, int *dependent_count_out,
+                               int *in_call_ctx_out)
+{
+  int idx = -1;
+  elf_module_t *mod = 0;
+  int in_ctx = 0;
+
+  if(open_count_out)
+    *open_count_out = 0;
+  if(active_calls_out)
+    *active_calls_out = 0;
+  if(dependent_count_out)
+    *dependent_count_out = 0;
+  if(in_call_ctx_out)
+    *in_call_ctx_out = 0;
+
+  module_lock();
+  if(module_from_dl_handle_locked(handle, &idx, &mod) != 0 || mod == 0){
+    module_unlock();
+    return -1;
+  }
+  (void)idx;
+
+  if(open_count_out)
+    *open_count_out = mod->open_count;
+  if(active_calls_out)
+    *active_calls_out = mod->active_calls;
+  if(dependent_count_out)
+    *dependent_count_out = mod->dependent_count;
+  in_ctx = module_is_active_in_call_ctx(mod);
+  if(in_call_ctx_out)
+    *in_call_ctx_out = in_ctx;
+  module_unlock();
+  return 0;
 }

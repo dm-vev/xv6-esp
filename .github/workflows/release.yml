@@ -12,43 +12,75 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    env:
+      IDF_PATH: ${{ runner.temp }}/esp-idf
+      IDF_TOOLS_PATH: ${{ runner.temp }}/.espressif
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Prepare IDF tools directory
+        run: |
+          mkdir -p "$IDF_TOOLS_PATH"
 
       - name: Cache ESP-IDF
         uses: actions/cache@v4
         with:
           path: |
-            ~/.espressif
-            ~/esp-idf
-          key: ${{ runner.os }}-espidf-v6.0-release-v1
+            ${{ env.IDF_TOOLS_PATH }}
+            ${{ env.IDF_PATH }}
+          key: ${{ runner.os }}-espidf-v6.0-release-v2
 
       - name: Prepare ESP-IDF
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libsdl2-2.0-0 || sudo apt-get install -y libsdl2-2.0-0t64
-          if [ ! -d "$HOME/esp-idf/.git" ]; then
-            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
-          fi
-          cd "$HOME/esp-idf"
-          ./install.sh esp32s3
-          python3 "$HOME/esp-idf/tools/idf_tools.py" install qemu-xtensa
+          set -euo pipefail
+          install_one_of() {
+            local ok=1
+            for pkg in "$@"; do
+              if sudo apt-get install -y "$pkg"; then
+                ok=0
+                break
+              fi
+            done
+            return "$ok"
+          }
 
-      - name: Install static tools
-        run: |
           sudo apt-get update
-          sudo apt-get install -y cppcheck clang-tidy codespell
-          python3 -m pip install --upgrade pip
-          python3 -m pip install semgrep ruff bandit
+          install_one_of libsdl2-2.0-0 libsdl2-2.0-0t64
+          install_one_of libslirp0 libslirp0t64
+          install_one_of libglib2.0-0 libglib2.0-0t64
+          install_one_of libpixman-1-0 libpixman-1-0t64
+          install_one_of libgcrypt20 libgcrypt20t64
+
+          if [ ! -d "$IDF_PATH/.git" ]; then
+            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$IDF_PATH"
+          else
+            git -C "$IDF_PATH" fetch --depth 1 origin release/v6.0
+            git -C "$IDF_PATH" reset --hard FETCH_HEAD
+          fi
+
+          "$IDF_PATH/install.sh" esp32s3
+          python3 "$IDF_PATH/tools/idf_tools.py" install qemu-xtensa
+          source "$IDF_PATH/export.sh"
+          qemu-system-xtensa --version
+          QEMU_BIN="$(command -v qemu-system-xtensa)"
+          if ldd "$QEMU_BIN" | grep -q "not found"; then
+            echo "Missing runtime libraries for $QEMU_BIN"
+            ldd "$QEMU_BIN"
+            exit 1
+          fi
 
       - name: Build + gates
         run: |
-          source "$HOME/esp-idf/export.sh"
+          source "$IDF_PATH/export.sh"
           idf.py set-target esp32s3
           python3 ./scripts/ci_gate_esp.py
 

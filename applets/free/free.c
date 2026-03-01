@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 extern int k_free_heap(void);
+extern int k_total_heap(void);
 
 typedef enum {
   UNIT_BYTES = 0,
@@ -28,62 +29,31 @@ static void usage(void)
 
 static int read_mem_stats(mem_stats_t *out)
 {
-  unsigned long long page_size = 4096;
-  long page_size_sc;
-  long phys_pages = -1;
-  long avphys_pages = -1;
+  int total_heap;
   int free_heap;
-  unsigned long long total = 0;
-  unsigned long long free_mem = 0;
-  int have_total = 0;
-  int have_free = 0;
+  unsigned long long total_mem;
+  unsigned long long free_mem;
 
   if(out == NULL) {
     return -1;
   }
 
-  page_size_sc = sysconf(_SC_PAGESIZE);
-  if(page_size_sc > 0) {
-    page_size = (unsigned long long)page_size_sc;
+  total_heap = k_total_heap();
+  free_heap = k_free_heap();
+  if(free_heap < 0 || total_heap < 0) {
+    return -1;
   }
-
-#ifdef _SC_PHYS_PAGES
-  phys_pages = sysconf(_SC_PHYS_PAGES);
-#endif
-#ifdef _SC_AVPHYS_PAGES
-  avphys_pages = sysconf(_SC_AVPHYS_PAGES);
-#endif
-
-  if(phys_pages > 0) {
-    total = (unsigned long long)phys_pages * page_size;
-    have_total = 1;
-  }
-  if(avphys_pages > 0) {
-    free_mem = (unsigned long long)avphys_pages * page_size;
-    have_free = 1;
-  }
-
-  if(!have_free) {
-    free_heap = k_free_heap();
-    if(free_heap >= 0) {
-      free_mem = (unsigned long long)free_heap;
-      have_free = 1;
-    }
-  }
-
-  if(!have_total && have_free) {
-    total = free_mem;
-    have_total = 1;
-  }
-
-  if(!have_total && !have_free) {
+  free_mem = (unsigned long long)free_heap;
+  total_mem = (unsigned long long)total_heap;
+  if(total_mem < free_mem) {
     return -1;
   }
 
-  out->total = total;
+  /* Heap view: total from allocator capacity, free from allocator current state. */
+  out->total = total_mem;
   out->free = free_mem;
   out->available = free_mem;
-  out->used = (total >= free_mem) ? (total - free_mem) : 0;
+  out->used = total_mem - free_mem;
   out->valid = 1;
   return 0;
 }

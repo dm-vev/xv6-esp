@@ -24,7 +24,18 @@ from subprocess import run
 from scripts.qemu_idf_session import launch_idf_qemu, stop_idf_qemu
 
 ROOT = Path(__file__).resolve().parent
-BUILD = ROOT / "build"
+IDF_TARGET = "esp32s3"
+
+
+def resolve_build_dir() -> Path:
+    raw = os.environ.get("BUILD_DIR", "build")
+    path = Path(raw)
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+BUILD = resolve_build_dir()
 PROMPT = b"xv6> "
 
 parser = argparse.ArgumentParser()
@@ -45,9 +56,9 @@ def resolve_idf_export_script() -> Path:
             return False
 
     candidates = []
-    candidates.append(ROOT.parent / "magnolia" / "esp-idf")
     if os.environ.get("IDF_PATH"):
         candidates.append(Path(os.environ["IDF_PATH"]))
+    candidates.append(ROOT.parent / "magnolia" / "esp-idf")
     home = Path.home()
     candidates.extend((home / "esp-idf", Path("/opt/esp-idf"), Path("/root/esp-idf"), Path("/tmp/esp-idf")))
     for p in candidates:
@@ -64,17 +75,66 @@ def idf_export_cmd() -> str:
     return f"source {shlex.quote(str(IDF_EXPORT_SCRIPT))} >/dev/null"
 
 
+def idf_py_cmd(*args: str) -> str:
+    parts = ["idf.py", "-B", str(BUILD), *args]
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+def _cache_value(cache_text: str, key: str) -> str | None:
+    prefix = f"{key}:"
+    for line in cache_text.splitlines():
+        if not line.startswith(prefix):
+            continue
+        parts = line.split("=", 1)
+        if len(parts) != 2:
+            continue
+        return parts[1].strip()
+    return None
+
+
+def _is_valid_idf_build_dir(path: Path) -> bool:
+    cache = path / "CMakeCache.txt"
+    if not cache.exists():
+        return False
+    try:
+        text = cache.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+    home_dir = _cache_value(text, "CMAKE_HOME_DIRECTORY")
+    target = _cache_value(text, "IDF_TARGET")
+    generator = _cache_value(text, "CMAKE_GENERATOR")
+    if home_dir is None:
+        return False
+    try:
+        if Path(home_dir).resolve() != ROOT.resolve():
+            return False
+    except OSError:
+        return False
+    if target != IDF_TARGET:
+        return False
+    if generator and generator != "Ninja":
+        return False
+    return True
+
+
 def generate_qemu_flash() -> None:
+    flash = BUILD / "qemu_flash.bin"
+    bootloader = BUILD / "bootloader" / "bootloader.bin"
+    partition_table = BUILD / "partition_table" / "partition-table.bin"
+    ota_data = BUILD / "ota_data_initial.bin"
+    xv6fs = BUILD / "xv6fs.bin"
+    firmware = BUILD / "xv6_esp32s3.bin"
     merge = (
         f"{idf_export_cmd()} && "
         "esptool --chip=esp32s3 merge-bin "
-        "--output=build/qemu_flash.bin --pad-to-size=2MB "
+        f"--output={shlex.quote(str(flash))} --pad-to-size=2MB "
         "--flash-mode dio --flash-freq 80m --flash-size 2MB "
-        "0x0 build/bootloader/bootloader.bin "
-        "0x8000 build/partition_table/partition-table.bin "
-        "0xf000 build/ota_data_initial.bin "
-        "0x120000 build/xv6fs.bin "
-        "0x20000 build/xv6_esp32s3.bin"
+        f"0x0 {shlex.quote(str(bootloader))} "
+        f"0x8000 {shlex.quote(str(partition_table))} "
+        f"0xf000 {shlex.quote(str(ota_data))} "
+        f"0x120000 {shlex.quote(str(xv6fs))} "
+        f"0x20000 {shlex.quote(str(firmware))}"
     )
     run_shell(merge)
 
@@ -82,13 +142,21 @@ def generate_qemu_flash() -> None:
 def ensure_cmake_build_dir() -> None:
     if not BUILD.exists():
         return
-    if BUILD.is_dir() and (BUILD / "CMakeCache.txt").exists():
+    if BUILD.is_dir() and _is_valid_idf_build_dir(BUILD):
         return
     if BUILD.is_symlink() or BUILD.is_file():
         BUILD.unlink()
         return
     if BUILD.is_dir():
         shutil.rmtree(BUILD)
+
+
+def build_project() -> None:
+    ensure_cmake_build_dir()
+    if _is_valid_idf_build_dir(BUILD):
+        run_shell(f"{idf_export_cmd()} && {idf_py_cmd('build')}")
+        return
+    run_shell(f"{idf_export_cmd()} && {idf_py_cmd('set-target', IDF_TARGET)} && {idf_py_cmd('build')}")
 
 
 def ensure_qemu_efuse() -> None:
@@ -108,7 +176,7 @@ class QEMU(object):
         ensure_qemu_efuse()
         flash = BUILD / "qemu_flash.bin"
         efuse = BUILD / "qemu_efuse.bin"
-        self.proc, self.serial = launch_idf_qemu(ROOT, idf_export_cmd(), flash, efuse)
+        self.proc, self.serial = launch_idf_qemu(ROOT, idf_export_cmd(), flash, efuse, BUILD)
         self.output = ""
         self.outbytes = bytearray()
         self.wait_for_prompt(timeout=90.0)
@@ -124,8 +192,7 @@ class QEMU(object):
         if QEMU._built:
             return
         try:
-            ensure_cmake_build_dir()
-            run_shell(f"{idf_export_cmd()} && idf.py set-target esp32s3 && idf.py build")
+            build_project()
             QEMU._built = True
         except subprocess.CalledProcessError as e:
             print(f"Command failed with exit code {e.returncode}")

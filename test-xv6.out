@@ -1,0 +1,217 @@
+[38;5;208mActivating ESP-IDF [0m[1;38;5;208m6.0[0m
+Setting IDF_PATH to [32m'/home/tikhon/Документы/magnolia/esp-idf'[0m.
+[38;5;208m*[0m Checking python version [33m...[0m [1;32m3.12[0m[32m.[0m[1;32m3[0m
+[38;5;208m*[0m Checking python dependencies [33m...[0m [32mOK[0m
+[38;5;208m*[0m Deactivating the current ESP-IDF environment [1m([0mif any[1m)[0m [33m...[0m [32mOK[0m
+[38;5;208m*[0m Establishing a new ESP-IDF environment [33m...[0m [32mOK[0m
+[38;5;208m*[0m Identifying shell [33m...[0m [32mbash[0m
+[38;5;208m*[0m Detecting outdated tools in system [33m...[0m [32mFound tools that are not used by active ESP-IDF version.[0m
+[96mFor removing old versions of xtensa-esp-elf, openocd-esp32, qemu-xtensa, esp-rom-elfs, riscv32-esp-elf, xtensa-esp32s3-elf, riscv32-esp-elf-gdb, esp32ulp-elf, xtensa-esp-elf-gdb use command [0m[96m'python [0m
+[96m/home/tikhon/Документы/magnolia/esp-idf/tools/idf_tools.py uninstall'[0m
+[96mTo free up even more space, remove installation packages of those tools.[0m
+[96mUse option python [0m[96m/home/tikhon/Документы/magnolia/esp-idf/tools/[0m[96midf_tools.py[0m[96m uninstall --remove-archives.[0m
+[38;5;208m*[0m Shell completion [33m...[0m [32mAutocompletion code generated[0m
+Adding "qemu"'s dependency "all" to list of commands with default set of options.
+Executing action: all (aliases: build)
+Running ninja in directory /home/tikhon/Документы/xv6-esp/build
+Executing "ninja all"...
+[0/2] Re-checking globbed directories...[K[1/5] cd /home/tikhon/Документы/xv6-esp/build && /home/tikhon/.espressif/python_env/idf6.0_py3.12_env/bin/python /home/tikhon/Документы/magnolia/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /home/tikhon/Документы/xv6-esp/build/partition_table/partition-table.bin /home/tikhon/Документы/xv6-esp/build/xv6_esp32s3.bin[K
+xv6_esp32s3.bin binary size 0x6dea0 bytes. Smallest app partition is 0x100000 bytes. 0x92160 bytes (57%) free.
+[2/5] Performing build step for 'bootloader'[K[1/1] cd /home/tikhon/Документы/xv6-esp/build/bootloader && /home/tikhon/.espressif/python_env/idf6.0_py3.12_env/bin/python /home/tikhon/Документы/magnolia/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 /home/tikhon/Документы/xv6-esp/build/bootloader/bootloader.bin[K
+Bootloader binary size 0x5320 bytes. 0x2ce0 bytes (35%) free.
+[3/5] No install step for 'bootloader'[K[4/5] Completed 'bootloader'[KExecuting action: qemu
+[0;33mUsing provided flash image: /home/tikhon/Документы/xv6-esp/build/qemu_flash.bin[0m
+[0;33mUsing existing efuse image: /home/tikhon/Документы/xv6-esp/build/qemu_efuse.bin[0m
+[0;33mRunning qemu (fg): qemu-system-xtensa -M esp32s3 -drive file=/home/tikhon/Документы/xv6-esp/build/qemu_flash.bin,if=mtd,format=raw -drive file=/home/tikhon/Документы/xv6-esp/build/qemu_efuse.bin,if=none,format=raw,id=efuse -global driver=nvram.esp32c3.efuse,property=drive,value=efuse -global driver=timer.esp32s3.timg,property=wdt_disable,value=true -nic user,model=open_eth -nographic -serial mon:stdio[0m
+Adding SPI flash device
+qemu-system-xtensa: warning: global timer.esp32s3.timg.wdt_disable has invalid class name
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x1 (POWERON),boot:0x4 (SPI_FLASH_BOOT)
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x1588
+load:0x403c8700,len:0xd8c
+load:0x403cb700,len:0x2fb8
+entry 0x403c8908
+I (15) boot: ESP-IDF v6.0-dev-1833-g758939caec 2nd stage bootloader
+I (16) boot: compile time Mar  1 2026 19:32:40
+I (16) boot: Multicore bootloader
+I (18) boot: chip revision: v0.0
+I (18) boot: efuse block revision: v0.0
+I (18) boot.esp32s3: Boot SPI Speed : 80MHz
+I (19) boot.esp32s3: SPI Mode       : DIO
+I (19) boot.esp32s3: SPI Flash Size : 2MB
+I (19) boot: Enabling RNG early entropy source...
+I (20) boot: Partition Table:
+I (20) boot: ## Label            Usage          Type ST Offset   Length
+I (21) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (21) boot:  1 otadata          OTA data         01 00 0000f000 00002000
+I (21) boot:  2 phy_init         RF data          01 01 00011000 00001000
+I (21) boot:  3 factory          factory app      00 00 00020000 00100000
+I (21) boot:  4 xv6fs            Unknown data     01 40 00120000 000e0000
+I (22) boot: End of partition table
+I (22) boot: Defaulting to factory image
+I (23) esp_image: segment 0: paddr=00020020 vaddr=3c050020 size=1a568h (107880) map
+I (29) esp_image: segment 1: paddr=0003a590 vaddr=3fc91700 size=02d9ch ( 11676) load
+I (31) esp_image: segment 2: paddr=0003d334 vaddr=40374000 size=02ce4h ( 11492) load
+I (32) esp_image: segment 3: paddr=00040020 vaddr=42000020 size=434b8h (275640) map
+I (48) esp_image: segment 4: paddr=000834e0 vaddr=40376ce4 size=0a974h ( 43380) load
+I (50) esp_image: segment 5: paddr=0008de5c vaddr=50000000 size=00020h (    32) load
+I (51) boot: Loaded app from partition at offset 0x20000
+I (51) boot: Disabling RNG early entropy source...
+W (120) rtcinit: o_code calibration fail
+
+I (62) cpu_start: Multicore app
+I (71) cpu_start: GPIO 44 and 43 are used as console UART I/O pins
+I (71) cpu_start: Pro cpu start user code
+I (71) cpu_start: cpu freq: 160000000 Hz
+I (71) app_init: Application information:
+I (71) app_init: Project name:     xv6_esp32s3
+I (71) app_init: App version:      f5f4098-dirty
+I (72) app_init: Compile time:     Mar  1 2026 19:32:37
+I (72) app_init: ELF file SHA256:  a44ab3189...
+I (72) app_init: ESP-IDF:          v6.0-dev-1833-g758939caec
+I (72) efuse_init: Min chip rev:     v0.0
+I (72) efuse_init: Max chip rev:     v0.99 
+I (72) efuse_init: Chip rev:         v0.0
+I (72) heap_init: Initializing. RAM available for dynamic allocation:
+I (72) heap_init: At 3FCDAA60 len 0000ECB0 (59 KiB): RAM
+I (72) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+I (72) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+I (72) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM
+I (74) spi_flash: detected chip: winbond
+I (74) spi_flash: flash io: dio
+I (75) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (75) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (76) main_task: Started on CPU0
+I (76) main_task: Calling app_main()
+I (76) xv6_boot: xv6 ESP32-S3 M1 boot
+I (76) xv6_boot: stage=boot_start ticks=16 free_heap=59688
+I (76) xv6_boot: stage=network_runtime_init_ok ticks=16 free_heap=59688
+I (76) xv6_boot: init flash disk backend
+I (76) xv6_flash_disk: partition=xv6fs offset=0x120000 size=917504 sectors=1792
+I (76) xv6_boot: stage=flash_disk_init_ok ticks=17 free_heap=59048
+I (86) xv6fs: mounted: size=896 nblocks=849 ninodes=200
+I (86) xv6_boot: stage=xv6fs_mount_ok ticks=17 free_heap=58872
+netkmod: event=init fd=-1 val=0
+I (106) xv6_boot: stage=shell_runtime_init_ok ticks=20 free_heap=29592
+init: starting sh
+xv6> ls /bin/usertests
+ls: cannot access '/bin/usertests'
+1ls: exit=
+xv6> I (156) main_task: Returned from app_main()
+fd_test
+=== FD Tests ===
+PASS open_dev_null
+PASS read_dev_null
+PASS write_dev_null
+PASS open_dev_zero
+PASS read_dev_zero
+PASS zero_is_zero
+PASS open_dev_full
+PASS write_dev_full
+PASS fd_many_open
+PASS close_negative
+PASS write_then_lseek
+PASS lseek_set
+PASS read_after_lseek
+PASS lseek_cur
+PASS lseek_end
+PASS lseek_invalid
+PASS fcntl_getfl
+PASS fcntl_setfl
+PASS fcntl_append
+=== FD Test: 19/19 passed ===
+xv6> fs_stress_test
+=== FS Stress & Boundary Tests ===
+Guru Meditation Error: Core  0 panic'ed (LoadStorePIFAddrError). Exception was unhandled.
+
+Core  0 register dump:
+PC      : 0x42042aa1  PS      : 0x00060d33  A0      : 0x82003878  A1      : 0x3fcdbf40  
+A2      : 0x3fcdbf8c  A3      : 0x3fcdc0dc  A4      : 0x00000000  A5      : 0x00000002  
+A6      : 0x00000000  A7      : 0x00000000  A8      : 0x3b81050c  A9      : 0x3fcdbf90  
+A10     : 0x3fc9478c  A11     : 0x0000cdcd  A12     : 0x00060d20  A13     : 0x3fc917e0  
+A14     : 0x00000000  A15     : 0x00060d23  SAR     : 0x0000001f  EXCCAUSE: 0x0000000f  
+EXCVADDR: 0x3b810510  LBEG    : 0x40056f08  LEND    : 0x40056f12  LCOUNT  : 0x00000000  
+
+
+Backtrace: 0x42042a9e:0x3fcdbf40 0x42003875:0x3fcdbf60 0x403772af:0x3fcdbf80 0x40377583:0x3fcdbfa0 0x4037758d:0x3fcdbfc0 0x4037f4b1:0x3fcdbfe0 0x4037efd9:0x3fcdc000 0x4201a3eb:0x3fcdc040 0x4200b52d:0x3fcdc070 0x4200bd69:0x3fcdc090 0x4200bf4b:0x3fcdc0b0 0x4200c018:0x3fcdc4d0 0x4200c082:0x3fcdc900 0x4200c1a5:0x3fcdcd20 0x4200d820:0x3fcdd160 0x42010b05:0x3fcdd3b0 0x403cfdd3:0x3fcdd3d0 0x42015f22:0x3fcdd660 0x4201465c:0x3fcdd6a0 0x4201474c:0x3fcdd770 0x42040e0e:0x3fcdd7b0
+
+
+
+
+ELF file SHA256: a44ab3189
+
+Rebooting...
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0xc (RTC_SW_CPU_RST),boot:0x4 (SPI_FLASH_BOOT)
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x1588
+load:0x403c8700,len:0xd8c
+load:0x403cb700,len:0x2fb8
+entry 0x403c8908
+I (675) boot: ESP-IDF v6.0-dev-1833-g758939caec 2nd stage bootloader
+I (675) boot: compile time Mar  1 2026 19:32:40
+I (676) boot: Multicore bootloader
+I (677) boot: chip revision: v0.0
+I (677) boot: efuse block revision: v0.0
+I (678) boot.esp32s3: Boot SPI Speed : 80MHz
+I (678) boot.esp32s3: SPI Mode       : DIO
+I (678) boot.esp32s3: SPI Flash Size : 2MB
+I (679) boot: Enabling RNG early entropy source...
+I (680) boot: Partition Table:
+I (680) boot: ## Label            Usage          Type ST Offset   Length
+I (680) boot:  0 nvs              WiFi data        01 02 00009000 00006000
+I (680) boot:  1 otadata          OTA data         01 00 0000f000 00002000
+I (680) boot:  2 phy_init         RF data          01 01 00011000 00001000
+I (680) boot:  3 factory          factory app      00 00 00020000 00100000
+I (680) boot:  4 xv6fs            Unknown data     01 40 00120000 000e0000
+I (681) boot: End of partition table
+I (681) boot: Defaulting to factory image
+I (682) esp_image: segment 0: paddr=00020020 vaddr=3c050020 size=1a568h (107880) map
+I (689) esp_image: segment 1: paddr=0003a590 vaddr=3fc91700 size=02d9ch ( 11676) load
+I (690) esp_image: segment 2: paddr=0003d334 vaddr=40374000 size=02ce4h ( 11492) load
+I (693) esp_image: segment 3: paddr=00040020 vaddr=42000020 size=434b8h (275640) map
+I (710) esp_image: segment 4: paddr=000834e0 vaddr=40376ce4 size=0a974h ( 43380) load
+I (721) esp_image: segment 5: paddr=0008de5c vaddr=50000000 size=00020h (    32) load
+I (722) boot: Loaded app from partition at offset 0x20000
+I (722) boot: Disabling RNG early entropy source...
+I (725) cpu_start: Multicore app
+I (734) cpu_start: GPIO 44 and 43 are used as console UART I/O pins
+I (734) cpu_start: Pro cpu start user code
+I (734) cpu_start: cpu freq: 160000000 Hz
+I (734) app_init: Application information:
+I (734) app_init: Project name:     xv6_esp32s3
+I (734) app_init: App version:      f5f4098-dirty
+I (734) app_init: Compile time:     Mar  1 2026 19:32:37
+I (734) app_init: ELF file SHA256:  a44ab3189...
+I (734) app_init: ESP-IDF:          v6.0-dev-1833-g758939caec
+I (734) efuse_init: Min chip rev:     v0.0
+I (734) efuse_init: Max chip rev:     v0.99 
+I (734) efuse_init: Chip rev:         v0.0
+I (734) heap_init: Initializing. RAM available for dynamic allocation:
+I (734) heap_init: At 3FCDAA60 len 0000ECB0 (59 KiB): RAM
+I (734) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+I (734) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+I (734) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM
+I (736) spi_flash: detected chip: winbond
+I (736) spi_flash: flash io: dio
+I (736) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (736) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (736) main_task: Started on CPU0
+I (736) main_task: Calling app_main()
+I (736) xv6_boot: xv6 ESP32-S3 M1 boot
+I (736) xv6_boot: stage=boot_start ticks=133 free_heap=59688
+I (736) xv6_boot: stage=network_runtime_init_ok ticks=134 free_heap=59688
+I (736) xv6_boot: init flash disk backend
+I (736) xv6_flash_disk: partition=xv6fs offset=0x120000 size=917504 sectors=1792
+I (736) xv6_boot: stage=flash_disk_init_ok ticks=134 free_heap=59048
+I (736) xv6fs: mounted: size=896 nblocks=849 ninodes=200
+I (736) xv6_boot: stage=xv6fs_mount_ok ticks=134 free_heap=58872
+netkmod: event=init fd=-1 val=0
+I (746) xv6_boot: stage=shell_runtime_init_ok ticks=136 free_heap=29592
+init: starting sh
+xv6> 

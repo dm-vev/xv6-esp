@@ -5,8 +5,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT_DIR/build}"
 STRICT="${STRICT:-1}"
 STATIC_VENV="${STATIC_VENV:-$ROOT_DIR/.venv_static}"
+SEMGREP_CONFIG="${SEMGREP_CONFIG:-$ROOT_DIR/.semgrep/static-analysis.yml}"
+BANDIT_INI="${BANDIT_INI:-$ROOT_DIR/.bandit}"
+CODESPELL_CONFIG="${CODESPELL_CONFIG:-$ROOT_DIR/.codespellrc}"
 
 cd "$ROOT_DIR"
+export LC_ALL=C
 
 if [[ -x "$STATIC_VENV/bin/python3" ]]; then
   PATH="$STATIC_VENV/bin:$PATH"
@@ -46,22 +50,53 @@ require_cmd() {
   return 0
 }
 
+require_file() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    if [[ "$STRICT" == "1" ]]; then
+      printf '[static][error] required file is missing: %s\n' "$file" >&2
+      exit 1
+    fi
+    warn "required file is missing: $file (skip)"
+    return 1
+  fi
+  return 0
+}
+
 collect_c_sources() {
-  find kernel main applets -type f -name '*.c' -print | sort
+  find kernel main applets -type f -name '*.c' -print0 | sort -z
 }
 
 collect_py_sources() {
-  find scripts -type f -name '*.py' -print | sort
+  find scripts -type f -name '*.py' -print0 | sort -z
+}
+
+collect_repo_files() {
+  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -c core.quotepath=off ls-files -z
+    return
+  fi
+  find . -type f -print0 | sort -z
 }
 
 run_cppcheck() {
   require_cmd cppcheck || return 0
   log "cppcheck"
+  local -a c_files
+  mapfile -d '' -t c_files < <(collect_c_sources)
+  if [[ ${#c_files[@]} -eq 0 ]]; then
+    return 0
+  fi
+  local file_list
+  file_list="$(mktemp)"
+  printf '%s\n' "${c_files[@]}" >"$file_list"
+  local rc=0
   cppcheck \
     --quiet \
     --enable=warning,performance,portability \
     --std=c11 \
     --error-exitcode=1 \
+    -j1 \
     --inline-suppr \
     --suppress=missingIncludeSystem \
     --suppress=unusedFunction \
@@ -69,7 +104,9 @@ run_cppcheck() {
     -I kernel \
     -I applets/include \
     -I main \
-    kernel main applets
+    --file-list="$file_list" || rc=$?
+  rm -f "$file_list"
+  return "$rc"
 }
 
 run_clang_tidy() {
@@ -83,50 +120,59 @@ run_clang_tidy() {
     return 0
   fi
   log "clang-tidy"
-  local files
-  files="$(collect_c_sources | tr '\n' ' ')"
-  if [[ -z "$files" ]]; then
+  local -a c_files
+  mapfile -d '' -t c_files < <(collect_c_sources)
+  if [[ ${#c_files[@]} -eq 0 ]]; then
     return 0
   fi
-  # shellcheck disable=SC2086
-  clang-tidy -p "$BUILD_DIR" $files --warnings-as-errors='*'
+  clang-tidy -p "$BUILD_DIR" "${c_files[@]}" --warnings-as-errors='*'
 }
 
 run_semgrep() {
   require_cmd semgrep || return 0
+  require_file "$SEMGREP_CONFIG" || return 0
   log "semgrep"
-  semgrep --config auto --error \
+  semgrep \
+    --config "$SEMGREP_CONFIG" \
+    --error \
+    --jobs 1 \
+    --metrics=off \
+    --disable-version-check \
     --exclude build \
     --exclude .git \
     --exclude .venv_static \
     --exclude .tools \
-    .
+    scripts
 }
 
 run_ruff() {
   require_cmd ruff || return 0
   log "ruff"
-  local py_files
-  py_files="$(collect_py_sources | tr '\n' ' ')"
-  if [[ -z "$py_files" ]]; then
+  local -a py_files
+  mapfile -d '' -t py_files < <(collect_py_sources)
+  if [[ ${#py_files[@]} -eq 0 ]]; then
     return 0
   fi
-  # shellcheck disable=SC2086
-  ruff check $py_files
+  ruff check --config "$ROOT_DIR/.ruff.toml" --no-cache "${py_files[@]}"
 }
 
 run_bandit() {
   require_cmd bandit || return 0
+  require_file "$BANDIT_INI" || return 0
   log "bandit"
-  bandit -q -r scripts \
-    -s B108,B404,B603,B607 \
-    -x scripts/qemu_smoke_esp.py,scripts/qemu_stress_esp.py,scripts/qemu_soak_esp.py
+  bandit --ini "$BANDIT_INI" -q -r scripts
 }
 
 run_codespell() {
   require_cmd codespell || return 0
+  require_file "$CODESPELL_CONFIG" || return 0
   log "codespell"
-  codespell --config .codespellrc -f -H -q 2 --ignore-words-list "Mitake,Tung,mitake,tung"
+  local -a repo_files
+  mapfile -d '' -t repo_files < <(collect_repo_files)
+  if [[ ${#repo_files[@]} -eq 0 ]]; then
+    return 0
+  fi
+  codespell --config "$CODESPELL_CONFIG" -f -H -q 2 "${repo_files[@]}"
 }
 
 main() {

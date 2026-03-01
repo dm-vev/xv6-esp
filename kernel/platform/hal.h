@@ -61,4 +61,10 @@ void hal_reboot(void);
  */
 uint64 hal_free_heap_bytes(void);
 
+/**
+ * @brief Get total heap memory capacity
+ * @return Total heap bytes
+ */
+uint64 hal_total_heap_bytes(void);
+
 #endif

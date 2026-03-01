@@ -27,6 +27,10 @@ concurrency:
   group: hil-gate-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   hil-gate:
     runs-on:
@@ -39,17 +43,23 @@ jobs:
       HIL_BAUD: ${{ vars.HIL_BAUD || '115200' }}
       HIL_CYCLES: ${{ vars.HIL_CYCLES || '3' }}
       HIL_FLASH_FIRST: ${{ vars.HIL_FLASH_FIRST || '1' }}
+      IDF_PATH: ${{ runner.temp }}/esp-idf
+      IDF_TOOLS_PATH: ${{ runner.temp }}/.espressif
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Prepare ESP-IDF
         run: |
-          if [ ! -d "$HOME/esp-idf/.git" ]; then
-            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
+          set -euo pipefail
+          mkdir -p "$IDF_TOOLS_PATH"
+          if [ ! -d "$IDF_PATH/.git" ]; then
+            git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$IDF_PATH"
+          else
+            git -C "$IDF_PATH" fetch --depth 1 origin release/v6.0
+            git -C "$IDF_PATH" reset --hard FETCH_HEAD
           fi
-          cd "$HOME/esp-idf"
-          ./install.sh esp32s3
+          "$IDF_PATH/install.sh" esp32s3
 
       - name: Install HIL tooling
         run: |
@@ -64,7 +74,7 @@ jobs:
           INPUT_CYCLES: ${{ inputs.cycles || '' }}
           INPUT_FLASH_FIRST: ${{ inputs.flash_first || '' }}
         run: |
-          source "$HOME/esp-idf/export.sh"
+          source "$IDF_PATH/export.sh"
 
           PORT="$HIL_PORT"
           BAUD="$HIL_BAUD"

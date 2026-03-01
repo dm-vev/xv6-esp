@@ -9,7 +9,11 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#define BUFSIZ 8192
+/*
+ * Large static buffers make this applet unloadable on ESP32 executable heap.
+ * 512-byte chunks are enough for streaming behavior and keep footprint small.
+ */
+#define BUFSIZ 512
 
 int openf[20] = { 1 };
 int n = 1;

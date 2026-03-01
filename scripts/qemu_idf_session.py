@@ -61,12 +61,21 @@ class PtySerial:
             pass
 
 
-def launch_idf_qemu(root: Path, idf_export: str, flash: Path, efuse: Path) -> tuple[subprocess.Popen, PtySerial]:
+def launch_idf_qemu(
+    root: Path,
+    idf_export: str,
+    flash: Path,
+    efuse: Path,
+    build_dir: Path | None = None,
+) -> tuple[subprocess.Popen, PtySerial]:
     master_fd, slave_fd = os.openpty()
     tty.setraw(slave_fd)
+    build_arg = ""
+    if build_dir is not None:
+        build_arg = f"-B {shlex.quote(str(build_dir))} "
     cmd = (
         f"{idf_export} && "
-        "idf.py qemu "
+        f"idf.py {build_arg}qemu "
         f"--flash-file {shlex.quote(str(flash))} "
         f"--efuse-file {shlex.quote(str(efuse))}"
     )

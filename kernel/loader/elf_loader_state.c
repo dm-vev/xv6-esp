@@ -59,6 +59,11 @@ int call_ctx_set_current(elf_module_t *mod)
       free_i = i;
   }
 
+  if(mod == 0){
+    call_ctx_unlock();
+    return 0;
+  }
+
   if(free_i >= 0){
     g_call_ctx[free_i].task = self;
     g_call_ctx[free_i].mod = mod;
@@ -181,6 +186,7 @@ void elf_loader_task_cleanup_for_handle(void *task_handle)
 {
   TaskHandle_t target = (TaskHandle_t)task_handle;
   elf_module_t *mod = 0;
+  int mod_idx = -1;
   int i;
 
   if(target == 0)
@@ -200,8 +206,13 @@ void elf_loader_task_cleanup_for_handle(void *task_handle)
     return;
 
   module_lock();
-  if(module_is_live_locked(mod) && mod->active_calls > 0)
-    mod->active_calls--;
+  mod_idx = module_index_from_ptr_locked((const void *)mod);
+  if(mod_idx >= 0){
+    if(mod->active_calls > 0)
+      mod->active_calls--;
+    if(mod->open_count <= 0 && mod->active_calls <= 0 && mod->dependent_count <= 0)
+      module_unload_index_locked(mod_idx);
+  }
   module_unlock();
 }
 

@@ -11,6 +11,11 @@ static void xv6_boot_task(void *arg)
 
 void app_main(void)
 {
-  if(xTaskCreatePinnedToCore(xv6_boot_task, "xv6_boot", 12288, 0, tskIDLE_PRIORITY + 2, 0, 0) != pdPASS)
+  if(xv6_network_runtime_init() != 0){
+    xv6_boot();
+    return;
+  }
+
+  if(xTaskCreatePinnedToCore(xv6_boot_task, "xv6_boot", 24576, 0, tskIDLE_PRIORITY + 2, 0, 0) != pdPASS)
     xv6_boot();
 }

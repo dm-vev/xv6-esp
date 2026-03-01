@@ -19,12 +19,6 @@ static int shell_allow_ctrl_c_poll(void)
 #define POLLHUP 0x0010
 #endif
 
-struct pollfd {
-  int fd;
-  short events;
-  short revents;
-};
-
 static void k_copy_cstr(char *dst, int dst_len, const char *src)
 {
   if(dst == 0 || dst_len <= 0)
@@ -70,6 +64,11 @@ static int k_ticks(void)
 static int k_free_heap(void)
 {
   return (int)hal_free_heap_bytes();
+}
+
+static int k_total_heap(void)
+{
+  return (int)hal_total_heap_bytes();
 }
 
 static uint32 k_ticks_to_ms_u32(uint32 ticks)
@@ -701,8 +700,19 @@ static off_t k_lseek(int fd, off_t offset, int whence)
   return hostabi_posix_fs_lseek(fd, offset, whence);
 }
 
+/*
+ * ESP-IDF/lwIP socket APIs require per-task netconn semaphore state.
+ * Calls through __xv6_posix_* can happen outside run_elf_command(),
+ * so enforce lazy init at the host-ABI boundary.
+ */
+static void k_posix_socket_ctx_ensure(void)
+{
+  netconn_thread_init();
+}
+
 static int k_posix_close(int fd)
 {
+  k_posix_socket_ctx_ensure();
   return close(fd);
 }
 
@@ -710,6 +720,8 @@ static int k_posix_fcntl(int fd, int cmd, ...)
 {
   va_list ap;
   int arg = 0;
+
+  k_posix_socket_ctx_ensure();
 
   switch(cmd){
 #ifdef F_DUPFD
@@ -738,6 +750,8 @@ static int k_posix_ioctl(int fd, unsigned long request, ...)
   va_list ap;
   void *arg = 0;
 
+  k_posix_socket_ctx_ensure();
+
   va_start(ap, request);
   arg = va_arg(ap, void *);
   va_end(ap);
@@ -749,11 +763,13 @@ static int k_posix_ioctl(int fd, unsigned long request, ...)
 
 static int k_posix_socket(int domain, int type, int protocol)
 {
+  k_posix_socket_ctx_ensure();
   return socket(domain, type, protocol);
 }
 
 static int k_posix_bind(int fd, const struct sockaddr *addr, socklen_t addrlen)
 {
+  k_posix_socket_ctx_ensure();
   if(addr != 0){
     addr = (const struct sockaddr *)elf_loader_translate_ptr(addr);
     if(addr == 0){
@@ -766,11 +782,13 @@ static int k_posix_bind(int fd, const struct sockaddr *addr, socklen_t addrlen)
 
 static int k_posix_listen(int fd, int backlog)
 {
+  k_posix_socket_ctx_ensure();
   return listen(fd, backlog);
 }
 
 static int k_posix_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
 {
+  k_posix_socket_ctx_ensure();
   if(addr != 0){
     addr = (struct sockaddr *)elf_loader_translate_ptr(addr);
     if(addr == 0){
@@ -790,6 +808,7 @@ static int k_posix_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
 
 static int k_posix_connect(int fd, const struct sockaddr *addr, socklen_t addrlen)
 {
+  k_posix_socket_ctx_ensure();
   if(addr != 0){
     addr = (const struct sockaddr *)elf_loader_translate_ptr(addr);
     if(addr == 0){
@@ -802,6 +821,7 @@ static int k_posix_connect(int fd, const struct sockaddr *addr, socklen_t addrle
 
 static int k_posix_send(int fd, const void *buf, size_t len, int flags)
 {
+  k_posix_socket_ctx_ensure();
   if(len > 0){
     buf = elf_loader_translate_ptr(buf);
     if(buf == 0){
@@ -814,6 +834,7 @@ static int k_posix_send(int fd, const void *buf, size_t len, int flags)
 
 static int k_posix_recv(int fd, void *buf, size_t len, int flags)
 {
+  k_posix_socket_ctx_ensure();
   if(len > 0){
     buf = (void *)elf_loader_translate_ptr(buf);
     if(buf == 0){
@@ -826,6 +847,7 @@ static int k_posix_recv(int fd, void *buf, size_t len, int flags)
 
 static int k_posix_sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen)
 {
+  k_posix_socket_ctx_ensure();
   if(len > 0){
     buf = elf_loader_translate_ptr(buf);
     if(buf == 0){
@@ -845,6 +867,7 @@ static int k_posix_sendto(int fd, const void *buf, size_t len, int flags, const 
 
 static int k_posix_recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen)
 {
+  k_posix_socket_ctx_ensure();
   if(len > 0){
     buf = (void *)elf_loader_translate_ptr(buf);
     if(buf == 0){
@@ -880,6 +903,8 @@ static int k_posix_poll(struct pollfd *fds, nfds_t nfds, int timeout)
   int ready = 0;
   nfds_t i;
   int rc;
+
+  k_posix_socket_ctx_ensure();
 
   if(nfds > 0){
     fds = (struct pollfd *)elf_loader_translate_ptr(fds);
@@ -949,6 +974,7 @@ static int k_posix_poll(struct pollfd *fds, nfds_t nfds, int timeout)
 
 static int k_posix_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
 {
+  k_posix_socket_ctx_ensure();
   if(readfds != 0){
     readfds = (fd_set *)elf_loader_translate_ptr(readfds);
     if(readfds == 0){
@@ -982,11 +1008,13 @@ static int k_posix_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *e
 
 static int k_posix_shutdown(int fd, int how)
 {
+  k_posix_socket_ctx_ensure();
   return shutdown(fd, how);
 }
 
 static int k_posix_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen)
 {
+  k_posix_socket_ctx_ensure();
   if(optval != 0){
     optval = (void *)elf_loader_translate_ptr(optval);
     if(optval == 0){
@@ -1006,6 +1034,7 @@ static int k_posix_getsockopt(int fd, int level, int optname, void *optval, sock
 
 static int k_posix_setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)
 {
+  k_posix_socket_ctx_ensure();
   if(optval != 0){
     optval = elf_loader_translate_ptr(optval);
     if(optval == 0){
@@ -1018,6 +1047,7 @@ static int k_posix_setsockopt(int fd, int level, int optname, const void *optval
 
 static int k_posix_getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen)
 {
+  k_posix_socket_ctx_ensure();
   if(addr != 0){
     addr = (struct sockaddr *)elf_loader_translate_ptr(addr);
     if(addr == 0){
@@ -1037,6 +1067,7 @@ static int k_posix_getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen
 
 static int k_posix_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen)
 {
+  k_posix_socket_ctx_ensure();
   if(addr != 0){
     addr = (struct sockaddr *)elf_loader_translate_ptr(addr);
     if(addr == 0){
@@ -1511,19 +1542,141 @@ static int k_mkfifo(const char *path, mode_t mode)
   return -1;
 }
 
+#define KSH_SIG_MAX 32
+#define KSH_SIG_SLOT_CAP (KSH_MAX_JOBS + 4)
+
+typedef struct {
+  TaskHandle_t task;
+  void (*handlers[KSH_SIG_MAX])(int);
+} ksh_sig_state_t;
+
+static SemaphoreHandle_t g_sig_state_lock;
+static ksh_sig_state_t g_sig_state[KSH_SIG_SLOT_CAP];
+
+static void sig_state_lock_take(void)
+{
+  if(g_sig_state_lock == 0)
+    g_sig_state_lock = xSemaphoreCreateMutex();
+  if(g_sig_state_lock)
+    (void)xSemaphoreTake(g_sig_state_lock, portMAX_DELAY);
+}
+
+static void sig_state_lock_give(void)
+{
+  if(g_sig_state_lock)
+    (void)xSemaphoreGive(g_sig_state_lock);
+}
+
+static int k_sig_valid(int sig)
+{
+  return (sig > 0 && sig < KSH_SIG_MAX) ? 1 : 0;
+}
+
+static ksh_sig_state_t *sig_state_slot_locked(TaskHandle_t task, int create)
+{
+  int i;
+  int free_slot = -1;
+  if(task == 0)
+    return 0;
+  for(i = 0; i < KSH_SIG_SLOT_CAP; i++){
+    if(g_sig_state[i].task == task)
+      return &g_sig_state[i];
+    if(create && free_slot < 0 && g_sig_state[i].task == 0)
+      free_slot = i;
+  }
+  if(create && free_slot >= 0){
+    memset(&g_sig_state[free_slot], 0, sizeof(g_sig_state[free_slot]));
+    g_sig_state[free_slot].task = task;
+    return &g_sig_state[free_slot];
+  }
+  return 0;
+}
+
+static void k_signal_task_cleanup(TaskHandle_t task)
+{
+  int i;
+  if(task == 0)
+    return;
+  sig_state_lock_take();
+  for(i = 0; i < KSH_SIG_SLOT_CAP; i++){
+    if(g_sig_state[i].task == task){
+      memset(&g_sig_state[i], 0, sizeof(g_sig_state[i]));
+      break;
+    }
+  }
+  sig_state_lock_give();
+}
+
 static void (*k_signal(int sig, void (*handler)(int)))(int)
 {
-  (void)sig;
-  (void)handler;
-  errno = ENOSYS;
-  return SIG_ERR;
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  ksh_sig_state_t *slot;
+  void (*old_handler)(int);
+
+  if(!k_sig_valid(sig) || handler == SIG_ERR){
+    errno = EINVAL;
+    return SIG_ERR;
+  }
+
+  sig_state_lock_take();
+  slot = sig_state_slot_locked(self, 1);
+  if(slot == 0){
+    sig_state_lock_give();
+    errno = ENOMEM;
+    return SIG_ERR;
+  }
+
+  old_handler = slot->handlers[sig];
+  slot->handlers[sig] = handler;
+  sig_state_lock_give();
+  return old_handler ? old_handler : SIG_DFL;
 }
 
 static int k_sigaction(int sig, const struct sigaction *act, struct sigaction *oldact)
 {
-  (void)sig;
-  (void)act;
-  (void)oldact;
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  ksh_sig_state_t *slot;
+  void (*old_handler)(int);
+
+  act = (const struct sigaction *)elf_loader_translate_ptr(act);
+  oldact = (struct sigaction *)elf_loader_translate_ptr(oldact);
+
+  if(!k_sig_valid(sig)){
+    errno = EINVAL;
+    return -1;
+  }
+  if(act && !k_ptr_bytes_accessible(act, sizeof(*act))){
+    errno = EINVAL;
+    return -1;
+  }
+  if(oldact && !k_ptr_bytes_accessible(oldact, sizeof(*oldact))){
+    errno = EINVAL;
+    return -1;
+  }
+
+  sig_state_lock_take();
+  slot = sig_state_slot_locked(self, (act != 0 || oldact != 0) ? 1 : 0);
+  if((act || oldact) && slot == 0){
+    sig_state_lock_give();
+    errno = ENOMEM;
+    return -1;
+  }
+
+  old_handler = (slot && slot->handlers[sig]) ? slot->handlers[sig] : SIG_DFL;
+  if(oldact){
+    memset(oldact, 0, sizeof(*oldact));
+    oldact->sa_handler = old_handler;
+    memset(&oldact->sa_mask, 0, sizeof(oldact->sa_mask));
+  }
+  if(act){
+    if(act->sa_handler == SIG_ERR){
+      sig_state_lock_give();
+      errno = EINVAL;
+      return -1;
+    }
+    slot->handlers[sig] = act->sa_handler;
+  }
+  sig_state_lock_give();
   return 0;
 }
 
@@ -1585,7 +1738,28 @@ static int k_sigismember(const sigset_t *set, int signo)
 
 static int k_raise(int sig)
 {
-  (void)sig;
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  ksh_sig_state_t *slot;
+  void (*handler)(int) = SIG_DFL;
+
+  if(!k_sig_valid(sig)){
+    errno = EINVAL;
+    return -1;
+  }
+
+  sig_state_lock_take();
+  slot = sig_state_slot_locked(self, 0);
+  if(slot && slot->handlers[sig])
+    handler = slot->handlers[sig];
+  sig_state_lock_give();
+
+  if(handler == SIG_IGN)
+    return 0;
+  if(handler == SIG_DFL){
+    k_exit(128 + sig);
+    return 0;
+  }
+  handler(sig);
   return 0;
 }
 

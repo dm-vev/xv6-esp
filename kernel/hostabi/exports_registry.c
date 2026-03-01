@@ -92,8 +92,12 @@ static void copy_name(char *dst, int dst_len, const char *src)
  * @param b Second symbol
  * @return -1 if a < b, 1 if a > b, 0 if equal
  *
- * Comparison is by priority first (higher priority first), then by
- * sequence number (higher sequence first).
+ * Comparison is by priority first (lower priority first), then by
+ * sequence number (lower sequence first).
+ *
+ * The rebuild path registers symbols in sorted order and loader lookup
+ * resolves from the latest registration, so larger priority/sequence
+ * values naturally win.
  */
 static int modsym_cmp(const hostabi_modsym_t *a, const hostabi_modsym_t *b)
 {
@@ -127,30 +131,6 @@ static int core_has_name_locked(const char *name)
 }
 
 /**
- * @brief Check if staged symbols contain a name
- * @param staged Array of staged symbols
- * @param n Number of staged symbols
- * @param name Symbol name to search for
- * @return 1 if found, 0 if not
- *
- * Searches backwards through staged symbols to find a matching name.
- * Used to detect duplicate extensions during symbol registration.
- */
-static int staged_has_name(const elf_host_symbol_t *staged, int n, const char *name)
-{
-  int i;
-
-  if(staged == 0 || n <= 0 || name == 0 || name[0] == 0)
-    return 0;
-
-  for(i = n - 1; i >= 0; i--){
-    if(staged[i].name && strcmp(staged[i].name, name) == 0)
-      return 1;
-  }
-  return 0;
-}
-
-/**
  * @brief Rebuild the ELF loader's host symbol table
  * @return 0 on success, -1 on failure
  *
@@ -160,8 +140,8 @@ static int staged_has_name(const elf_host_symbol_t *staged, int n, const char *n
  * 2. Re-registers libc symbols
  * 3. Re-registers core symbols
  * 4. Sorts module symbols by priority
- * 5. Filters out extensions
- * 6. duplicate Registers remaining symbols with ELF loader
+ * 5. Registers extension symbols (except core-name collisions)
+ * 6. Registers override symbols after extensions
  *
  * Must be called while holding the export lock.
  */
@@ -200,13 +180,27 @@ static int rebuild_locked(void)
     }
   }
 
-  /* Build staged list, skipping duplicate extensions */
+  /*
+   * Register extensions first so duplicate extension names naturally
+   * resolve by priority/sequence (latest wins), while never replacing
+   * core symbols.
+   */
   for(i = 0; i < n; i++){
     const hostabi_modsym_t *ms = &g_mod_syms[idx[i]];
-    if(ms->kind == HOSTABI_SYMBOL_EXTENSION &&
-       (core_has_name_locked(ms->name) || staged_has_name(staged, staged_count, ms->name))){
+    if(ms->kind != HOSTABI_SYMBOL_EXTENSION)
       continue;
-    }
+    if(core_has_name_locked(ms->name))
+      continue;
+    staged[staged_count].name = ms->name;
+    staged[staged_count].addr = ms->addr;
+    staged_count++;
+  }
+
+  /* Register overrides after extensions so override kind always wins. */
+  for(i = 0; i < n; i++){
+    const hostabi_modsym_t *ms = &g_mod_syms[idx[i]];
+    if(ms->kind != HOSTABI_SYMBOL_OVERRIDE)
+      continue;
     staged[staged_count].name = ms->name;
     staged[staged_count].addr = ms->addr;
     staged_count++;

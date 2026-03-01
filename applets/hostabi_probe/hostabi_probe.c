@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -256,6 +257,11 @@ int main(void)
   rc = utimes("/tmp/probe_nosys", tv);
   err = errno;
   probe("utimes_nosys", rc < 0 && err == ENOSYS, (rc < 0) ? -1 : 0, err);
+
+  errno = 0;
+  rc = (isspace(' ') && isdigit('7') && isxdigit('f') && !isspace('A') && !isdigit('x')) ? 0 : -1;
+  err = errno;
+  probe("ctype_ascii", rc == 0 && err == 0, rc, err);
 
   errno = 0;
   rc = chown("/tmp/probe_nosys", 0, 0);

@@ -99,7 +99,8 @@ elf_module_t *alloc_module_slot_locked(const char *name)
   return 0;
 }
 
-static int elf_module_load_from_image(const char *name, const void *image, uint32 image_size, elf_module_t **out_mod)
+static int elf_module_load_from_image(const char *name, const void *image, uint32 image_size, int take_ownership,
+                                      elf_module_t **out_mod)
 {
   elf_module_t *m;
   elf32_ehdr_t *eh;
@@ -111,6 +112,7 @@ static int elf_module_load_from_image(const char *name, const void *image, uint3
 
   if(name == 0 || name[0] == 0 || out_mod == 0)
     return -1;
+  *out_mod = 0;
 
   module_lock();
 
@@ -124,12 +126,22 @@ static int elf_module_load_from_image(const char *name, const void *image, uint3
   m = alloc_module_slot_locked(name);
   if(m == 0){
     module_unlock();
+    if(take_ownership && image)
+      heap_caps_free((void *)image);
     return -1;
   }
 
-  if(load_image_copy(image, image_size, &m->image) != 0){
-    fail_reason = "image copy";
-    goto fail;
+  if(take_ownership){
+    m->image = (uint8 *)image;
+    if(m->image == 0 || image_size == 0){
+      fail_reason = "image ownership";
+      goto fail;
+    }
+  } else {
+    if(load_image_copy(image, image_size, &m->image) != 0){
+      fail_reason = "image copy";
+      goto fail;
+    }
   }
   m->image_size = image_size;
 
@@ -190,20 +202,38 @@ fail:
 
 int elf_module_load_from_bytes(const char *name, const void *image, uint32 image_size, elf_module_t **out_mod)
 {
-  return elf_module_load_from_image(name, image, image_size, out_mod);
+  return elf_module_load_from_image(name, image, image_size, 0, out_mod);
+}
+
+int elf_module_load_from_owned_bytes(const char *name, void *image, uint32 image_size, elf_module_t **out_mod)
+{
+  return elf_module_load_from_image(name, image, image_size, 1, out_mod);
 }
 
 int elf_module_load_from_flash(const char *name, uint32 sector, uint32 sector_count, elf_module_t **out_mod)
 {
+  elf_module_t *m;
   uint8 *image = 0;
   uint32 image_size = 0;
-  int rc;
+  int rc = -1;
+
+  if(name == 0 || name[0] == 0 || out_mod == 0 || sector_count == 0)
+    return -1;
+  *out_mod = 0;
+
+  module_lock();
+  m = elf_module_find_locked(name);
+  if(m){
+    *out_mod = m;
+    module_unlock();
+    return 0;
+  }
+  module_unlock();
 
   if(read_flash_image(sector, sector_count, &image, &image_size) != 0)
     return -1;
 
-  rc = elf_module_load_from_image(name, image, image_size, out_mod);
-  heap_caps_free(image);
+  rc = elf_module_load_from_owned_bytes(name, image, image_size, out_mod);
   return rc;
 }
 

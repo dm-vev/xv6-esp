@@ -1,0 +1,3 @@
+[bandit]
+skips = B108,B404,B603,B607
+exclude = scripts/qemu_smoke_esp.py,scripts/qemu_stress_esp.py,scripts/qemu_soak_esp.py

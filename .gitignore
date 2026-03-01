@@ -18,6 +18,8 @@ user/usys.S
 TAGS
 .ruff_cache/
 .semgrep/
+!.semgrep/
+!.semgrep/static-analysis.yml
 .mypy_cache/
 .pytest_cache/
 compile_commands.json

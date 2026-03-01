@@ -16,6 +16,7 @@ from qemu_idf_session import launch_idf_qemu, stop_idf_qemu
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "build"
 PROMPT = b"xv6> "
+IDF_TARGET = "esp32s3"
 
 FATAL_MARKERS = (
     "Guru Meditation Error",
@@ -115,21 +116,57 @@ def resolve_idf_export() -> str:
         except OSError:
             return False
 
-    candidates = [ROOT.parent / "magnolia" / "esp-idf"]
+    candidates: list[Path] = []
     if os.environ.get("IDF_PATH"):
         candidates.append(Path(os.environ["IDF_PATH"]))
+    candidates.append(ROOT.parent / "magnolia" / "esp-idf")
     home = Path.home()
     candidates.extend((home / "esp-idf", Path("/opt/esp-idf"), Path("/root/esp-idf"), Path("/tmp/esp-idf")))
     for p in candidates:
         if p and has_export_script(p):
             return f"source {shlex.quote(str((p / 'export.sh').resolve()))} >/dev/null"
-    raise RuntimeError("ESP-IDF not found. Set IDF_PATH or install under ~/esp-idf.")
+    searched = ", ".join(str(p) for p in candidates)
+    raise RuntimeError(f"ESP-IDF not found. Set IDF_PATH. Searched: {searched}")
+
+
+def _cache_value(cache_text: str, key: str) -> str | None:
+    prefix = f"{key}:"
+    for line in cache_text.splitlines():
+        if not line.startswith(prefix):
+            continue
+        parts = line.split("=", 1)
+        if len(parts) != 2:
+            continue
+        return parts[1].strip()
+    return None
+
+
+def _is_valid_idf_build_dir(path: Path) -> bool:
+    cache = path / "CMakeCache.txt"
+    if not cache.exists():
+        return False
+    try:
+        text = cache.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+    home_dir = _cache_value(text, "CMAKE_HOME_DIRECTORY")
+    target = _cache_value(text, "IDF_TARGET")
+    generator = _cache_value(text, "CMAKE_GENERATOR")
+    root_resolved = str(ROOT.resolve())
+    if home_dir is None or Path(home_dir).resolve().as_posix() != Path(root_resolved).as_posix():
+        return False
+    if target != IDF_TARGET:
+        return False
+    if generator and generator != "Ninja":
+        return False
+    return True
 
 
 def ensure_cmake_build_dir() -> None:
     if not BUILD.exists():
         return
-    if BUILD.is_dir() and (BUILD / "CMakeCache.txt").exists():
+    if BUILD.is_dir() and _is_valid_idf_build_dir(BUILD):
         return
     if BUILD.is_symlink() or BUILD.is_file():
         BUILD.unlink()
@@ -140,7 +177,10 @@ def ensure_cmake_build_dir() -> None:
 
 def build_project(idf_export: str) -> None:
     ensure_cmake_build_dir()
-    run_shell(f"{idf_export} && idf.py set-target esp32s3 && idf.py build")
+    if _is_valid_idf_build_dir(BUILD):
+        run_shell(f"{idf_export} && idf.py build")
+        return
+    run_shell(f"{idf_export} && idf.py set-target {IDF_TARGET} && idf.py build")
 
 
 def generate_qemu_flash(idf_export: str) -> None:
@@ -179,7 +219,7 @@ class QemuShell:
     def __enter__(self) -> QemuShell:
         flash = BUILD / "qemu_flash.bin"
         efuse = BUILD / "qemu_efuse.bin"
-        self.proc, self.sock = launch_idf_qemu(ROOT, self.idf_export, flash, efuse)
+        self.proc, self.sock = launch_idf_qemu(ROOT, self.idf_export, flash, efuse, BUILD)
         try:
             boot = self.recv_until(PROMPT, timeout_s=90.0).decode(errors="ignore")
         except RuntimeError:
@@ -404,8 +444,8 @@ def run_suite_smoke(q: QemuShell) -> None:
     if "I/O error" not in out and "dd: write failed" not in out:
         raise SuiteError("smoke: expected /dev/full write error")
 
-    if q.command_exists("hostabi_probe"):
-        out = q.cmd("hostabi_probe", timeout_s=45.0)
+    out = q.cmd("hostabi_probe", timeout_s=45.0)
+    if "exec: command not found" not in out:
         expect_contains(out, "PROBE SUMMARY failures=0", "smoke: hostabi_probe")
 
 
@@ -416,7 +456,11 @@ def run_applet_cases(q: QemuShell, applet: str, failures: list[str], warnings: l
                 out = q.cmd(case, timeout_s=APPLET_CASE_TIMEOUT_S)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"{applet}: {case}: {exc}")
-                q.recover_prompt()
+                if "detected failure marker" not in str(exc):
+                    try:
+                        q.recover_prompt()
+                    except Exception as recover_exc:  # noqa: BLE001
+                        warnings.append(f"{applet}: recover failed after {case}: {recover_exc}")
                 continue
             if "exec: command not found" in out:
                 failures.append(f"{applet}: {case}: command not found")
@@ -429,7 +473,10 @@ def run_applet_cases(q: QemuShell, applet: str, failures: list[str], warnings: l
             out = q.cmd(case, timeout_s=GENERIC_APPLET_TIMEOUT_S, retries=2)
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"{applet}: {case}: {exc}")
-            q.recover_prompt()
+            try:
+                q.recover_prompt()
+            except Exception as recover_exc:  # noqa: BLE001
+                warnings.append(f"{applet}: recover failed after {case}: {recover_exc}")
             continue
         if "exec: command not found" in out:
             warnings.append(f"{applet}: {case}: command not found")
@@ -490,8 +537,8 @@ def run_suite_regressions(q: QemuShell) -> None:
     for c in cmds:
         q.cmd(c, timeout_s=60.0)
 
-    if q.command_exists("hostabi_probe"):
-        out = q.cmd("hostabi_probe", timeout_s=75.0)
+    out = q.cmd("hostabi_probe", timeout_s=75.0)
+    if "exec: command not found" not in out:
         probe_ok = "PROBE SUMMARY failures=0" in out and "hostabi_probe: exit=" not in out
         if not probe_ok:
             msg = "regressions: hostabi_probe summary is not clean"
@@ -502,10 +549,9 @@ def run_suite_regressions(q: QemuShell) -> None:
 
 def run_suite_net_diag(q: QemuShell) -> None:
     q.cmd("export PATH=/bin:/usr/bin:.")
-    if not q.command_exists("net_diag"):
-        raise SuiteError("net_diag: /bin/net_diag is missing")
-
     out = q.cmd("net_diag stats", timeout_s=45.0)
+    if "exec: command not found" in out:
+        raise SuiteError("net_diag: /bin/net_diag is missing")
     expect_contains(out, "net_diag: stats", "net_diag: stats (initial)")
     if "symbol missing" in out:
         raise SuiteError("net_diag: stats reported missing netkmod symbol")

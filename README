@@ -139,16 +139,17 @@ Static analysis:
 - default mode is fail-closed (`STRICT=1`)
 - optional relaxed local mode: `STRICT=0 BUILD_DIR=build ./scripts/static_analysis.sh`
 - CMake target: `idf.py static_analysis`
-- CI workflow: `.github/workflows/static-analysis.yml`
+- CI workflow: `.github/workflows/ci.yml` (job: `static-analysis`)
 - pre-commit integration: `pre-commit install` (runs static pipeline before commit)
 
 Static toolset currently integrated:
 - `cppcheck` (C/C++)
 - `clang-tidy` (C/C++, via `build/compile_commands.json`)
-- `semgrep` (SAST, `--config auto`)
+- `semgrep` (SAST, local rules in `.semgrep/static-analysis.yml`)
 - `ruff` (Python lint)
 - `bandit` (Python security checks)
 - `codespell` (typo scan)
+- pinned Python static tool versions: `.github/static-analysis/requirements.txt`
 
 Includes PTY check via `ptydemo` (`/dev/ptmx` <-> dynamic `/dev/pts/N`).
 Also checks two-ELF PTY flow: `ptysend` -> `ptyrecv`.

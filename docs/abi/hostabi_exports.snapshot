@@ -55,6 +55,7 @@ usleep
 k_ticks
 k_puts
 k_free_heap
+k_total_heap
 xv6fs_readdir_path
 xv6fs_read_file_alloc_path
 xv6fs_write_file_path

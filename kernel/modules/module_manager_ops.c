@@ -8,12 +8,26 @@
 static int kmod_unload_slot_locked(int idx, int force)
 {
   kmod_slot_t slot;
+  int open_count = 0;
+  int active_calls = 0;
+  int dependent_count = 0;
+  int in_call_ctx = 0;
   int rc;
 
   if(idx < 0 || idx >= KMOD_MAX_TRACKED || !g_slots[idx].used)
     return -1;
 
   slot = g_slots[idx];
+
+  if(elf_loader_handle_refstate(slot.handle, &open_count, &active_calls, &dependent_count, &in_call_ctx) != 0){
+    set_last_error("kmod unload: bad handle");
+    return -1;
+  }
+
+  if(!force && (open_count > 1 || active_calls > 0 || dependent_count > 0 || in_call_ctx)){
+    set_last_error("kmod unload: module busy");
+    return -1;
+  }
 
   if(!force && slot.fini_fn && slot.fini_fn() != 0){
     set_last_error("kmod unload: module fini failed");
@@ -99,14 +113,11 @@ int kmod_unload(int module_id, int force)
       return 0;
     }
 
-    g_slots[idx].ext_refcnt = 0;
     if(incoming_refs != 0){
       set_last_error("kmod unload: module busy");
       kmod_unlock();
       return -1;
     }
-  } else {
-    g_slots[idx].ext_refcnt = 0;
   }
 
   if(kmod_unload_slot_locked(idx, force) != 0){

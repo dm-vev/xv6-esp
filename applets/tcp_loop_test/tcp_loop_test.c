@@ -37,6 +37,7 @@ static int mk_loopback_addr(struct sockaddr_in *sin, unsigned short port)
   if(sin == 0)
     return -1;
   memset(sin, 0, sizeof(*sin));
+  sin->sin_len = (uint8_t)sizeof(*sin);
   sin->sin_family = AF_INET;
   sin->sin_port = host_to_be16(port);
   sin->sin_addr.s_addr = host_to_be32(INADDR_LOOPBACK);

@@ -27,8 +27,9 @@ static uint16 g_console_pushback_r;
 static uint16 g_console_pushback_w;
 static uint16 g_console_pushback_n;
 static int g_usb_console_driver_ready;
+static portMUX_TYPE g_console_pushback_mu = portMUX_INITIALIZER_UNLOCKED;
 
-static int hal_console_pop_pushback(void)
+static int hal_console_pop_pushback_locked(void)
 {
   int out;
   if(g_console_pushback_n == 0)
@@ -39,13 +40,36 @@ static int hal_console_pop_pushback(void)
   return out;
 }
 
-static void hal_console_pushback_byte(uint8 c)
+static int hal_console_peek_pushback_locked(void)
+{
+  if(g_console_pushback_n == 0)
+    return -1;
+  return (int)g_console_pushback[g_console_pushback_r];
+}
+
+static void hal_console_pushback_byte_locked(uint8 c)
 {
   if(g_console_pushback_n >= XV6_CONSOLE_PUSHBACK_CAP)
     return;
   g_console_pushback[g_console_pushback_w] = c;
   g_console_pushback_w = (uint16)((g_console_pushback_w + 1u) % XV6_CONSOLE_PUSHBACK_CAP);
   g_console_pushback_n++;
+}
+
+static int hal_console_pop_pushback(void)
+{
+  int out;
+  portENTER_CRITICAL(&g_console_pushback_mu);
+  out = hal_console_pop_pushback_locked();
+  portEXIT_CRITICAL(&g_console_pushback_mu);
+  return out;
+}
+
+static void hal_console_pushback_byte(uint8 c)
+{
+  portENTER_CRITICAL(&g_console_pushback_mu);
+  hal_console_pushback_byte_locked(c);
+  portEXIT_CRITICAL(&g_console_pushback_mu);
 }
 
 static int hal_console_getc_uart(void)
@@ -165,7 +189,18 @@ int hal_console_getc(void)
 
 int hal_console_poll_ctrl_c(void)
 {
-  int c = hal_console_getc_hw();
+  int queued;
+  int c;
+  portENTER_CRITICAL(&g_console_pushback_mu);
+  queued = hal_console_peek_pushback_locked();
+  if(queued == 0x03){
+    (void)hal_console_pop_pushback_locked();
+    portEXIT_CRITICAL(&g_console_pushback_mu);
+    return 1;
+  }
+  portEXIT_CRITICAL(&g_console_pushback_mu);
+
+  c = hal_console_getc_hw();
   if(c < 0)
     return 0;
   if(c == 0x03)
@@ -207,5 +242,10 @@ void hal_reboot(void)
 
 uint64 hal_free_heap_bytes(void)
 {
-  return (uint64)heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  return (uint64)heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+}
+
+uint64 hal_total_heap_bytes(void)
+{
+  return (uint64)heap_caps_get_total_size(MALLOC_CAP_DEFAULT);
 }

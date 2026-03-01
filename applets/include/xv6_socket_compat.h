@@ -67,6 +67,7 @@
 
 typedef unsigned int socklen_t;
 typedef unsigned int nfds_t;
+typedef uint8_t sa_family_t;
 
 struct in_addr {
   uint32_t s_addr;
@@ -77,19 +78,22 @@ struct in6_addr {
 };
 
 struct sockaddr {
-  unsigned short sa_family;
+  uint8_t sa_len;
+  sa_family_t sa_family;
   char sa_data[14];
 };
 
 struct sockaddr_in {
-  short sin_family;
+  uint8_t sin_len;
+  sa_family_t sin_family;
   unsigned short sin_port;
   struct in_addr sin_addr;
   unsigned char sin_zero[8];
 };
 
 struct sockaddr_in6 {
-  short sin6_family;
+  uint8_t sin6_len;
+  sa_family_t sin6_family;
   unsigned short sin6_port;
   uint32_t sin6_flowinfo;
   struct in6_addr sin6_addr;

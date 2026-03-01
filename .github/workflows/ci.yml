@@ -31,21 +31,33 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   static-analysis:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
       DO_STATIC: ${{ github.event_name != 'workflow_dispatch' || inputs.run_static }}
+      IDF_PATH: ${{ runner.temp }}/esp-idf
+      IDF_TOOLS_PATH: ${{ runner.temp }}/.espressif
+      STATIC_VENV: ${{ github.workspace }}/.venv_static
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure IDF tools path
+      - name: Set up Python
+        if: env.DO_STATIC == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare IDF tools directory
         if: env.DO_STATIC == 'true'
         run: |
-          echo "IDF_TOOLS_PATH=$RUNNER_TEMP/.espressif" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/.espressif"
+          mkdir -p "$IDF_TOOLS_PATH"
 
       - name: Install static analysis dependencies
         if: env.DO_STATIC == 'true'
@@ -63,12 +75,11 @@ jobs:
           }
 
           sudo apt-get update
-          sudo apt-get install -y cppcheck clang-tidy codespell
-          install_one_of libsdl2-2.0-0 libsdl2-2.0-0t64
-          install_one_of libslirp0 libslirp0t64 || true
-          sudo apt-get install -y libglib2.0-0 libpixman-1-0 libgcrypt20
-          python3 -m pip install --upgrade pip
-          python3 -m pip install semgrep ruff bandit
+          sudo apt-get install -y cppcheck clang-tidy python3-venv
+          rm -rf "$STATIC_VENV"
+          python3 -m venv "$STATIC_VENV"
+          "$STATIC_VENV/bin/python" -m pip install --upgrade pip
+          "$STATIC_VENV/bin/pip" install --requirement .github/static-analysis/requirements.txt
 
       - name: Prepare ESP-IDF (compile_commands)
         if: env.DO_STATIC == 'true'
@@ -86,10 +97,10 @@ jobs:
             done
           }
 
-          rm -rf "$HOME/esp-idf"
-          retry git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
-          retry "$HOME/esp-idf/install.sh" esp32s3
-          source "$HOME/esp-idf/export.sh"
+          rm -rf "$IDF_PATH"
+          retry git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$IDF_PATH"
+          retry "$IDF_PATH/install.sh" esp32s3
+          source "$IDF_PATH/export.sh"
           idf.py --version
           idf.py set-target esp32s3
           idf.py reconfigure
@@ -97,7 +108,7 @@ jobs:
       - name: Run static analysis
         if: env.DO_STATIC == 'true'
         run: |
-          source "$HOME/esp-idf/export.sh"
+          source "$IDF_PATH/export.sh"
           STRICT=1 BUILD_DIR=build ./scripts/static_analysis.sh
 
   esp-build-and-qemu:
@@ -115,14 +126,15 @@ jobs:
       INPUT_RETRIES: ${{ github.event_name == 'workflow_dispatch' && inputs.qemu_retries || '' }}
       INPUT_STRESS: ${{ github.event_name == 'workflow_dispatch' && inputs.stress_iterations || '' }}
       INPUT_SOAK: ${{ github.event_name == 'workflow_dispatch' && inputs.soak_iterations || '' }}
+      IDF_PATH: ${{ runner.temp }}/esp-idf
+      IDF_TOOLS_PATH: ${{ runner.temp }}/.espressif
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure IDF tools path
+      - name: Prepare IDF tools directory
         run: |
-          echo "IDF_TOOLS_PATH=$RUNNER_TEMP/.espressif" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/.espressif"
+          mkdir -p "$IDF_TOOLS_PATH"
 
       - name: Install system dependencies
         run: |
@@ -141,8 +153,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc
           install_one_of libsdl2-2.0-0 libsdl2-2.0-0t64
-          install_one_of libslirp0 libslirp0t64 || true
-          sudo apt-get install -y libglib2.0-0 libpixman-1-0 libgcrypt20
+          install_one_of libslirp0 libslirp0t64
+          install_one_of libglib2.0-0 libglib2.0-0t64
+          install_one_of libpixman-1-0 libpixman-1-0t64
+          install_one_of libgcrypt20 libgcrypt20t64
 
       - name: Prepare ESP-IDF and QEMU
         run: |
@@ -159,16 +173,22 @@ jobs:
             done
           }
 
-          rm -rf "$HOME/esp-idf"
-          retry git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$HOME/esp-idf"
-          retry "$HOME/esp-idf/install.sh" esp32s3
-          retry python3 "$HOME/esp-idf/tools/idf_tools.py" install qemu-xtensa
-          source "$HOME/esp-idf/export.sh"
+          rm -rf "$IDF_PATH"
+          retry git clone --depth 1 --branch release/v6.0 https://github.com/espressif/esp-idf.git "$IDF_PATH"
+          retry "$IDF_PATH/install.sh" esp32s3
+          retry python3 "$IDF_PATH/tools/idf_tools.py" install qemu-xtensa
+          source "$IDF_PATH/export.sh"
           qemu-system-xtensa --version
+          QEMU_BIN="$(command -v qemu-system-xtensa)"
+          if ldd "$QEMU_BIN" | grep -q "not found"; then
+            echo "Missing runtime libraries for $QEMU_BIN"
+            ldd "$QEMU_BIN"
+            exit 1
+          fi
 
       - name: Build firmware and filesystem once
         run: |
-          source "$HOME/esp-idf/export.sh"
+          source "$IDF_PATH/export.sh"
           idf.py --version
           qemu-system-xtensa --version
           idf.py set-target esp32s3
@@ -179,7 +199,7 @@ jobs:
         env:
           MATRIX_SUITE: ${{ matrix.suite }}
         run: |
-          source "$HOME/esp-idf/export.sh"
+          source "$IDF_PATH/export.sh"
           SUITE_LIST="$INPUT_SUITES"
           SUITE="$MATRIX_SUITE"
 

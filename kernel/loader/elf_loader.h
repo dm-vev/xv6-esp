@@ -135,6 +135,19 @@ int elf_loader_register_host_symbols(const elf_host_symbol_t *syms, int count);
 int elf_module_load_from_bytes(const char *name, const void *image, uint32 image_size, elf_module_t **out_mod);
 
 /**
+ * @brief Load ELF from memory taking ownership of buffer
+ * @param name Module name (for identification)
+ * @param image Pointer to heap-allocated ELF image buffer
+ * @param image_size Size of ELF image
+ * @param out_mod Output pointer for module handle
+ * @return 0 on success, -1 on failure
+ *
+ * The loader takes ownership of `image` and frees it when module is unloaded
+ * (or on load failure after slot allocation).
+ */
+int elf_module_load_from_owned_bytes(const char *name, void *image, uint32 image_size, elf_module_t **out_mod);
+
+/**
  * @brief Load ELF from flash
  * @param name Module name
  * @param sector Flash sector number
@@ -312,5 +325,17 @@ int dlclose(void *handle);
  * error from the last failed dlopen/dlsym/dlclose.
  */
 const char *dlerror(void);
+
+/**
+ * @brief Query loader refstate for a dlopen handle.
+ * @param handle Handle previously returned by dlopen()
+ * @param open_count_out Optional current open_count
+ * @param active_calls_out Optional current active_calls
+ * @param dependent_count_out Optional current dependent_count
+ * @param in_call_ctx_out Optional non-zero if present in any call context
+ * @return 0 on success, -1 if handle is invalid
+ */
+int elf_loader_handle_refstate(void *handle, int *open_count_out, int *active_calls_out, int *dependent_count_out,
+                               int *in_call_ctx_out);
 
 #endif

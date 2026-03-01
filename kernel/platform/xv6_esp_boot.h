@@ -12,4 +12,13 @@
  */
 void xv6_boot(void);
 
+/**
+ * @brief Initialize shared ESP-IDF network runtime primitives.
+ *
+ * Idempotent. Safe to call multiple times.
+ *
+ * @return 0 on success, -1 on failure.
+ */
+int xv6_network_runtime_init(void);
+
 #endif

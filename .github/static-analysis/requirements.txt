@@ -1,0 +1,4 @@
+semgrep==1.153.1
+ruff==0.15.4
+bandit==1.9.4
+codespell==2.4.1

@@ -54,8 +54,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   )
 
   add_custom_target(abi_check
-    COMMAND ${PROJECT_DIR}/scripts/check_hostabi_abi.py
-    DEPENDS ${PROJECT_DIR}/kernel/runtime/shell_runtime_shell.inc
+    COMMAND ${PROJECT_DIR}/scripts/check_hostabi_abi.py --require-generated-checks
+    DEPENDS xv6fs_img_gen ${PROJECT_DIR}/kernel/runtime/shell_runtime_shell.inc
     USES_TERMINAL
   )
 

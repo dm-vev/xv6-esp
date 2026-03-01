@@ -1,5 +1,7 @@
 #include "platform/xv6_esp_boot.h"
 
+#include "esp_event.h"
+#include "esp_netif.h"
 #include "esp_log.h"
 
 #include "platform/esp_flash_disk.h"
@@ -24,6 +26,25 @@ static void log_stage(const char *stage)
            (unsigned long long)hal_free_heap_bytes());
 }
 
+int xv6_network_runtime_init(void)
+{
+  esp_err_t err;
+
+  err = esp_netif_init();
+  if(err != ESP_OK && err != ESP_ERR_INVALID_STATE){
+    ESP_LOGE(TAG, "esp_netif_init failed err=0x%x", (unsigned)err);
+    return -1;
+  }
+
+  err = esp_event_loop_create_default();
+  if(err != ESP_OK && err != ESP_ERR_INVALID_STATE){
+    ESP_LOGE(TAG, "esp_event_loop_create_default failed err=0x%x", (unsigned)err);
+    return -1;
+  }
+
+  return 0;
+}
+
 void xv6_boot(void)
 {
   uint64 boot_start_ticks;
@@ -35,6 +56,14 @@ void xv6_boot(void)
 
   ESP_LOGI(TAG, "xv6 ESP32-S3 M1 boot");
   log_stage("boot_start");
+  rc = xv6_network_runtime_init();
+  if(rc != 0){
+    ESP_LOGE(TAG, "network runtime init failed");
+    log_stage("network_runtime_init_failed");
+    hal_reboot();
+    return;
+  }
+  log_stage("network_runtime_init_ok");
   ESP_LOGI(TAG, "init flash disk backend");
   rc = esp_flash_disk_init();
   if(rc != 0){
