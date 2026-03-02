@@ -45,3 +45,6 @@ sdkconfig.local.defaults
 .worktrees/
 .security-key
 logs/security/
+.cache/
+test-xv6.out
+bazinga/artifacts/
