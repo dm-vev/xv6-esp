@@ -1,4 +1,5 @@
 #include "runtime/shell_runtime.h"
+#include "runtime/shell_parse.h"
 
 #include <stdarg.h>
 #include <stdint.h>

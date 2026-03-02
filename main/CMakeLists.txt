@@ -28,6 +28,7 @@ idf_component_register(
     "../kernel/vfs/vfs_pty.c"
     "../kernel/vfs/vfs_dev.c"
     "../kernel/runtime/shell_runtime.c"
+    "../kernel/runtime/shell_parse.c"
   INCLUDE_DIRS
     "."
     "../kernel"
