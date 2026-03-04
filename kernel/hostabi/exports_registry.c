@@ -15,6 +15,7 @@
 
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -38,7 +39,8 @@ typedef struct {
 
 static const elf_host_symbol_t *g_core_syms; /**< Core symbol table */
 static int g_core_count;                       /**< Number of core symbols */
-static hostabi_modsym_t g_mod_syms[HOSTABI_MODSYM_MAX]; /**< Module symbols */
+static hostabi_modsym_t *g_mod_syms;          /**< Module symbols */
+static int g_mod_syms_cap;                    /**< Allocated slot capacity */
 static int g_seq = 1;                          /**< Global sequence counter */
 static SemaphoreHandle_t g_mu;                 /**< Export registry lock */
 
@@ -65,6 +67,52 @@ static void exports_unlock(void)
 {
   if(g_mu)
     (void)xSemaphoreGive(g_mu);
+}
+
+static void *exports_alloc_data(size_t sz)
+{
+  void *p = 0;
+#ifdef MALLOC_CAP_SPIRAM
+  p = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+  if(p == 0)
+    p = heap_caps_malloc(sz, MALLOC_CAP_8BIT);
+  return p;
+}
+
+static int modsym_ensure_capacity_locked(int min_cap)
+{
+  hostabi_modsym_t *new_syms;
+  int new_cap;
+
+  if(min_cap <= 0 || min_cap > HOSTABI_MODSYM_MAX)
+    return -1;
+  if(min_cap <= g_mod_syms_cap)
+    return 0;
+
+  new_cap = (g_mod_syms_cap > 0) ? g_mod_syms_cap : 16;
+  while(new_cap < min_cap){
+    int next = new_cap * 2;
+    if(next <= 0 || next > HOSTABI_MODSYM_MAX)
+      next = HOSTABI_MODSYM_MAX;
+    if(next == new_cap)
+      break;
+    new_cap = next;
+  }
+  if(new_cap < min_cap)
+    return -1;
+
+  new_syms = (hostabi_modsym_t *)exports_alloc_data((size_t)new_cap * sizeof(*new_syms));
+  if(new_syms == 0)
+    return -1;
+  memset(new_syms, 0, (size_t)new_cap * sizeof(*new_syms));
+  if(g_mod_syms && g_mod_syms_cap > 0)
+    memcpy(new_syms, g_mod_syms, (size_t)g_mod_syms_cap * sizeof(*new_syms));
+  if(g_mod_syms)
+    heap_caps_free(g_mod_syms);
+  g_mod_syms = new_syms;
+  g_mod_syms_cap = new_cap;
+  return 0;
 }
 
 /**
@@ -163,7 +211,7 @@ static int rebuild_locked(void)
     return -1;
 
   /* Collect indices of all used module symbol slots */
-  for(i = 0; i < HOSTABI_MODSYM_MAX; i++){
+  for(i = 0; i < g_mod_syms_cap; i++){
     if(!g_mod_syms[i].used)
       continue;
     idx[n++] = i;
@@ -288,7 +336,7 @@ int hostabi_export_add_module(const hostabi_module_symbol_t *syms, int count)
   int added[HOSTABI_MODSYM_MAX];
   int added_count = 0;
 
-  if(syms == 0 || count <= 0)
+  if(syms == 0 || count <= 0 || count > HOSTABI_MODSYM_MAX)
     return -1;
 
   exports_lock();
@@ -302,12 +350,18 @@ int hostabi_export_add_module(const hostabi_module_symbol_t *syms, int count)
       break;
     }
 
-    /* Find free slot */
-    for(j = 0; j < HOSTABI_MODSYM_MAX; j++){
-      if(!g_mod_syms[j].used){
-        slot = j;
-        break;
+    /* Find free slot, growing table on demand up to HOSTABI_MODSYM_MAX. */
+    for(;;){
+      for(j = 0; j < g_mod_syms_cap; j++){
+        if(!g_mod_syms[j].used){
+          slot = j;
+          break;
+        }
       }
+      if(slot >= 0)
+        break;
+      if(g_mod_syms_cap >= HOSTABI_MODSYM_MAX || modsym_ensure_capacity_locked(g_mod_syms_cap + 1) != 0)
+        break;
     }
     if(slot < 0)
       break;
@@ -352,15 +406,18 @@ int hostabi_export_remove_module(int module_id)
   int i;
   int changed = 0;
   hostabi_modsym_t prev[HOSTABI_MODSYM_MAX];
+  int prev_cap;
 
   if(module_id <= 0)
     return -1;
 
   exports_lock();
   /* Save current state for rollback */
-  memcpy(prev, g_mod_syms, sizeof(prev));
+  prev_cap = g_mod_syms_cap;
+  if(prev_cap > 0 && g_mod_syms)
+    memcpy(prev, g_mod_syms, (size_t)prev_cap * sizeof(prev[0]));
   /* Mark all symbols from this module as unused */
-  for(i = 0; i < HOSTABI_MODSYM_MAX; i++){
+  for(i = 0; i < g_mod_syms_cap; i++){
     if(g_mod_syms[i].used && g_mod_syms[i].module_id == module_id){
       memset(&g_mod_syms[i], 0, sizeof(g_mod_syms[i]));
       changed = 1;
@@ -369,7 +426,8 @@ int hostabi_export_remove_module(int module_id)
 
   /* Rebuild and rollback on failure */
   if(changed && rebuild_locked() != 0){
-    memcpy(g_mod_syms, prev, sizeof(g_mod_syms));
+    if(prev_cap > 0 && g_mod_syms)
+      memcpy(g_mod_syms, prev, (size_t)prev_cap * sizeof(prev[0]));
     (void)rebuild_locked();
     exports_unlock();
     return -1;
@@ -409,7 +467,7 @@ const void *hostabi_export_resolve(const char *name)
   exports_lock();
 
   /* Find best override and best extension */
-  for(i = 0; i < HOSTABI_MODSYM_MAX; i++){
+  for(i = 0; i < g_mod_syms_cap; i++){
     if(!g_mod_syms[i].used || g_mod_syms[i].addr == 0)
       continue;
     if(strcmp(name, g_mod_syms[i].name) != 0)

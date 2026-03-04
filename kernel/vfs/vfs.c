@@ -13,6 +13,7 @@
 #include "platform/esp_flash_disk.h"
 #include "esp_log.h"
 #include "esp_memory_utils.h"
+#include "esp_heap_caps.h"
 #include "loader/elf_loader.h"
 #include "fs/fs.h"
 #include "platform/hal.h"
@@ -71,7 +72,8 @@ typedef struct {
   xv6_task_ctx_t ctx;
 } xv6_task_ctx_slot_t;
 
-static xv6_task_ctx_slot_t g_task_ctx[XV6_MAX_TASK_CTX];
+static xv6_task_ctx_slot_t *g_task_ctx;
+static int g_task_ctx_cap;
 
 #define XV6_MAX_FD XV6_FD_CAP
 #define VFD_FREE 0
@@ -98,7 +100,8 @@ typedef struct {
   char path[MAXPATH];
 } xv6_vfd_t;
 
-static xv6_vfd_t g_fds[XV6_MAX_FD];
+static xv6_vfd_t *g_fds;
+static int g_fds_cap;
 static int g_next_fd_group = 1;
 
 #define XV6_INODE_SIZE_MASK 0x000fffffu
@@ -239,11 +242,11 @@ typedef struct {
   int alloc;
   int master_open;
   int slave_open;
-  uint8 m2s[256];
+  uint8 *m2s;
   uint16 m2s_r;
   uint16 m2s_w;
   uint16 m2s_n;
-  uint8 s2m[256];
+  uint8 *s2m;
   uint16 s2m_r;
   uint16 s2m_w;
   uint16 s2m_n;
@@ -255,13 +258,77 @@ typedef struct {
   int alloc;
   int readers;
   int writers;
-  uint8 data[512];
+  uint8 *data;
   uint16 r;
   uint16 w;
   uint16 n;
 } xv6_pipe_t;
 
 static xv6_pipe_t g_pipes[XV6_MAX_PIPE];
+
+#define XV6_PTY_BUF_CAP 256u
+#define XV6_PIPE_BUF_CAP 512u
+
+static void *vfs_alloc_data(size_t sz)
+{
+  void *p = 0;
+#ifdef MALLOC_CAP_SPIRAM
+  p = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+  if(p == 0)
+    p = heap_caps_malloc(sz, MALLOC_CAP_8BIT);
+  return p;
+}
+
+static void pty_slot_reset(xv6_pty_t *p)
+{
+  if(p == 0)
+    return;
+  if(p->m2s){
+    heap_caps_free(p->m2s);
+    p->m2s = 0;
+  }
+  if(p->s2m){
+    heap_caps_free(p->s2m);
+    p->s2m = 0;
+  }
+  memset(p, 0, sizeof(*p));
+}
+
+static void pipe_slot_reset(xv6_pipe_t *p)
+{
+  if(p == 0)
+    return;
+  if(p->data){
+    heap_caps_free(p->data);
+    p->data = 0;
+  }
+  memset(p, 0, sizeof(*p));
+}
+
+static int fd_table_ensure_locked(void)
+{
+  if(g_fds)
+    return 0;
+  g_fds = (xv6_vfd_t *)vfs_alloc_data((size_t)XV6_MAX_FD * sizeof(*g_fds));
+  if(g_fds == 0)
+    return -1;
+  memset(g_fds, 0, (size_t)XV6_MAX_FD * sizeof(*g_fds));
+  g_fds_cap = XV6_MAX_FD;
+  return 0;
+}
+
+static int task_ctx_ensure_table_locked(void)
+{
+  if(g_task_ctx)
+    return 0;
+  g_task_ctx = (xv6_task_ctx_slot_t *)vfs_alloc_data((size_t)XV6_MAX_TASK_CTX * sizeof(*g_task_ctx));
+  if(g_task_ctx == 0)
+    return -1;
+  memset(g_task_ctx, 0, (size_t)XV6_MAX_TASK_CTX * sizeof(*g_task_ctx));
+  g_task_ctx_cap = XV6_MAX_TASK_CTX;
+  return 0;
+}
 
 static void task_ctx_lock(void)
 {
@@ -284,8 +351,12 @@ static xv6_task_ctx_t *task_ctx_get(int create)
   int free_slot = -1;
 
   task_ctx_lock();
+  if(task_ctx_ensure_table_locked() != 0){
+    task_ctx_unlock();
+    return 0;
+  }
 
-  for(i = 0; i < XV6_MAX_TASK_CTX; i++){
+  for(i = 0; i < g_task_ctx_cap; i++){
     if(g_task_ctx[i].task == self){
       task_ctx_unlock();
       return &g_task_ctx[i].ctx;
@@ -314,7 +385,11 @@ static void task_ctx_reset_all(void)
   int i;
 
   task_ctx_lock();
-  for(i = 0; i < XV6_MAX_TASK_CTX; i++){
+  if(task_ctx_ensure_table_locked() != 0){
+    task_ctx_unlock();
+    return;
+  }
+  for(i = 0; i < g_task_ctx_cap; i++){
     if(g_task_ctx[i].task){
       g_task_ctx[i].ctx.stdio_active = 0;
       g_task_ctx[i].ctx.in_fd = 0;
@@ -575,7 +650,18 @@ static int pty_alloc_id(void)
   int i;
   for(i = 0; i < XV6_MAX_PTY; i++){
     if(!g_ptys[i].alloc){
-      memset(&g_ptys[i], 0, sizeof(g_ptys[i]));
+      uint8 *m2s = (uint8 *)vfs_alloc_data(XV6_PTY_BUF_CAP);
+      uint8 *s2m;
+      if(m2s == 0)
+        return -1;
+      s2m = (uint8 *)vfs_alloc_data(XV6_PTY_BUF_CAP);
+      if(s2m == 0){
+        heap_caps_free(m2s);
+        return -1;
+      }
+      pty_slot_reset(&g_ptys[i]);
+      g_ptys[i].m2s = m2s;
+      g_ptys[i].s2m = s2m;
       g_ptys[i].alloc = 1;
       return i;
     }
@@ -589,7 +675,7 @@ static void pty_try_free(int id)
     return;
   if(g_ptys[id].alloc && !g_ptys[id].master_open && !g_ptys[id].slave_open && g_ptys[id].m2s_n == 0 &&
      g_ptys[id].s2m_n == 0)
-    memset(&g_ptys[id], 0, sizeof(g_ptys[id]));
+    pty_slot_reset(&g_ptys[id]);
 }
 
 static void pty_drop_queued_data_if_orphaned(int id)
@@ -607,7 +693,11 @@ static int pipe_alloc_id(void)
   int i;
   for(i = 0; i < XV6_MAX_PIPE; i++){
     if(!g_pipes[i].alloc){
-      memset(&g_pipes[i], 0, sizeof(g_pipes[i]));
+      uint8 *buf = (uint8 *)vfs_alloc_data(XV6_PIPE_BUF_CAP);
+      if(buf == 0)
+        return -1;
+      pipe_slot_reset(&g_pipes[i]);
+      g_pipes[i].data = buf;
       g_pipes[i].alloc = 1;
       return i;
     }
@@ -620,7 +710,7 @@ static void pipe_try_free(int id)
   if(id < 0 || id >= XV6_MAX_PIPE)
     return;
   if(g_pipes[id].alloc && g_pipes[id].readers == 0 && g_pipes[id].writers == 0)
-    memset(&g_pipes[id], 0, sizeof(g_pipes[id]));
+    pipe_slot_reset(&g_pipes[id]);
 }
 
 static int dev_prng_fill(void *buf, uint32 n)
@@ -709,9 +799,11 @@ static int dev_read_fd(const xv6_vfd_t *fd, void *buf, uint32 size)
     if(id < 0 || id >= XV6_MAX_PTY || !g_ptys[id].alloc)
       return -1;
     p = &g_ptys[id];
+    if(p->m2s == 0 || p->s2m == 0)
+      return -1;
     if(fd->dev_role == DEV_ROLE_PTY_MASTER)
-      return pty_q_pop(p->s2m, &p->s2m_r, &p->s2m_n, sizeof(p->s2m), (uint8 *)buf, size);
-    return pty_q_pop(p->m2s, &p->m2s_r, &p->m2s_n, sizeof(p->m2s), (uint8 *)buf, size);
+      return pty_q_pop(p->s2m, &p->s2m_r, &p->s2m_n, (uint16)XV6_PTY_BUF_CAP, (uint8 *)buf, size);
+    return pty_q_pop(p->m2s, &p->m2s_r, &p->m2s_n, (uint16)XV6_PTY_BUF_CAP, (uint8 *)buf, size);
   }
   return dev_read(fd->path, fd->off, buf, size);
 }
@@ -726,9 +818,11 @@ static int dev_write_fd(const xv6_vfd_t *fd, const void *buf, uint32 size)
     if(id < 0 || id >= XV6_MAX_PTY || !g_ptys[id].alloc)
       return -1;
     p = &g_ptys[id];
+    if(p->m2s == 0 || p->s2m == 0)
+      return -1;
     if(fd->dev_role == DEV_ROLE_PTY_MASTER)
-      return pty_q_push(p->m2s, &p->m2s_w, &p->m2s_n, sizeof(p->m2s), (const uint8 *)buf, size);
-    return pty_q_push(p->s2m, &p->s2m_w, &p->s2m_n, sizeof(p->s2m), (const uint8 *)buf, size);
+      return pty_q_push(p->m2s, &p->m2s_w, &p->m2s_n, (uint16)XV6_PTY_BUF_CAP, (const uint8 *)buf, size);
+    return pty_q_push(p->s2m, &p->s2m_w, &p->s2m_n, (uint16)XV6_PTY_BUF_CAP, (const uint8 *)buf, size);
   }
   return dev_write(fd->path, buf, size);
 }
@@ -1589,8 +1683,12 @@ int xv6fs_ro_init(void)
 
   g_nbitmap = g_sb.size / BPB + 1;
   g_data_start = g_sb.bmapstart + g_nbitmap;
-  g_ready = 1;
   xv6_vfs_reset();
+  if(g_fds == 0){
+    ESP_LOGE(TAG, "fd table init failed");
+    return -1;
+  }
+  g_ready = 1;
   ESP_LOGI(TAG, "mounted: size=%u nblocks=%u ninodes=%u", g_sb.size, g_sb.nblocks, g_sb.ninodes);
   return 0;
 }
@@ -2556,6 +2654,8 @@ out_fail:
 static int vfs_alloc_fd(void)
 {
   int i;
+  if(g_fds == 0)
+    return -1;
   for(i = 3; i < XV6_MAX_FD; i++){
     if(!g_fds[i].used)
       return i;
@@ -2652,12 +2752,21 @@ static int vfs_create_regular_file(const char *path, uint32 *out_inum)
 void xv6_vfs_reset(void)
 {
   xv6_task_ctx_t *ctx;
+  int i;
   if(g_vfs_lock == 0)
     g_vfs_lock = xSemaphoreCreateMutex();
   vfs_lock();
-  memset(g_fds, 0, sizeof(g_fds));
-  memset(g_ptys, 0, sizeof(g_ptys));
-  memset(g_pipes, 0, sizeof(g_pipes));
+  if(fd_table_ensure_locked() != 0){
+    g_ready = 0;
+    vfs_unlock();
+    ESP_LOGE(TAG, "fd table allocation failed");
+    return;
+  }
+  memset(g_fds, 0, (size_t)g_fds_cap * sizeof(*g_fds));
+  for(i = 0; i < XV6_MAX_PTY; i++)
+    pty_slot_reset(&g_ptys[i]);
+  for(i = 0; i < XV6_MAX_PIPE; i++)
+    pipe_slot_reset(&g_pipes[i]);
   g_next_fd_group = 1;
 
   g_fds[0].used = 1;
@@ -3129,9 +3238,21 @@ int xv6_read(int fd, void *buf, uint32 size)
   }
 
   if(g_fds[real_fd].kind == VFD_DEV){
-    xv6_vfd_t fd_snapshot = g_fds[real_fd];
-    vfs_unlock();
-    rc = dev_read_fd(&fd_snapshot, buf, size);
+    if(g_fds[real_fd].dev_role == DEV_ROLE_PTY_MASTER || g_fds[real_fd].dev_role == DEV_ROLE_PTY_SLAVE){
+      rc = dev_read_fd(&g_fds[real_fd], buf, size);
+      if(rc < 0){
+        err = EIO;
+        goto fail;
+      }
+      vfs_unlock();
+      return rc;
+    }
+
+    {
+      xv6_vfd_t fd_snapshot = g_fds[real_fd];
+      vfs_unlock();
+      rc = dev_read_fd(&fd_snapshot, buf, size);
+    }
     if(rc < 0){
       task_ctx_set_errno(EIO);
       return -1;
@@ -3150,7 +3271,7 @@ int xv6_read(int fd, void *buf, uint32 size)
     while(got < size){
       int n;
       xv6_pipe_t *p = &g_pipes[pid];
-      if(!p->alloc){
+      if(!p->alloc || p->data == 0){
         err = EIO;
         goto fail;
       }
@@ -3170,7 +3291,7 @@ int xv6_read(int fd, void *buf, uint32 size)
         }
         continue;
       }
-      n = pty_q_pop(p->data, &p->r, &p->n, sizeof(p->data), out + got, size - got);
+      n = pty_q_pop(p->data, &p->r, &p->n, (uint16)XV6_PIPE_BUF_CAP, out + got, size - got);
       if(n <= 0)
         break;
       got += (uint32)n;
@@ -3259,7 +3380,7 @@ int xv6_write(int fd, const void *buf, uint32 size)
     while(sent < size){
       int n;
       xv6_pipe_t *p = &g_pipes[pid];
-      if(!p->alloc){
+      if(!p->alloc || p->data == 0){
         err = EIO;
         goto fail;
       }
@@ -3270,7 +3391,7 @@ int xv6_write(int fd, const void *buf, uint32 size)
         }
         break;
       }
-      if(p->n >= sizeof(p->data)){
+      if(p->n >= XV6_PIPE_BUF_CAP){
         if(sent > 0)
           break;
         vfs_unlock();
@@ -3284,7 +3405,7 @@ int xv6_write(int fd, const void *buf, uint32 size)
         }
         continue;
       }
-      n = pty_q_push(p->data, &p->w, &p->n, sizeof(p->data), in + sent, size - sent);
+      n = pty_q_push(p->data, &p->w, &p->n, (uint16)XV6_PIPE_BUF_CAP, in + sent, size - sent);
       if(n <= 0)
         break;
       sent += (uint32)n;
@@ -3932,7 +4053,7 @@ int xv6_pipe(int *out_read_fd, int *out_write_fd)
   return 0;
 
 fail_pipe:
-  memset(&g_pipes[pipe_id], 0, sizeof(g_pipes[pipe_id]));
+  pipe_slot_reset(&g_pipes[pipe_id]);
 fail:
   vfs_unlock();
   return -1;
@@ -4013,15 +4134,17 @@ void xv6_task_ctx_cleanup_for_handle(void *task_handle)
   elf_loader_task_cleanup_for_handle(task_handle);
 
   vfs_lock();
-  for(i = 3; i < XV6_MAX_FD; i++){
-    if(!g_fds[i].used || g_fds[i].owner != self)
-      continue;
-    vfs_close_fd_locked(i);
+  if(g_fds){
+    for(i = 3; i < XV6_MAX_FD; i++){
+      if(!g_fds[i].used || g_fds[i].owner != self)
+        continue;
+      vfs_close_fd_locked(i);
+    }
   }
   vfs_unlock();
 
   task_ctx_lock();
-  for(i = 0; i < XV6_MAX_TASK_CTX; i++){
+  for(i = 0; i < g_task_ctx_cap; i++){
     if(g_task_ctx[i].task == self){
       memset(&g_task_ctx[i], 0, sizeof(g_task_ctx[i]));
       break;

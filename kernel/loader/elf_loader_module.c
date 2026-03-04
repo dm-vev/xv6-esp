@@ -9,8 +9,16 @@ static int host_sym_total_count_locked(void)
   int i;
   int total = g_host_dyn_count;
 
-  for(i = 0; i < g_host_const_seg_count; i++)
-    total += g_host_const_segs[i].count;
+  for(i = 0; i < g_host_const_seg_count; i++){
+    const elf_host_sym_const_seg_t *seg = &g_host_const_segs[i];
+    int j;
+    if(seg->syms == 0 || seg->count <= 0)
+      continue;
+    for(j = 0; j < seg->count; j++){
+      if(seg->syms[j].addr != 0)
+        total++;
+    }
+  }
   return total;
 }
 
@@ -47,6 +55,11 @@ int elf_loader_init(void)
 {
   int i;
 
+  call_ctx_lock();
+  if(g_call_ctx && g_call_ctx_cap > 0)
+    memset(g_call_ctx, 0, (size_t)g_call_ctx_cap * sizeof(*g_call_ctx));
+  call_ctx_unlock();
+
   module_lock();
   g_host_const_seg_count = 0;
   g_host_dyn_count = 0;
@@ -78,26 +91,33 @@ int elf_loader_reset_host_symbols(void)
 int elf_loader_register_host_symbols(const elf_host_symbol_t *syms, int count)
 {
   int i;
+  int valid_count = 0;
 
   if(syms == 0 || count <= 0)
     return -1;
   for(i = 0; i < count; i++){
-    if(syms[i].name == 0 || syms[i].name[0] == 0 || syms[i].addr == 0)
+    if(syms[i].name == 0 || syms[i].name[0] == 0)
       return -1;
+    if(syms[i].addr != 0)
+      valid_count++;
   }
+  if(valid_count == 0)
+    return 0;
 
   module_lock();
-  if(host_sym_total_count_locked() > (ELFLOADER_MAX_HOST_SYMBOLS - count)){
+  if(host_sym_total_count_locked() > (ELFLOADER_MAX_HOST_SYMBOLS - valid_count)){
     module_unlock();
     return -1;
   }
-  if(host_sym_ensure_dyn_capacity_locked(g_host_dyn_count + count) != 0){
+  if(host_sym_ensure_dyn_capacity_locked(g_host_dyn_count + valid_count) != 0){
     module_unlock();
     return -1;
   }
-  for(i = 0; i < count; i++)
-    g_host_dyn_syms[g_host_dyn_count + i] = syms[i];
-  g_host_dyn_count += count;
+  for(i = 0; i < count; i++){
+    if(syms[i].addr == 0)
+      continue;
+    g_host_dyn_syms[g_host_dyn_count++] = syms[i];
+  }
   module_unlock();
   return 0;
 }
@@ -105,17 +125,22 @@ int elf_loader_register_host_symbols(const elf_host_symbol_t *syms, int count)
 int elf_loader_register_host_symbols_const(const elf_host_symbol_t *syms, int count)
 {
   int i;
+  int valid_count = 0;
 
   if(syms == 0 || count <= 0)
     return -1;
   for(i = 0; i < count; i++){
-    if(syms[i].name == 0 || syms[i].name[0] == 0 || syms[i].addr == 0)
+    if(syms[i].name == 0 || syms[i].name[0] == 0)
       return -1;
+    if(syms[i].addr != 0)
+      valid_count++;
   }
+  if(valid_count == 0)
+    return 0;
 
   module_lock();
   if(g_host_const_seg_count >= ELFLOADER_HOST_CONST_SEG_MAX ||
-     host_sym_total_count_locked() > (ELFLOADER_MAX_HOST_SYMBOLS - count)){
+     host_sym_total_count_locked() > (ELFLOADER_MAX_HOST_SYMBOLS - valid_count)){
     module_unlock();
     return -1;
   }

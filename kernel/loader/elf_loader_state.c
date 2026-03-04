@@ -20,10 +20,23 @@ int g_host_dyn_count;
 int g_host_dyn_cap;
 
 SemaphoreHandle_t g_module_mu;
-elf_call_ctx_t g_call_ctx[ELF_CALL_CTX_MAX];
+elf_call_ctx_t *g_call_ctx;
+int g_call_ctx_cap;
 SemaphoreHandle_t g_call_ctx_mu;
 
 _Static_assert(ELF_CALL_CTX_MAX >= 8, "ELF_CALL_CTX_MAX too small for concurrent applets");
+
+static int call_ctx_ensure_table_locked(void)
+{
+  if(g_call_ctx)
+    return 0;
+  g_call_ctx = (elf_call_ctx_t *)alloc_data_mem((size_t)ELF_CALL_CTX_MAX * sizeof(*g_call_ctx));
+  if(g_call_ctx == 0)
+    return -1;
+  memset(g_call_ctx, 0, (size_t)ELF_CALL_CTX_MAX * sizeof(*g_call_ctx));
+  g_call_ctx_cap = ELF_CALL_CTX_MAX;
+  return 0;
+}
 
 void call_ctx_lock(void)
 {
@@ -46,7 +59,15 @@ int call_ctx_set_current(elf_module_t *mod)
   int free_i = -1;
 
   call_ctx_lock();
-  for(i = 0; i < ELF_CALL_CTX_MAX; i++){
+  if(g_call_ctx == 0 && mod == 0){
+    call_ctx_unlock();
+    return 0;
+  }
+  if(call_ctx_ensure_table_locked() != 0){
+    call_ctx_unlock();
+    return (mod == 0) ? 0 : -1;
+  }
+  for(i = 0; i < g_call_ctx_cap; i++){
     if(g_call_ctx[i].task == self){
       if(mod == 0){
         g_call_ctx[i].task = 0;
@@ -86,7 +107,11 @@ elf_module_t *call_ctx_get_current(void)
   elf_module_t *m = 0;
 
   call_ctx_lock();
-  for(i = 0; i < ELF_CALL_CTX_MAX; i++){
+  if(g_call_ctx == 0){
+    call_ctx_unlock();
+    return 0;
+  }
+  for(i = 0; i < g_call_ctx_cap; i++){
     if(g_call_ctx[i].task == self){
       m = g_call_ctx[i].mod;
       break;
@@ -103,7 +128,11 @@ elf_call_ctx_t *call_ctx_get_current_slot(void)
   elf_call_ctx_t *slot = 0;
 
   call_ctx_lock();
-  for(i = 0; i < ELF_CALL_CTX_MAX; i++){
+  if(g_call_ctx == 0){
+    call_ctx_unlock();
+    return 0;
+  }
+  for(i = 0; i < g_call_ctx_cap; i++){
     if(g_call_ctx[i].task == self){
       slot = &g_call_ctx[i];
       break;
@@ -145,7 +174,11 @@ int module_is_active_in_call_ctx(elf_module_t *mod)
     return 0;
 
   call_ctx_lock();
-  for(i = 0; i < ELF_CALL_CTX_MAX; i++){
+  if(g_call_ctx == 0){
+    call_ctx_unlock();
+    return 0;
+  }
+  for(i = 0; i < g_call_ctx_cap; i++){
     if(g_call_ctx[i].task != 0 && g_call_ctx[i].mod == mod){
       active = 1;
       break;
@@ -196,12 +229,14 @@ void elf_loader_task_cleanup_for_handle(void *task_handle)
     return;
 
   call_ctx_lock();
-  for(i = 0; i < ELF_CALL_CTX_MAX; i++){
-    if(g_call_ctx[i].task != target)
-      continue;
-    mod = g_call_ctx[i].mod;
-    memset(&g_call_ctx[i], 0, sizeof(g_call_ctx[i]));
-    break;
+  if(g_call_ctx){
+    for(i = 0; i < g_call_ctx_cap; i++){
+      if(g_call_ctx[i].task != target)
+        continue;
+      mod = g_call_ctx[i].mod;
+      memset(&g_call_ctx[i], 0, sizeof(g_call_ctx[i]));
+      break;
+    }
   }
   call_ctx_unlock();
 
@@ -395,6 +430,11 @@ void module_reset(elf_module_t *m)
   if(m->image){
     heap_caps_free(m->image);
     m->image = 0;
+  }
+
+  if(m->exports){
+    heap_caps_free(m->exports);
+    m->exports = 0;
   }
 
   memset(m, 0, sizeof(*m));

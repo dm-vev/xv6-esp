@@ -146,8 +146,9 @@ struct elf_module {
   elf_seg_t segs[16];
   int seg_count;
 
-  elf_export_t exports[ELFLOADER_MAX_EXPORTS];
+  elf_export_t *exports;
   int export_count;
+  int export_cap;
   int global_visible;
   int open_count;
   int active_calls;
@@ -181,7 +182,8 @@ extern int g_host_dyn_count;
 extern int g_host_dyn_cap;
 
 extern SemaphoreHandle_t g_module_mu;
-extern elf_call_ctx_t g_call_ctx[ELF_CALL_CTX_MAX];
+extern elf_call_ctx_t *g_call_ctx;
+extern int g_call_ctx_cap;
 extern SemaphoreHandle_t g_call_ctx_mu;
 
 void call_ctx_lock(void);

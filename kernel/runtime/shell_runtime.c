@@ -26,6 +26,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
@@ -103,7 +104,7 @@ typedef struct {
   char val[KSH_ENV_VAL];
 } ksh_env_t;
 
-static ksh_job_t g_jobs[KSH_MAX_JOBS];
+static ksh_job_t *g_jobs;
 static int g_next_job_id = 1;
 static int g_next_core_hint = 0;
 static uint32 g_ulimit_ms = 0;
@@ -117,6 +118,35 @@ static int dispatch_command(int argc, char **argv, int run_bg);
 static int eval_line_inner(const char *line, int *exit_code);
 static int k_dup2(int oldfd, int newfd);
 
+static void *ksh_alloc_data(size_t sz)
+{
+  void *p = 0;
+#ifdef MALLOC_CAP_SPIRAM
+  p = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+  if(p == 0)
+    p = heap_caps_malloc(sz, MALLOC_CAP_8BIT);
+  return p;
+}
+
+static int ksh_jobs_ensure(void)
+{
+  if(g_jobs)
+    return 0;
+  g_jobs = (ksh_job_t *)ksh_alloc_data((size_t)KSH_MAX_JOBS * sizeof(*g_jobs));
+  if(g_jobs == 0)
+    return -1;
+  memset(g_jobs, 0, (size_t)KSH_MAX_JOBS * sizeof(*g_jobs));
+  return 0;
+}
+
+static void ksh_jobs_release(void)
+{
+  if(g_jobs){
+    heap_caps_free(g_jobs);
+    g_jobs = 0;
+  }
+}
 
 #include "shell_runtime_hostabi.inc"
 #include "shell_runtime_shell.inc"

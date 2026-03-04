@@ -1601,7 +1601,8 @@ typedef struct {
 } ksh_sig_state_t;
 
 static SemaphoreHandle_t g_sig_state_lock;
-static ksh_sig_state_t g_sig_state[KSH_SIG_SLOT_CAP];
+static ksh_sig_state_t *g_sig_state;
+static int g_sig_state_cap;
 
 static void sig_state_lock_take(void)
 {
@@ -1617,6 +1618,18 @@ static void sig_state_lock_give(void)
     (void)xSemaphoreGive(g_sig_state_lock);
 }
 
+static int sig_state_ensure_table_locked(void)
+{
+  if(g_sig_state)
+    return 0;
+  g_sig_state = (ksh_sig_state_t *)ksh_alloc_data((size_t)KSH_SIG_SLOT_CAP * sizeof(*g_sig_state));
+  if(g_sig_state == 0)
+    return -1;
+  memset(g_sig_state, 0, (size_t)KSH_SIG_SLOT_CAP * sizeof(*g_sig_state));
+  g_sig_state_cap = KSH_SIG_SLOT_CAP;
+  return 0;
+}
+
 static int k_sig_valid(int sig)
 {
   return (sig > 0 && sig < KSH_SIG_MAX) ? 1 : 0;
@@ -1628,7 +1641,9 @@ static ksh_sig_state_t *sig_state_slot_locked(TaskHandle_t task, int create)
   int free_slot = -1;
   if(task == 0)
     return 0;
-  for(i = 0; i < KSH_SIG_SLOT_CAP; i++){
+  if(create && sig_state_ensure_table_locked() != 0)
+    return 0;
+  for(i = 0; i < g_sig_state_cap; i++){
     if(g_sig_state[i].task == task)
       return &g_sig_state[i];
     if(create && free_slot < 0 && g_sig_state[i].task == 0)
@@ -1648,7 +1663,7 @@ static void k_signal_task_cleanup(TaskHandle_t task)
   if(task == 0)
     return;
   sig_state_lock_take();
-  for(i = 0; i < KSH_SIG_SLOT_CAP; i++){
+  for(i = 0; i < g_sig_state_cap; i++){
     if(g_sig_state[i].task == task){
       memset(&g_sig_state[i], 0, sizeof(g_sig_state[i]));
       break;

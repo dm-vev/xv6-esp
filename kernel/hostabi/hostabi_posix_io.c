@@ -21,6 +21,7 @@
 #include <sys/ioctl.h>
 
 #include "loader/elf_loader.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "vfs/vfs.h"
@@ -54,7 +55,8 @@ typedef struct {
 } hostabi_fd_meta_t;
 
 static SemaphoreHandle_t g_fd_meta_lock; /**< Lock for metadata array */
-static hostabi_fd_meta_t g_fd_meta[HOSTABI_FD_META_MAX]; /**< Metadata per fd */
+static hostabi_fd_meta_t *g_fd_meta;     /**< Metadata per fd */
+static int g_fd_meta_cap;                /**< Allocated metadata slots */
 
 /**
  * @brief Acquire the metadata lock
@@ -76,6 +78,61 @@ static void fd_meta_lock_give(void)
 {
   if(g_fd_meta_lock)
     (void)xSemaphoreGive(g_fd_meta_lock);
+}
+
+static void *fd_meta_alloc_data(size_t sz)
+{
+  void *p = 0;
+#ifdef MALLOC_CAP_SPIRAM
+  p = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+  if(p == 0)
+    p = heap_caps_malloc(sz, MALLOC_CAP_8BIT);
+  return p;
+}
+
+static int fd_meta_ensure_capacity_locked(int min_cap)
+{
+  hostabi_fd_meta_t *new_meta;
+  int new_cap;
+
+  if(min_cap <= 0 || min_cap > HOSTABI_FD_META_MAX)
+    return -1;
+  if(min_cap <= g_fd_meta_cap)
+    return 0;
+
+  new_cap = (g_fd_meta_cap > 0) ? g_fd_meta_cap : 8;
+  while(new_cap < min_cap){
+    int next = new_cap * 2;
+    if(next <= 0 || next > HOSTABI_FD_META_MAX)
+      next = HOSTABI_FD_META_MAX;
+    if(next == new_cap)
+      break;
+    new_cap = next;
+  }
+  if(new_cap < min_cap)
+    return -1;
+
+  new_meta = (hostabi_fd_meta_t *)fd_meta_alloc_data((size_t)new_cap * sizeof(*new_meta));
+  if(new_meta == 0)
+    return -1;
+  memset(new_meta, 0, (size_t)new_cap * sizeof(*new_meta));
+  if(g_fd_meta && g_fd_meta_cap > 0)
+    memcpy(new_meta, g_fd_meta, (size_t)g_fd_meta_cap * sizeof(*new_meta));
+  if(g_fd_meta)
+    heap_caps_free(g_fd_meta);
+  g_fd_meta = new_meta;
+  g_fd_meta_cap = new_cap;
+  return 0;
+}
+
+static void fd_meta_reset_table_locked(void)
+{
+  if(g_fd_meta){
+    heap_caps_free(g_fd_meta);
+    g_fd_meta = 0;
+  }
+  g_fd_meta_cap = 0;
 }
 
 /**
@@ -160,9 +217,9 @@ static void fd_meta_defaults_for_fd(int fd, hostabi_fd_meta_t *m)
  */
 static void fd_meta_clear_locked(int fd)
 {
-  if(!fd_meta_in_range(fd))
+  if(!fd_meta_in_range(fd) || fd >= g_fd_meta_cap || g_fd_meta == 0)
     return;
-  memset(&g_fd_meta[fd], 0, sizeof(g_fd_meta[fd]));
+  memset(&g_fd_meta[fd], 0, sizeof(g_fd_meta[0]));
 }
 
 /**
@@ -170,11 +227,14 @@ static void fd_meta_clear_locked(int fd)
  *
  * Copies the provided metadata into the slot for this fd.
  */
-static void fd_meta_set_locked(int fd, const hostabi_fd_meta_t *m)
+static int fd_meta_set_locked(int fd, const hostabi_fd_meta_t *m)
 {
   if(!fd_meta_in_range(fd) || m == 0)
-    return;
+    return -1;
+  if(fd_meta_ensure_capacity_locked(fd + 1) != 0 || g_fd_meta == 0)
+    return -1;
   g_fd_meta[fd] = *m;
+  return 0;
 }
 
 /**
@@ -186,7 +246,7 @@ static void fd_meta_set_locked(int fd, const hostabi_fd_meta_t *m)
  */
 static int fd_meta_get_locked(int fd, hostabi_fd_meta_t *out)
 {
-  if(out == 0 || !fd_meta_in_range(fd) || !g_fd_meta[fd].used)
+  if(out == 0 || !fd_meta_in_range(fd) || fd >= g_fd_meta_cap || g_fd_meta == 0 || !g_fd_meta[fd].used)
     return -1;
   *out = g_fd_meta[fd];
   return 0;
@@ -231,10 +291,11 @@ static int fd_meta_fetch(int fd, hostabi_fd_meta_t *out)
       fd_meta_defaults_for_fd(real_fd, &m);
       if(st.type == XV6_KSTAT_T_DEVICE)
         m.is_tty = 1;
-      fd_meta_set_locked(real_fd, &m);
-      if(out)
-        *out = m;
-      rc = 0;
+      if(fd_meta_set_locked(real_fd, &m) == 0){
+        if(out)
+          *out = m;
+        rc = 0;
+      }
     }
   }
   fd_meta_lock_give();
@@ -247,13 +308,14 @@ static int fd_meta_fetch(int fd, hostabi_fd_meta_t *out)
  */
 static int fd_meta_store(int fd, const hostabi_fd_meta_t *m)
 {
+  int rc;
   int real_fd = map_fd(fd);
   if(m == 0 || !fd_meta_in_range(real_fd))
     return -1;
   fd_meta_lock_take();
-  fd_meta_set_locked(real_fd, m);
+  rc = fd_meta_set_locked(real_fd, m);
   fd_meta_lock_give();
-  return 0;
+  return rc;
 }
 
 /**
@@ -266,12 +328,15 @@ void hostabi_posix_io_init(void)
 {
   int fd;
   fd_meta_lock_take();
-  for(fd = 0; fd < HOSTABI_FD_META_MAX; fd++)
-    fd_meta_clear_locked(fd);
+  fd_meta_reset_table_locked();
+  if(fd_meta_ensure_capacity_locked(3) != 0){
+    fd_meta_lock_give();
+    return;
+  }
   for(fd = 0; fd <= 2; fd++){
     hostabi_fd_meta_t m;
     fd_meta_defaults_for_fd(fd, &m);
-    fd_meta_set_locked(fd, &m);
+    (void)fd_meta_set_locked(fd, &m);
   }
   fd_meta_lock_give();
 }
@@ -312,7 +377,7 @@ void hostabi_posix_io_on_close(int fd, int keep_stdio_defaults)
   if(keep_stdio_defaults && fd >= 0 && fd <= 2){
     hostabi_fd_meta_t m;
     fd_meta_defaults_for_fd(fd, &m);
-    fd_meta_set_locked(fd, &m);
+    (void)fd_meta_set_locked(fd, &m);
   }
   fd_meta_lock_give();
 }

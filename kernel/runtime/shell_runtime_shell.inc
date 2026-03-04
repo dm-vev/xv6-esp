@@ -2201,6 +2201,9 @@ static int register_default_symbols(void)
     { "xv6_wifi_host_init_default", (void *)k_wifi_host_init_default },
     { "esp_netif_create_default_wifi_sta", (void *)esp_netif_create_default_wifi_sta },
     { "esp_netif_destroy", (void *)esp_netif_destroy },
+    /* Event bases are data symbols; modules expect their addresses for relocations. */
+    { "WIFI_EVENT", (void *)&WIFI_EVENT },
+    { "IP_EVENT", (void *)&IP_EVENT },
     { "esp_event_handler_instance_register", (void *)esp_event_handler_instance_register },
     { "esp_event_handler_instance_unregister", (void *)esp_event_handler_instance_unregister },
     { "esp_wifi_set_storage", (void *)esp_wifi_set_storage },
@@ -2515,6 +2518,9 @@ int shell_runtime_init(void)
   if(__sync_lock_test_and_set(&g_runtime_started, 1) != 0)
     return 0;
 
+  if(ksh_jobs_ensure() != 0)
+    goto fail;
+
   if(xv6_network_runtime_init() != 0){
     eputs_line("network runtime init failed");
     goto fail;
@@ -2550,6 +2556,7 @@ fail:
     vSemaphoreDelete(g_jobs_lock);
     g_jobs_lock = 0;
   }
+  ksh_jobs_release();
   g_runtime_started = 0;
   return -1;
 }
@@ -2586,6 +2593,9 @@ int shell_runtime_run_interactive(void)
 {
   char line[256];
   int len = 0;
+
+  if(shell_runtime_init() != 0)
+    return -1;
 
   g_interactive_task = xTaskGetCurrentTaskHandle();
   tty_puts("xv6> ");

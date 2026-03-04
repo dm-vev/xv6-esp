@@ -209,6 +209,38 @@ void *resolve_symbol(elf_module_t *m, const elf32_sym_t *sym, const char *sym_na
   return 0;
 }
 
+static int module_exports_ensure_capacity(elf_module_t *m, int min_cap)
+{
+  elf_export_t *new_exports;
+  int new_cap;
+
+  if(m == 0 || min_cap <= 0)
+    return -1;
+  if(min_cap <= m->export_cap)
+    return 0;
+
+  new_cap = (m->export_cap > 0) ? m->export_cap : 16;
+  while(new_cap < min_cap){
+    if(new_cap > (INT32_MAX / 2))
+      return -1;
+    new_cap *= 2;
+  }
+
+  new_exports = (elf_export_t *)alloc_data_mem((size_t)new_cap * sizeof(*new_exports));
+  if(new_exports == 0)
+    return -1;
+
+  if(m->exports && m->export_count > 0)
+    memcpy(new_exports, m->exports, (size_t)m->export_count * sizeof(*new_exports));
+
+  if(m->exports)
+    heap_caps_free(m->exports);
+
+  m->exports = new_exports;
+  m->export_cap = new_cap;
+  return 0;
+}
+
 int collect_exports(elf_module_t *m, const elf32_shdr_t *sym_sh, const elf32_shdr_t *str_sh)
 {
   uint32 i;
@@ -216,6 +248,8 @@ int collect_exports(elf_module_t *m, const elf32_shdr_t *sym_sh, const elf32_shd
   const elf32_sym_t *symtab;
   const char *strtab;
 
+  if(m == 0)
+    return -1;
   if(sym_sh == 0 || str_sh == 0)
     return 0;
   if(!section_bounds_valid(m, sym_sh) || !section_bounds_valid(m, str_sh))
@@ -237,6 +271,10 @@ int collect_exports(elf_module_t *m, const elf32_shdr_t *sym_sh, const elf32_shd
       continue;
     if(m->export_count >= ELFLOADER_MAX_EXPORTS)
       break;
+    if(m->export_count >= m->export_cap){
+      if(module_exports_ensure_capacity(m, m->export_count + 1) != 0)
+        return -1;
+    }
 
     name = strtab + symtab[i].st_name;
     if(name[0] == 0)

@@ -244,11 +244,8 @@ int main(void)
       close(fd);
   }
 
-  fd = open("/tmp/probe_nosys", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if(fd >= 0)
-    close(fd);
-
-  fd = open("/tmp/probe_nosys", O_WRONLY | O_TRUNC);
+  (void)unlink("/tmp/probe_nosys");
+  fd = creat("/tmp/probe_nosys", 0644);
   if(fd >= 0){
     (void)write(fd, "abc", 3);
     close(fd);
