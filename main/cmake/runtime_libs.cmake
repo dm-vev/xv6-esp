@@ -68,6 +68,35 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   )
   add_custom_target(xv6_netkmod_so ALL DEPENDS ${XV6_NETKMOD_SO})
 
+  set(XV6_WIFIMOD_SO "${CMAKE_BINARY_DIR}/shared/wifimod.so")
+
+  add_custom_command(
+    OUTPUT ${XV6_WIFIMOD_SO}
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/shared"
+    COMMAND ${CMAKE_C_COMPILER}
+            -Os
+            -ffreestanding
+            -fno-builtin
+            -fno-stack-protector
+            -fPIC
+            -nostdlib
+            -shared
+            -Wl,--unresolved-symbols=ignore-all
+            -I${APPLET_INCLUDE_DIR}
+            -I${PROJECT_DIR}/kernel
+            -o ${XV6_WIFIMOD_SO}
+            ${PROJECT_DIR}/kernel/modules/wifimod/wifimod.c
+            ${PROJECT_DIR}/kernel/modules/wifimod/wifimod_state.c
+            ${PROJECT_DIR}/kernel/modules/wifimod/wifimod_events.c
+            ${PROJECT_DIR}/kernel/modules/wifimod/wifimod_wifi.c
+    DEPENDS ${PROJECT_DIR}/kernel/modules/wifimod/wifimod.c
+           ${PROJECT_DIR}/kernel/modules/wifimod/wifimod_state.c
+           ${PROJECT_DIR}/kernel/modules/wifimod/wifimod_events.c
+           ${PROJECT_DIR}/kernel/modules/wifimod/wifimod_wifi.c
+    VERBATIM
+  )
+  add_custom_target(xv6_wifimod_so ALL DEPENDS ${XV6_WIFIMOD_SO})
+
   if(XV6_ENABLE_RUST_POC)
     find_program(XV6_RUSTC rustc)
     if(NOT XV6_RUSTC)

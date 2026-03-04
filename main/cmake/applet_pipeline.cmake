@@ -20,6 +20,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   set(_xv6_extra_resources
     "${XV6_LIBC_SO}:/lib/libc.so"
     "${XV6_NETKMOD_SO}:/lib/modules/netkmod.so"
+    "${XV6_WIFIMOD_SO}:/lib/modules/wifimod.so"
   )
   if(XV6_ENABLE_RUST_POC)
     list(APPEND _xv6_extra_resources
