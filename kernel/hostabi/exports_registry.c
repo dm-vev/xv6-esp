@@ -159,7 +159,7 @@ static int rebuild_locked(void)
   if(ksh_register_libc_host_symbols() != 0)
     return -1;
 
-  if(g_core_syms && g_core_count > 0 && elf_loader_register_host_symbols(g_core_syms, g_core_count) != 0)
+  if(g_core_syms && g_core_count > 0 && elf_loader_register_host_symbols_const(g_core_syms, g_core_count) != 0)
     return -1;
 
   /* Collect indices of all used module symbol slots */
@@ -206,11 +206,9 @@ static int rebuild_locked(void)
     staged_count++;
   }
 
-  /* Register staged symbols with ELF loader */
-  for(i = 0; i < staged_count; i++){
-    if(elf_loader_register_host_symbols(&staged[i], 1) != 0)
-      return -1;
-  }
+  /* Register staged (module) symbols in dynamic override table. */
+  if(staged_count > 0 && elf_loader_register_host_symbols(staged, staged_count) != 0)
+    return -1;
 
   return 0;
 }

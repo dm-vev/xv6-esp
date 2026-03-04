@@ -4,14 +4,59 @@
  * Public loader lifecycle and module execution entry points.
  * This file intentionally contains no low-level relocation internals.
  */
+static int host_sym_total_count_locked(void)
+{
+  int i;
+  int total = g_host_dyn_count;
+
+  for(i = 0; i < g_host_const_seg_count; i++)
+    total += g_host_const_segs[i].count;
+  return total;
+}
+
+static int host_sym_ensure_dyn_capacity_locked(int min_cap)
+{
+  elf_host_symbol_t *new_syms;
+  int new_cap;
+
+  if(min_cap <= g_host_dyn_cap)
+    return 0;
+
+  new_cap = (g_host_dyn_cap > 0) ? g_host_dyn_cap : 64;
+  while(new_cap < min_cap){
+    if(new_cap > (INT32_MAX / 2))
+      return -1;
+    new_cap *= 2;
+  }
+
+  new_syms = (elf_host_symbol_t *)heap_caps_malloc((size_t)new_cap * sizeof(*new_syms), MALLOC_CAP_8BIT);
+  if(new_syms == 0)
+    return -1;
+
+  if(g_host_dyn_syms && g_host_dyn_count > 0)
+    memcpy(new_syms, g_host_dyn_syms, (size_t)g_host_dyn_count * sizeof(*new_syms));
+
+  if(g_host_dyn_syms)
+    heap_caps_free(g_host_dyn_syms);
+  g_host_dyn_syms = new_syms;
+  g_host_dyn_cap = new_cap;
+  return 0;
+}
+
 int elf_loader_init(void)
 {
   int i;
 
   module_lock();
-  g_host_sym_count = 0;
+  g_host_const_seg_count = 0;
+  g_host_dyn_count = 0;
+  if(g_host_dyn_syms){
+    heap_caps_free(g_host_dyn_syms);
+    g_host_dyn_syms = 0;
+    g_host_dyn_cap = 0;
+  }
   g_module_generation = 1;
-  memset(g_host_syms, 0, sizeof(g_host_syms));
+  memset(g_host_const_segs, 0, sizeof(g_host_const_segs));
   for(i = 0; i < ELFLOADER_MAX_MODULES; i++){
     g_module_used[i] = 0;
     memset(&g_modules[i], 0, sizeof(g_modules[i]));
@@ -23,8 +68,9 @@ int elf_loader_init(void)
 int elf_loader_reset_host_symbols(void)
 {
   module_lock();
-  g_host_sym_count = 0;
-  memset(g_host_syms, 0, sizeof(g_host_syms));
+  g_host_const_seg_count = 0;
+  g_host_dyn_count = 0;
+  memset(g_host_const_segs, 0, sizeof(g_host_const_segs));
   module_unlock();
   return 0;
 }
@@ -35,15 +81,47 @@ int elf_loader_register_host_symbols(const elf_host_symbol_t *syms, int count)
 
   if(syms == 0 || count <= 0)
     return -1;
+  for(i = 0; i < count; i++){
+    if(syms[i].name == 0 || syms[i].name[0] == 0 || syms[i].addr == 0)
+      return -1;
+  }
 
   module_lock();
-  for(i = 0; i < count; i++){
-    if(g_host_sym_count >= (int)(sizeof(g_host_syms) / sizeof(g_host_syms[0]))){
-      module_unlock();
-      return -1;
-    }
-    g_host_syms[g_host_sym_count++] = syms[i];
+  if(host_sym_total_count_locked() > (ELFLOADER_MAX_HOST_SYMBOLS - count)){
+    module_unlock();
+    return -1;
   }
+  if(host_sym_ensure_dyn_capacity_locked(g_host_dyn_count + count) != 0){
+    module_unlock();
+    return -1;
+  }
+  for(i = 0; i < count; i++)
+    g_host_dyn_syms[g_host_dyn_count + i] = syms[i];
+  g_host_dyn_count += count;
+  module_unlock();
+  return 0;
+}
+
+int elf_loader_register_host_symbols_const(const elf_host_symbol_t *syms, int count)
+{
+  int i;
+
+  if(syms == 0 || count <= 0)
+    return -1;
+  for(i = 0; i < count; i++){
+    if(syms[i].name == 0 || syms[i].name[0] == 0 || syms[i].addr == 0)
+      return -1;
+  }
+
+  module_lock();
+  if(g_host_const_seg_count >= ELFLOADER_HOST_CONST_SEG_MAX ||
+     host_sym_total_count_locked() > (ELFLOADER_MAX_HOST_SYMBOLS - count)){
+    module_unlock();
+    return -1;
+  }
+  g_host_const_segs[g_host_const_seg_count].syms = syms;
+  g_host_const_segs[g_host_const_seg_count].count = count;
+  g_host_const_seg_count++;
   module_unlock();
   return 0;
 }

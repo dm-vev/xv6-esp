@@ -128,6 +128,11 @@ typedef struct {
   void *addr;
 } elf_export_t;
 
+typedef struct {
+  const elf_host_symbol_t *syms;
+  int count;
+} elf_host_sym_const_seg_t;
+
 struct elf_module {
   char name[ELFLOADER_NAME_MAX];
   uint16 etype;
@@ -168,8 +173,12 @@ extern elf_module_t g_modules[ELFLOADER_MAX_MODULES];
 extern int g_module_used[ELFLOADER_MAX_MODULES];
 extern uint32 g_module_generation;
 
-extern elf_host_symbol_t g_host_syms[ELFLOADER_MAX_HOST_SYMBOLS];
-extern int g_host_sym_count;
+#define ELFLOADER_HOST_CONST_SEG_MAX 8
+extern elf_host_sym_const_seg_t g_host_const_segs[ELFLOADER_HOST_CONST_SEG_MAX];
+extern int g_host_const_seg_count;
+extern elf_host_symbol_t *g_host_dyn_syms;
+extern int g_host_dyn_count;
+extern int g_host_dyn_cap;
 
 extern SemaphoreHandle_t g_module_mu;
 extern elf_call_ctx_t g_call_ctx[ELF_CALL_CTX_MAX];

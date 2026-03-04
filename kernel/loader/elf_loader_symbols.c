@@ -17,19 +17,42 @@ static void *resolve_local_symbol(elf_module_t *m, const elf32_sym_t *sym)
   return map_vaddr_data(m, sym->st_value);
 }
 
-void *resolve_host_symbol(const char *name)
+static void *resolve_host_symbol_exact_locked(const char *name)
 {
   int i;
+
+  for(i = g_host_dyn_count - 1; i >= 0; i--){
+    if(g_host_dyn_syms[i].addr != 0 && strcmp(name, g_host_dyn_syms[i].name) == 0)
+      return g_host_dyn_syms[i].addr;
+  }
+
+  for(i = g_host_const_seg_count - 1; i >= 0; i--){
+    const elf_host_sym_const_seg_t *seg = &g_host_const_segs[i];
+    int j;
+    if(seg->syms == 0 || seg->count <= 0)
+      continue;
+    for(j = seg->count - 1; j >= 0; j--){
+      if(seg->syms[j].addr != 0 && strcmp(name, seg->syms[j].name) == 0)
+        return seg->syms[j].addr;
+    }
+  }
+
+  return 0;
+}
+
+void *resolve_host_symbol(const char *name)
+{
+  void *addr = 0;
   char alt[ELFLOADER_NAME_MAX + 2];
 
   if(name == 0 || name[0] == 0)
     return 0;
 
-  for(i = g_host_sym_count - 1; i >= 0; i--){
-    if(strcmp(name, g_host_syms[i].name) == 0){
-      if(g_host_syms[i].addr != 0)
-        return g_host_syms[i].addr;
-    }
+  module_lock();
+  addr = resolve_host_symbol_exact_locked(name);
+  if(addr){
+    module_unlock();
+    return addr;
   }
 
   /*
@@ -38,20 +61,23 @@ void *resolve_host_symbol(const char *name)
    */
   if(name[0] == '_'){
     const char *trimmed = name + 1;
-    for(i = g_host_sym_count - 1; i >= 0; i--){
-      if(strcmp(trimmed, g_host_syms[i].name) == 0 && g_host_syms[i].addr != 0)
-        return g_host_syms[i].addr;
+    addr = resolve_host_symbol_exact_locked(trimmed);
+    if(addr){
+      module_unlock();
+      return addr;
     }
   } else {
     alt[0] = '_';
     strncpy(alt + 1, name, sizeof(alt) - 2);
     alt[sizeof(alt) - 1] = 0;
-    for(i = g_host_sym_count - 1; i >= 0; i--){
-      if(strcmp(alt, g_host_syms[i].name) == 0 && g_host_syms[i].addr != 0)
-        return g_host_syms[i].addr;
+    addr = resolve_host_symbol_exact_locked(alt);
+    if(addr){
+      module_unlock();
+      return addr;
     }
   }
 
+  module_unlock();
   return 0;
 }
 

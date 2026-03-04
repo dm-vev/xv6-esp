@@ -13,8 +13,11 @@ elf_module_t g_modules[ELFLOADER_MAX_MODULES];
 int g_module_used[ELFLOADER_MAX_MODULES];
 uint32 g_module_generation = 1;
 
-elf_host_symbol_t g_host_syms[ELFLOADER_MAX_HOST_SYMBOLS];
-int g_host_sym_count;
+elf_host_sym_const_seg_t g_host_const_segs[ELFLOADER_HOST_CONST_SEG_MAX];
+int g_host_const_seg_count;
+elf_host_symbol_t *g_host_dyn_syms;
+int g_host_dyn_count;
+int g_host_dyn_cap;
 
 SemaphoreHandle_t g_module_mu;
 elf_call_ctx_t g_call_ctx[ELF_CALL_CTX_MAX];

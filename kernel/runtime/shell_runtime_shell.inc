@@ -143,6 +143,11 @@ static void print_u32(uint32 v)
     putc_console(tmp[--i]);
 }
 
+static esp_err_t k_wifi_host_init_default(void)
+{
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  return esp_wifi_init(&cfg);
+}
 
 static int env_find_slot(const char *key)
 {
@@ -2193,6 +2198,23 @@ static int register_default_symbols(void)
     { "__xv6_posix_getsockname", (void *)k_posix_getsockname },
     { "getpeername", (void *)k_getpeername },
     { "__xv6_posix_getpeername", (void *)k_posix_getpeername },
+    { "xv6_wifi_host_init_default", (void *)k_wifi_host_init_default },
+    { "esp_netif_create_default_wifi_sta", (void *)esp_netif_create_default_wifi_sta },
+    { "esp_netif_destroy", (void *)esp_netif_destroy },
+    { "esp_event_handler_instance_register", (void *)esp_event_handler_instance_register },
+    { "esp_event_handler_instance_unregister", (void *)esp_event_handler_instance_unregister },
+    { "esp_wifi_set_storage", (void *)esp_wifi_set_storage },
+    { "esp_wifi_set_mode", (void *)esp_wifi_set_mode },
+    { "esp_wifi_start", (void *)esp_wifi_start },
+    { "esp_wifi_stop", (void *)esp_wifi_stop },
+    { "esp_wifi_connect", (void *)esp_wifi_connect },
+    { "esp_wifi_disconnect", (void *)esp_wifi_disconnect },
+    { "esp_wifi_set_config", (void *)esp_wifi_set_config },
+    { "esp_wifi_scan_start", (void *)esp_wifi_scan_start },
+    { "esp_wifi_scan_get_ap_num", (void *)esp_wifi_scan_get_ap_num },
+    { "esp_wifi_scan_get_ap_records", (void *)esp_wifi_scan_get_ap_records },
+    { "esp_wifi_sta_get_ap_info", (void *)esp_wifi_sta_get_ap_info },
+    { "esp_wifi_deinit", (void *)esp_wifi_deinit },
     { "stat", (void *)k_stat },
     { "__xv6_host_stat", (void *)k_stat },
     { "lstat", (void *)k_lstat },

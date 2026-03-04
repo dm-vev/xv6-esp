@@ -10,7 +10,7 @@
  * - Module lifecycle management
  *
  * Capacity limits:
- * - ELFLOADER_MAX_MODULES: Maximum loaded modules (32)
+ * - ELFLOADER_MAX_MODULES: Maximum loaded modules (16)
  * - ELFLOADER_MAX_EXPORTS: Maximum exports per module (96)
  * - ELFLOADER_NAME_MAX: Maximum symbol/module name length (32)
  * - ELFLOADER_MAX_HOST_SYMBOLS: Maximum host symbols (4096)
@@ -23,7 +23,7 @@
 /**
  * @brief Maximum number of simultaneously loaded modules
  */
-#define ELFLOADER_MAX_MODULES 32
+#define ELFLOADER_MAX_MODULES 16
 
 /**
  * @brief Maximum number of exported symbols per module
@@ -111,15 +111,26 @@ int elf_loader_init(void);
 int elf_loader_reset_host_symbols(void);
 
 /**
- * @brief Register host symbols
+ * @brief Register host symbols in the dynamic override table
  * @param syms Array of symbol entries
  * @param count Number of symbols
  * @return 0 on success, -1 on failure
  *
- * Adds symbols to the global host symbol table for
- * resolution by loaded modules.
+ * Copies symbols into a dynamic host-symbol array in RAM.
+ * Newer registrations take precedence over older ones.
  */
 int elf_loader_register_host_symbols(const elf_host_symbol_t *syms, int count);
+
+/**
+ * @brief Register host symbols as a constant base table
+ * @param syms Array of symbol entries with static lifetime
+ * @param count Number of symbols
+ * @return 0 on success, -1 on failure
+ *
+ * Registers a non-owning reference to a constant table (typically in flash).
+ * Later tables override earlier ones for duplicate names.
+ */
+int elf_loader_register_host_symbols_const(const elf_host_symbol_t *syms, int count);
 
 /**
  * @brief Load ELF from memory

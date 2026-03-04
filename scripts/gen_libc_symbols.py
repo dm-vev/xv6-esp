@@ -191,7 +191,7 @@ def render(
     lines.append("")
     lines.append("int ksh_register_libc_host_symbols(void)")
     lines.append("{")
-    lines.append("  return elf_loader_register_host_symbols(g_libc_host_syms,")
+    lines.append("  return elf_loader_register_host_symbols_const(g_libc_host_syms,")
     lines.append(
         "                                          "
         "(int)(sizeof(g_libc_host_syms) / sizeof(g_libc_host_syms[0])));"

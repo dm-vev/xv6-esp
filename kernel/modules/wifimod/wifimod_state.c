@@ -51,19 +51,29 @@ uint8_t wifi_get_reconnect_attempts(void)
 
 void wifi_get_config(char *ssid, char *password)
 {
-  if(ssid) strncpy(ssid, g_ssid, WIFI_SSID_MAX_LEN);
-  if(password) strncpy(password, g_password, WIFI_PASS_MAX_LEN);
+  if(ssid){
+    strncpy(ssid, g_ssid, WIFI_SSID_MAX_LEN);
+    ssid[WIFI_SSID_MAX_LEN] = 0;
+  }
+  if(password){
+    strncpy(password, g_password, WIFI_PASS_MAX_LEN);
+    password[WIFI_PASS_MAX_LEN] = 0;
+  }
 }
 
 void wifi_set_config(const char *ssid, const char *password)
 {
-  if(ssid){
+  if(ssid && ssid[0] != 0){
     strncpy(g_ssid, ssid, WIFI_SSID_MAX_LEN);
     g_ssid[WIFI_SSID_MAX_LEN] = 0;
+  } else {
+    g_ssid[0] = 0;
   }
-  if(password){
+  if(password && password[0] != 0){
     strncpy(g_password, password, WIFI_PASS_MAX_LEN);
     g_password[WIFI_PASS_MAX_LEN] = 0;
+  } else {
+    g_password[0] = 0;
   }
 }
 
