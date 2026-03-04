@@ -1033,6 +1033,110 @@ static int inode_truncate(uint32 inum, struct dinode *ip)
   return write_inode(inum, ip);
 }
 
+static uint32 inode_max_file_size(void)
+{
+  return (uint32)(NDIRECT + NINDIRECT) * BSIZE;
+}
+
+static int inode_resize(uint32 inum, struct dinode *ip, uint32 new_size)
+{
+  uint32 old_size;
+  uint32 keep_fbn;
+  uint32 i;
+  int ind_modified;
+  int ind_has_entries;
+  static const uint8 zero_blk[BSIZE] = { 0 };
+
+  if(ip == 0)
+    return -1;
+  old_size = inode_get_size(ip);
+  if(new_size == old_size)
+    return 0;
+  if(new_size > inode_max_file_size())
+    return -1;
+
+  if(new_size == 0)
+    return inode_truncate(inum, ip);
+
+  if(new_size > old_size){
+    uint32 off = old_size;
+    while(off < new_size){
+      uint32 take = new_size - off;
+      if(take > BSIZE)
+        take = BSIZE;
+      if(inode_write_range(ip, off, zero_blk, take) != 0)
+        return -1;
+      off += take;
+    }
+    return write_inode(inum, ip);
+  }
+
+  keep_fbn = (new_size + (BSIZE - 1u)) / BSIZE;
+  if((new_size % BSIZE) != 0u){
+    uint32 tail_fbn = new_size / BSIZE;
+    uint32 tail_bno = 0;
+    uint32 tail_off = new_size % BSIZE;
+    uint8 blk[BSIZE];
+
+    if(inode_get_or_alloc_block(ip, tail_fbn, 0, &tail_bno) == 0){
+      if(read_block(tail_bno, blk) != 0)
+        return -1;
+      memset(blk + tail_off, 0, BSIZE - tail_off);
+      if(write_block(tail_bno, blk) != 0)
+        return -1;
+    }
+  }
+
+  for(i = keep_fbn; i < NDIRECT; i++){
+    if(ip->addrs[i] == 0)
+      continue;
+    if(free_block(ip->addrs[i]) != 0)
+      return -1;
+    ip->addrs[i] = 0;
+  }
+
+  if(ip->addrs[NDIRECT] != 0){
+    uint8 iblk[BSIZE];
+    uint32 *indirect = (uint32 *)iblk;
+
+    if(read_block(ip->addrs[NDIRECT], iblk) != 0)
+      return -1;
+
+    ind_modified = 0;
+    for(i = 0; i < NINDIRECT; i++){
+      uint32 fbn = NDIRECT + i;
+      if(fbn < keep_fbn)
+        continue;
+      if(indirect[i] == 0)
+        continue;
+      if(free_block(indirect[i]) != 0)
+        return -1;
+      indirect[i] = 0;
+      ind_modified = 1;
+    }
+
+    ind_has_entries = 0;
+    for(i = 0; i < NINDIRECT; i++){
+      if(indirect[i] != 0){
+        ind_has_entries = 1;
+        break;
+      }
+    }
+
+    if(!ind_has_entries){
+      if(free_block(ip->addrs[NDIRECT]) != 0)
+        return -1;
+      ip->addrs[NDIRECT] = 0;
+    } else if(ind_modified){
+      if(write_block(ip->addrs[NDIRECT], iblk) != 0)
+        return -1;
+    }
+  }
+
+  inode_set_size(ip, new_size);
+  return write_inode(inum, ip);
+}
+
 static void inode_reclaim_orphan_locked(uint32 inum)
 {
   struct dinode ip;
@@ -1567,6 +1671,89 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
     rc = 0;
     goto out;
   }
+
+out:
+  vfs_unlock();
+  if(rc != 0)
+    task_ctx_set_errno(err);
+  return rc;
+}
+
+int xv6fs_list_fd(int fd, int index, char *name_out, int name_out_len, uint16 *type_out, uint32 *size_out)
+{
+  int real_fd = stdio_map_fd(fd);
+  struct dinode dir;
+  uint32 off;
+  uint32 dir_sz;
+  int seen = 0;
+  int rc = -1;
+  int err = EBADF;
+
+  task_ctx_clear_errno();
+  if(index < 0 || name_out == 0 || name_out_len <= 1){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(!g_ready){
+    task_ctx_set_errno(ENODEV);
+    return -1;
+  }
+  if(real_fd < 0 || real_fd >= XV6_MAX_FD){
+    task_ctx_set_errno(EBADF);
+    return -1;
+  }
+
+  vfs_lock();
+  if(!g_fds[real_fd].used){
+    err = EBADF;
+    goto out;
+  }
+  if(g_fds[real_fd].kind != VFD_FILE){
+    err = EBADF;
+    goto out;
+  }
+  if(read_inode(g_fds[real_fd].inum, &dir) != 0){
+    err = EIO;
+    goto out;
+  }
+  if(dir.type != T_DIR){
+    err = ENOTDIR;
+    goto out;
+  }
+  dir_sz = inode_get_size(&dir);
+
+  for(off = 0; off + sizeof(struct dirent) <= dir_sz; off += sizeof(struct dirent)){
+    struct dirent de;
+    struct dinode ent;
+    char name[DIRSIZ + 1];
+    if(inode_read_range(&dir, off, &de, sizeof(de)) != 0){
+      err = EIO;
+      goto out;
+    }
+    if(de.inum == 0)
+      continue;
+    memset(name, 0, sizeof(name));
+    memcpy(name, de.name, DIRSIZ);
+    if(strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+      continue;
+    if(seen++ != index)
+      continue;
+
+    strncpy(name_out, name, name_out_len - 1);
+    name_out[name_out_len - 1] = 0;
+    if(read_inode(de.inum, &ent) != 0){
+      err = EIO;
+      goto out;
+    }
+    if(type_out)
+      *type_out = ent.type;
+    if(size_out)
+      *size_out = inode_get_size(&ent);
+    rc = 0;
+    goto out;
+  }
+
+  err = ENOENT;
 
 out:
   vfs_unlock();
@@ -2731,6 +2918,121 @@ int xv6_set_status_flags(int fd, int status_flags)
   }
   vfs_unlock();
   return 0;
+}
+
+int xv6_ftruncate(int fd, long long length)
+{
+  int real_fd = stdio_map_fd(fd);
+  uint32 inum;
+  uint32 new_size;
+  struct dinode ip;
+  int err = EINVAL;
+
+  task_ctx_clear_errno();
+  if(length < 0){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if((uint64)length > inode_max_file_size()){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(real_fd < 0 || real_fd >= XV6_MAX_FD){
+    task_ctx_set_errno(EBADF);
+    return -1;
+  }
+  new_size = (uint32)length;
+
+  vfs_lock();
+  if(!g_fds[real_fd].used){
+    err = EBADF;
+    goto out_fail;
+  }
+  if(g_fds[real_fd].kind != VFD_FILE){
+    err = EBADF;
+    goto out_fail;
+  }
+
+  inum = g_fds[real_fd].inum;
+  if(read_inode(inum, &ip) != 0){
+    err = EIO;
+    goto out_fail;
+  }
+  if(ip.type != T_FILE){
+    err = EISDIR;
+    goto out_fail;
+  }
+  if(inode_resize(inum, &ip, new_size) != 0){
+    err = EIO;
+    goto out_fail;
+  }
+  if(fd_group_get_off_locked(real_fd) > new_size)
+    fd_group_set_off_locked(real_fd, new_size);
+  vfs_unlock();
+  return 0;
+
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
+}
+
+int xv6_truncate_path(const char *path, long long length)
+{
+  char abs_path[VFS_PATH_MAX];
+  char resolved_path[VFS_PATH_MAX];
+  uint32 inum;
+  uint32 new_size;
+  struct dinode ip;
+  int err = EINVAL;
+
+  task_ctx_clear_errno();
+  if(path == 0 || !g_ready){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(length < 0){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if((uint64)length > inode_max_file_size()){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
+  new_size = (uint32)length;
+
+  vfs_lock();
+  if(path_resolve_final_symlink_locked(abs_path, resolved_path, sizeof(resolved_path)) != 0){
+    err = (xv6_last_errno() == ELOOP) ? ELOOP : ENOENT;
+    goto out_fail;
+  }
+  if(is_dev_node(resolved_path)){
+    err = EINVAL;
+    goto out_fail;
+  }
+  if(path_lookup(resolved_path, &inum, &ip) != 0){
+    err = ENOENT;
+    goto out_fail;
+  }
+  if(ip.type != T_FILE){
+    err = EISDIR;
+    goto out_fail;
+  }
+  if(inode_resize(inum, &ip, new_size) != 0){
+    err = EIO;
+    goto out_fail;
+  }
+  vfs_unlock();
+  return 0;
+
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
 }
 
 int xv6_dup(int fd)

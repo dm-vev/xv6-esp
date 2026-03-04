@@ -7,6 +7,8 @@
 
 #include "wifimod.h"
 
+typedef struct esp_netif_obj esp_netif_t;
+
 void wifi_lock(void);
 void wifi_unlock(void);
 
@@ -20,10 +22,11 @@ uint8_t wifi_get_reconnect_attempts(void);
 void wifi_get_config(char *ssid, char *password);
 void wifi_set_config(const char *ssid, const char *password);
 
-void *wifi_get_netif(void);
-void wifi_set_netif(void *netif);
+esp_netif_t *wifi_get_netif(void);
+void wifi_set_netif(esp_netif_t *netif);
 
 int wifi_is_trace_enabled(void);
+void wifi_set_trace_enabled(int enabled);
 void wifi_trace(const char *fmt, ...);
 
 #endif

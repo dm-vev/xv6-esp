@@ -1,4 +1,5 @@
 #include "loader/elf_loader_internal.h"
+#include <errno.h>
 
 /*
  * POSIX-like dynamic loading facade over loader core structures.
@@ -96,7 +97,13 @@ void *dlopen(const char *file, int mode)
   module_unlock();
 
   if(xv6fs_read_file_alloc_path(file, &image, &image_size) != 0 || image == 0){
-    set_dlerror("dlopen: file not found");
+    int err = xv6_last_errno();
+    if(err == ENOMEM)
+      set_dlerror("dlopen: no memory");
+    else if(err == ENOENT)
+      set_dlerror("dlopen: file not found");
+    else
+      set_dlerror("dlopen: read failed");
     return 0;
   }
 

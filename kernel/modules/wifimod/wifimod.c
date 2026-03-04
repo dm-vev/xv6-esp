@@ -1,17 +1,17 @@
 #include "wifimod.h"
+#include "wifimod_events.h"
 #include "wifimod_state.h"
 #include "wifimod_wifi.h"
 
-#include "xv6_module.h"
+#include <string.h>
 
-static int g_trace_verbose = 1;
+#include "xv6_module.h"
 
 int wifi_kmod_connect(const char *ssid, const char *password)
 {
   esp_err_t err;
   
   if(!ssid || strlen(ssid) == 0 || strlen(ssid) > WIFI_SSID_MAX_LEN){
-    errno = EINVAL;
     return -1;
   }
   
@@ -20,14 +20,12 @@ int wifi_kmod_connect(const char *ssid, const char *password)
     err = wifi_init_driver();
     if(err != ESP_OK && err != ESP_ERR_INVALID_STATE){
       wifi_trace("init driver failed: %d", err);
-      errno = EIO;
       return -1;
     }
     
     err = wifi_events_register();
     if(err != ESP_OK){
       wifi_trace("register events failed: %d", err);
-      errno = EIO;
       return -1;
     }
   }
@@ -38,7 +36,6 @@ int wifi_kmod_connect(const char *ssid, const char *password)
   
   if(err != ESP_OK){
     wifi_trace("connect failed: %d", err);
-    errno = EIO;
     return -1;
   }
   
@@ -55,7 +52,6 @@ int wifi_kmod_disconnect(void)
   wifi_unlock();
   
   if(err != ESP_OK && err != ESP_ERR_INVALID_STATE){
-    errno = EIO;
     return -1;
   }
   
@@ -71,7 +67,6 @@ int wifi_kmod_scan(const char *ssid, ap_info_t *ap_list, int max_count, int *fou
   esp_err_t err;
   
   if(!ap_list || !found){
-    errno = EINVAL;
     return -1;
   }
   
@@ -124,7 +119,6 @@ int wifi_kmod_get_rssi(int *rssi)
   esp_err_t err;
   
   if(!rssi){
-    errno = EINVAL;
     return -1;
   }
   
@@ -139,15 +133,14 @@ int wifi_kmod_get_rssi(int *rssi)
 
 int wifi_kmod_set_trace(int enabled)
 {
-  g_trace_verbose = enabled ? 1 : 0;
+  wifi_set_trace_enabled(enabled);
   return 0;
 }
 
 int xv6_module_init(void)
 {
   wifi_lock();
-  memset(&g_trace_verbose, 0, sizeof(g_trace_verbose));
-  g_trace_verbose = 1;
+  wifi_set_trace_enabled(1);
   wifi_set_state(WIFI_STATE_DOWN);
   wifi_reset_reconnect();
   wifi_unlock();

@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -236,7 +237,7 @@ int main(void)
     errno = 0;
     d = fdopendir(fd);
     err = errno;
-    probe("fdopendir", d == 0 && err == ENOSYS, (d == 0) ? -1 : 0, err);
+    probe("fdopendir", d != 0 && err == 0, (d == 0) ? -1 : 0, (d == 0) ? err : 0);
     if(d)
       closedir(d);
     else
@@ -247,16 +248,29 @@ int main(void)
   if(fd >= 0)
     close(fd);
 
+  fd = open("/tmp/probe_nosys", O_WRONLY | O_TRUNC);
+  if(fd >= 0){
+    (void)write(fd, "abc", 3);
+    close(fd);
+  }
+
   errno = 0;
   rc = truncate("/tmp/probe_nosys", 0);
   err = errno;
-  probe("truncate_nosys", rc < 0 && err == ENOSYS, (rc < 0) ? -1 : 0, err);
+  if(rc == 0){
+    struct stat st;
+    if(stat("/tmp/probe_nosys", &st) != 0)
+      rc = -1;
+    else if(st.st_size != 0)
+      rc = -1;
+  }
+  probe("truncate_zero", rc == 0 && err == 0, (rc < 0) ? -1 : 0, (rc < 0) ? err : 0);
 
   memset(tv, 0, sizeof(tv));
   errno = 0;
   rc = utimes("/tmp/probe_nosys", tv);
   err = errno;
-  probe("utimes_nosys", rc < 0 && err == ENOSYS, (rc < 0) ? -1 : 0, err);
+  probe("utimes_ok", rc == 0 && err == 0, (rc < 0) ? -1 : 0, (rc < 0) ? err : 0);
 
   errno = 0;
   rc = (isspace(' ') && isdigit('7') && isxdigit('f') && !isspace('A') && !isdigit('x')) ? 0 : -1;

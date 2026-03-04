@@ -36,7 +36,8 @@ static int kmod_unload_slot_locked(int idx, int force)
 
   rc = dlclose(slot.handle);
   if(rc != 0){
-    set_last_error("kmod unload: %s", dlerror() ? dlerror() : "dlclose failed");
+    const char *dl_err = dlerror();
+    set_last_error("kmod unload: %s", dl_err ? dl_err : "dlclose failed");
     return -1;
   }
 

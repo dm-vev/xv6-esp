@@ -3,7 +3,7 @@
  * @brief POSIX directory entry API for xv6 host environment
  *
  * This header provides directory streaming operations for reading directory
- * contents in a POSIX-compatible way. Uses xv6's path-based iteration internally.
+ * contents in a POSIX-compatible way. Supports path-based and fd-based iteration.
  */
 #ifndef XV6_HOSTABI_DIRENT_H
 #define XV6_HOSTABI_DIRENT_H
@@ -67,8 +67,8 @@ int hostabi_dirfd(DIR *dirp);
  * @param fd File descriptor
  * @return DIR pointer on success, NULL on failure
  *
- * Opens a directory from an existing file descriptor.
- * Currently not implemented - returns NULL with errno = ENOSYS.
+ * Opens a directory from an existing file descriptor. On success,
+ * the returned DIR stream owns the descriptor and closedir() closes it.
  */
 DIR *hostabi_fdopendir(int fd);
 

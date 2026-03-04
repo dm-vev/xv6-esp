@@ -1,13 +1,9 @@
 #include "wifimod.h"
 #include "wifimod_state.h"
-#include "wifimod_events.h"
 
-#include "esp_err.h"
-#include "esp_wifi.h"
-#include "esp_netif.h"
-#include "esp_event.h"
-
-#include "xv6_module.h"
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
 
 static volatile int g_lock;
 static wifi_state_t g_state = WIFI_STATE_DOWN;
@@ -84,6 +80,11 @@ void wifi_set_netif(esp_netif_t *netif)
 int wifi_is_trace_enabled(void)
 {
   return g_trace_verbose;
+}
+
+void wifi_set_trace_enabled(int enabled)
+{
+  g_trace_verbose = enabled ? 1 : 0;
 }
 
 void wifi_trace(const char *fmt, ...)

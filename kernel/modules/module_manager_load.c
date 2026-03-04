@@ -119,7 +119,8 @@ static int kmod_load_internal_locked(const char *path, int priority, int as_depe
 
   handle = dlopen(path, RTLD_NOW);
   if(handle == 0){
-    set_last_error("kmod load: %s", dlerror() ? dlerror() : "dlopen failed");
+    const char *dl_err = dlerror();
+    set_last_error("kmod load: %s", dl_err ? dl_err : "dlopen failed");
     goto fail;
   }
 

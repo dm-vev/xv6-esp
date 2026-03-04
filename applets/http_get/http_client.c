@@ -1,15 +1,39 @@
 #include "http_client.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 #include <errno.h>
 
+#include "xv6_socket_compat.h"
+
 #define RECV_BUF_SIZE 8192
+
+static unsigned short host_to_be16(unsigned short v)
+{
+  return (unsigned short)((v >> 8) | (v << 8));
+}
+
+static unsigned int host_to_be32(unsigned int v)
+{
+  return ((v & 0x000000ffu) << 24) | ((v & 0x0000ff00u) << 8) | ((v & 0x00ff0000u) >> 8) |
+         ((v & 0xff000000u) >> 24);
+}
+
+static int parse_ipv4_host(const char *host, unsigned int *out_be_addr)
+{
+  unsigned int a, b, c, d;
+  char tail = 0;
+
+  if(host == NULL || out_be_addr == NULL)
+    return -1;
+  if(sscanf(host, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4)
+    return -1;
+  if(a > 255u || b > 255u || c > 255u || d > 255u)
+    return -1;
+
+  *out_be_addr = host_to_be32((a << 24) | (b << 16) | (c << 8) | d);
+  return 0;
+}
 
 static int http_send_request(int sock, const char *host, const char *path)
 {
@@ -72,24 +96,26 @@ static int http_read_response(int sock, FILE *out)
 int http_client_get(const char *host, int port, const char *path, FILE *out)
 {
   int sock;
-  struct hostent *he;
   struct sockaddr_in sa;
+  unsigned int be_addr;
   
   if(!host || !path)
     return -1;
-    
-  he = gethostbyname(host);
-  if(he == NULL)
+
+  if(parse_ipv4_host(host, &be_addr) != 0){
+    errno = EINVAL;
     return -1;
+  }
     
   sock = socket(AF_INET, SOCK_STREAM, 0);
   if(sock < 0)
     return -1;
     
   memset(&sa, 0, sizeof(sa));
+  sa.sin_len = (uint8_t)sizeof(sa);
   sa.sin_family = AF_INET;
-  sa.sin_port = htons((uint16_t)port);
-  memcpy(&sa.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
+  sa.sin_port = host_to_be16((unsigned short)port);
+  sa.sin_addr.s_addr = be_addr;
   
   if(connect(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0){
     close(sock);

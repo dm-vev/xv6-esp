@@ -3,9 +3,7 @@
  * @brief Implementation of POSIX directory entry operations
  *
  * This file implements directory streaming operations for reading directory
- * contents. Uses xv6's path-based iteration (xv6fs_list_path) internally,
- * making it robust even when the underlying filesystem doesn't support
- * directory file descriptors.
+ * contents. Supports both path-based and fd-based directory iteration.
  */
 #include "hostabi/hostabi_dirent.h"
 
@@ -55,6 +53,7 @@ typedef struct {
   uint32 magic;        /**< Validation magic (HOSTABI_DIR_MAGIC) */
   int fd;             /**< Directory fd (may be -1) */
   int index;          /**< Current entry index */
+  int use_fd_iter;    /**< 1 when opened via fdopendir */
   char path[MAXPATH]; /**< Original directory path */
   struct dirent ent;  /**< Current directory entry */
 } hostabi_dir_t;
@@ -155,9 +154,9 @@ DIR *hostabi_opendir(const char *path)
  * @param dirp Directory stream
  * @return dirent on success, NULL on EOF or error
  *
- * Calls xv6fs_list_path with the stored path and current index,
- * then increments the index. Returns NULL on EOF (xv6fs_list_path
- * returns non-zero) with errno cleared.
+ * Uses either path-based or fd-based listing depending on how the stream
+ * was opened, then increments the index. Returns NULL on EOF with errno
+ * cleared. On hard failure, errno is preserved.
  */
 struct dirent *hostabi_readdir(DIR *dirp)
 {
@@ -165,13 +164,23 @@ struct dirent *hostabi_readdir(DIR *dirp)
   char name[256];
   uint16 type = 0;
   uint32 size = 0;
+  int err;
+  int rc;
 
   if(d == 0 || d->magic != HOSTABI_DIR_MAGIC){
     errno = EBADF;
     return 0;
   }
-  if(xv6fs_list_path(d->path, d->index, name, sizeof(name), &type, &size) != 0){
-    errno = 0;
+  if(d->use_fd_iter)
+    rc = xv6fs_list_fd(d->fd, d->index, name, sizeof(name), &type, &size);
+  else
+    rc = xv6fs_list_path(d->path, d->index, name, sizeof(name), &type, &size);
+  if(rc != 0){
+    err = xv6_last_errno();
+    if(err == ENOENT)
+      errno = 0;
+    else
+      errno = (err > 0) ? err : EIO;
     return 0;
   }
 
@@ -244,13 +253,38 @@ int hostabi_dirfd(DIR *dirp)
 /**
  * @brief Open directory from fd
  * @param fd File descriptor
- * @return NULL (not implemented)
- *
- * Not implemented - returns NULL with errno = ENOSYS.
+ * @return DIR pointer on success, NULL on failure
  */
 DIR *hostabi_fdopendir(int fd)
 {
-  (void)fd;
-  errno = ENOSYS;
-  return 0;
+  hostabi_dir_t *d;
+  xv6_kstat_t st;
+
+  fd = hostabi_posix_fs_map_fd(fd);
+  if(fd < 0){
+    errno = EBADF;
+    return 0;
+  }
+  if(xv6_fstat(fd, &st) != 0){
+    errno = xv6_last_errno();
+    if(errno <= 0)
+      errno = EBADF;
+    return 0;
+  }
+  if(st.type != XV6_KSTAT_T_DIR){
+    errno = ENOTDIR;
+    return 0;
+  }
+
+  d = (hostabi_dir_t *)calloc(1, sizeof(*d));
+  if(d == 0){
+    errno = ENOMEM;
+    return 0;
+  }
+  d->magic = HOSTABI_DIR_MAGIC;
+  d->fd = fd;
+  d->index = 0;
+  d->use_fd_iter = 1;
+  d->path[0] = 0;
+  return (DIR *)d;
 }

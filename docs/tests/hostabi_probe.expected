@@ -20,9 +20,9 @@ PROBE unlockpt rc=0 errno=OK
 PROBE ptsname_r_small rc=-1 errno=ERANGE
 PROBE ptsname_r_ok rc=0 errno=OK
 PROBE posix_openpt_rdonly rc=-1 errno=EINVAL
-PROBE fdopendir rc=-1 errno=ENOSYS
-PROBE truncate_nosys rc=-1 errno=ENOSYS
-PROBE utimes_nosys rc=-1 errno=ENOSYS
+PROBE fdopendir rc=0 errno=OK
+PROBE truncate_zero rc=0 errno=OK
+PROBE utimes_ok rc=0 errno=OK
 PROBE ctype_ascii rc=0 errno=OK
 PROBE chown_ok rc=0 errno=OK
 PROBE SUMMARY failures=0

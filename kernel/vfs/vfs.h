@@ -104,6 +104,18 @@ int xv6fs_list_path(const char *path, int index, char *name_out, int name_out_le
                     uint32 *size_out);
 
 /**
+ * @brief List directory contents by open descriptor
+ * @param fd Directory file descriptor
+ * @param index Entry index
+ * @param name_out Buffer for entry name
+ * @param name_out_len Buffer size
+ * @param type_out Pointer for file type
+ * @param size_out Pointer for file size
+ * @return 0 on success, -1 on error/EOF
+ */
+int xv6fs_list_fd(int fd, int index, char *name_out, int name_out_len, uint16 *type_out, uint32 *size_out);
+
+/**
  * @brief Write data to file (only for /dev/xxx special files)
  * @param path File path
  * @param data Data to write
@@ -222,6 +234,22 @@ int xv6_lseek(int fd, int offset, int whence);
  * @return 0 on success, -1 on failure
  */
 int xv6_set_status_flags(int fd, int status_flags);
+
+/**
+ * @brief Resize file referenced by descriptor
+ * @param fd File descriptor
+ * @param length New file length in bytes
+ * @return 0 on success, -1 on failure
+ */
+int xv6_ftruncate(int fd, long long length);
+
+/**
+ * @brief Resize file referenced by path
+ * @param path File path (final symlink followed)
+ * @param length New file length in bytes
+ * @return 0 on success, -1 on failure
+ */
+int xv6_truncate_path(const char *path, long long length);
 
 /**
  * @brief Change current working directory

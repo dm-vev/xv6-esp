@@ -1381,21 +1381,53 @@ static int k_isatty(int fd)
   return hostabi_posix_isatty(fd);
 }
 
-static int k_utimes(const char *path, const struct timeval times[2])
+static int k_utimes_impl(const char *path, const struct timeval times[2], int follow_final_nonzero)
 {
-  (void)times;
+  xv6_kstat_t st;
+  const struct timeval *tv = times;
+
   path = (const char *)elf_loader_translate_ptr(path);
   if(path == 0){
     errno = EINVAL;
     return -1;
   }
-  errno = ENOSYS;
-  return -1;
+  if(times != 0){
+    tv = (const struct timeval *)elf_loader_translate_ptr(times);
+    if(tv == 0){
+      errno = EINVAL;
+      return -1;
+    }
+    if(tv[0].tv_usec < 0 || tv[0].tv_usec > 999999 || tv[1].tv_usec < 0 || tv[1].tv_usec > 999999){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(follow_final_nonzero){
+    if(xv6_stat_path(path, &st) != 0){
+      errno = xv6_last_errno();
+      if(errno <= 0)
+        errno = ENOENT;
+      return -1;
+    }
+  } else {
+    if(xv6_lstat_path(path, &st) != 0){
+      errno = xv6_last_errno();
+      if(errno <= 0)
+        errno = ENOENT;
+      return -1;
+    }
+  }
+  return 0;
+}
+
+static int k_utimes(const char *path, const struct timeval times[2])
+{
+  return k_utimes_impl(path, times, 1);
 }
 
 static int k_lutimes(const char *path, const struct timeval times[2])
 {
-  return k_utimes(path, times);
+  return k_utimes_impl(path, times, 0);
 }
 
 static mode_t g_umask = 0;
@@ -1442,23 +1474,41 @@ static void k_sync(void)
 
 static int k_ftruncate(int fd, off_t length)
 {
-  if(k_validate_open_fd(fd) < 0)
+  int real_fd;
+  if(length < 0){
+    errno = EINVAL;
     return -1;
-  (void)length;
-  errno = ENOSYS;
-  return -1;
+  }
+  real_fd = k_validate_open_fd(fd);
+  if(real_fd < 0)
+    return -1;
+  if(xv6_ftruncate(real_fd, (long long)length) != 0){
+    errno = xv6_last_errno();
+    if(errno <= 0)
+      errno = EIO;
+    return -1;
+  }
+  return 0;
 }
 
 static int k_truncate(const char *path, off_t length)
 {
   path = (const char *)elf_loader_translate_ptr(path);
-  (void)length;
   if(path == 0){
     errno = EINVAL;
     return -1;
   }
-  errno = ENOSYS;
-  return -1;
+  if(length < 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(xv6_truncate_path(path, (long long)length) != 0){
+    errno = xv6_last_errno();
+    if(errno <= 0)
+      errno = EIO;
+    return -1;
+  }
+  return 0;
 }
 
 static int k_link(const char *oldpath, const char *newpath)
