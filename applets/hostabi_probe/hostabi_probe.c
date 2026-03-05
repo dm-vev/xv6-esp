@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 extern int ioctl(int fd, unsigned long request, ...);
@@ -17,6 +18,25 @@ extern int unlockpt(int fd);
 extern int ptsname_r(int fd, char *buf, size_t buflen);
 extern DIR *fdopendir(int fd);
 extern int dirfd(DIR *dirp);
+extern int shrt_eval_line(const char *line, int *exit_code);
+extern int waitid(int idtype, int id, void *infop, int options);
+
+#ifndef WEXITED
+#define WEXITED 4
+#endif
+#ifndef WNOWAIT
+#define WNOWAIT 0x01000000
+#endif
+#ifndef P_ALL
+#define P_ALL 0
+#endif
+
+typedef struct {
+  int si_signo;
+  int si_pid;
+  int si_code;
+  int si_status;
+} k_waitid_siginfo_t;
 
 static int g_failures = 0;
 
@@ -41,6 +61,8 @@ static const char *err_name(int err)
     return "ERANGE";
   case ENOSYS:
     return "ENOSYS";
+  case ECHILD:
+    return "ECHILD";
   case ESPIPE:
     return "ESPIPE";
   default:
@@ -68,6 +90,12 @@ int main(void)
   int mfd;
   int dfd;
   struct timeval tv[2];
+  unsigned char si_buf[128];
+  k_waitid_siginfo_t *si = (k_waitid_siginfo_t *)si_buf;
+  pid_t pid;
+  int status;
+  int shell_rc;
+  int shell_exit = 0;
 
   errno = 0;
   fd = open("/no/such/path", O_RDONLY);
@@ -279,6 +307,53 @@ int main(void)
   err = errno;
   probe("chown_ok", rc == 0 && err == 0, (rc < 0) ? -1 : 0, err);
   (void)unlink("/tmp/probe_nosys");
+
+  errno = 0;
+  pid = waitpid((pid_t)-1, &status, WNOHANG);
+  err = errno;
+  probe("waitpid_nochild", pid < 0 && err == ECHILD, (pid < 0) ? -1 : 0, err);
+
+  memset(si_buf, 0, sizeof(si_buf));
+  errno = 0;
+  rc = waitid(P_ALL, 0, si_buf, 0);
+  err = errno;
+  probe("waitid_badopts", rc < 0 && err == EINVAL, (rc < 0) ? -1 : 0, err);
+
+  memset(si_buf, 0, sizeof(si_buf));
+  errno = 0;
+  rc = waitid(99, 0, si_buf, WEXITED | WNOHANG);
+  err = errno;
+  probe("waitid_badidtype", rc < 0 && err == EINVAL, (rc < 0) ? -1 : 0, err);
+
+  errno = 0;
+  shell_rc = shrt_eval_line("sleep 1 &", &shell_exit);
+  err = errno;
+  probe("wait_spawn_sleep_bg", shell_rc == 0 && shell_exit == 0, (shell_rc < 0) ? -1 : 0, (shell_rc < 0) ? err : 0);
+
+  if(shell_rc == 0){
+    memset(si_buf, 0, sizeof(si_buf));
+    errno = 0;
+    rc = waitid(P_ALL, 0, si_buf, WEXITED | WNOWAIT);
+    err = errno;
+    probe("waitid_exit_wnowait", rc == 0 && err == 0, (rc < 0) ? -1 : 0, (rc < 0) ? err : 0);
+
+    errno = 0;
+    pid = waitpid((pid_t)-1, &status, 0);
+    err = errno;
+    probe("waitpid_reap_after_wnowait",
+          pid > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          (pid < 0) ? -1 : 0,
+          (pid < 0) ? err : 0);
+  } else {
+    probe("waitid_exit_wnowait", 0, -1, err);
+    probe("waitpid_reap_after_wnowait", 0, -1, err);
+  }
+
+  memset(si_buf, 0, sizeof(si_buf));
+  errno = 0;
+  rc = waitid(P_ALL, 0, si_buf, WEXITED | WNOHANG);
+  err = errno;
+  probe("waitid_nochild", rc < 0 && err == ECHILD, (rc < 0) ? -1 : 0, err);
 
   printf("PROBE SUMMARY failures=%d\n", g_failures);
   return (g_failures == 0) ? 0 : 1;

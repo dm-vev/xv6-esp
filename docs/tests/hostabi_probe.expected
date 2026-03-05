@@ -25,4 +25,11 @@ PROBE truncate_zero rc=0 errno=OK
 PROBE utimes_ok rc=0 errno=OK
 PROBE ctype_ascii rc=0 errno=OK
 PROBE chown_ok rc=0 errno=OK
+PROBE waitpid_nochild rc=-1 errno=ECHILD
+PROBE waitid_badopts rc=-1 errno=EINVAL
+PROBE waitid_badidtype rc=-1 errno=EINVAL
+PROBE wait_spawn_sleep_bg rc=0 errno=OK
+PROBE waitid_exit_wnowait rc=0 errno=OK
+PROBE waitpid_reap_after_wnowait rc=0 errno=OK
+PROBE waitid_nochild rc=-1 errno=ECHILD
 PROBE SUMMARY failures=0
