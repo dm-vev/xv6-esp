@@ -19,6 +19,54 @@ static int shell_allow_ctrl_c_poll(void)
 #define POLLHUP 0x0010
 #endif
 
+#ifndef WNOHANG
+#define WNOHANG 1
+#endif
+#ifndef WUNTRACED
+#define WUNTRACED 2
+#endif
+#ifndef WCONTINUED
+#define WCONTINUED 8
+#endif
+#ifndef WEXITED
+#define WEXITED 4
+#endif
+#ifndef WSTOPPED
+#define WSTOPPED WUNTRACED
+#endif
+#ifndef WNOWAIT
+#define WNOWAIT 0x01000000
+#endif
+
+#ifndef P_ALL
+#define P_ALL 0
+#endif
+#ifndef P_PID
+#define P_PID 1
+#endif
+#ifndef P_PGID
+#define P_PGID 2
+#endif
+
+#ifndef CLD_EXITED
+#define CLD_EXITED 1
+#endif
+#ifndef CLD_KILLED
+#define CLD_KILLED 2
+#endif
+#ifndef CLD_DUMPED
+#define CLD_DUMPED 3
+#endif
+#ifndef CLD_TRAPPED
+#define CLD_TRAPPED 4
+#endif
+#ifndef CLD_STOPPED
+#define CLD_STOPPED 5
+#endif
+#ifndef CLD_CONTINUED
+#define CLD_CONTINUED 6
+#endif
+
 static void k_copy_cstr(char *dst, int dst_len, const char *src)
 {
   if(dst == 0 || dst_len <= 0)
@@ -2302,6 +2350,303 @@ static int k_tty_signal_handler(int sig)
   return k_kill(-fg_pgid, sig);
 }
 
+enum {
+  K_WAIT_EVENT_NONE = 0,
+  K_WAIT_EVENT_EXITED,
+  K_WAIT_EVENT_STOPPED,
+  K_WAIT_EVENT_CONTINUED,
+};
+
+static int k_wait_encode_status_locked(const ksh_job_t *job, int event)
+{
+  int sig;
+
+  if(job == 0)
+    return 0;
+  switch(event){
+  case K_WAIT_EVENT_EXITED:
+    if(job->reason == JOB_REASON_KILLED){
+      sig = 0;
+      if(job->exit_code >= 128 && job->exit_code < (128 + KSH_SIG_MAX))
+        sig = job->exit_code - 128;
+      if(sig <= 0 || sig >= KSH_SIG_MAX)
+        sig = SIGKILL;
+      return sig & 0x7f;
+    }
+    return (job->exit_code & 0xff) << 8;
+  case K_WAIT_EVENT_STOPPED:
+    return ((SIGTSTP & 0xff) << 8) | 0x7f;
+  case K_WAIT_EVENT_CONTINUED:
+    return 0xffff;
+  default:
+    return 0;
+  }
+}
+
+static int k_waitpid_match_child_locked(const ksh_job_t *job, int self_pid, int self_pgid, pid_t pid)
+{
+  if(job == 0 || !job->used)
+    return 0;
+  if(job->ppid != self_pid)
+    return 0;
+  if(pid > 0)
+    return job->pid == (int)pid;
+  if(pid == 0)
+    return job->pgid == self_pgid;
+  if(pid == (pid_t)-1)
+    return 1;
+  if(pid < (pid_t)-1)
+    return job->pgid == (int)(-pid);
+  return 0;
+}
+
+static int k_waitid_match_child_locked(const ksh_job_t *job, int self_pid, int self_pgid, int idtype, int id)
+{
+  if(job == 0 || !job->used)
+    return 0;
+  if(job->ppid != self_pid)
+    return 0;
+  switch(idtype){
+  case P_ALL:
+    return 1;
+  case P_PID:
+    return job->pid == id;
+  case P_PGID:
+    if(id == 0)
+      return job->pgid == self_pgid;
+    return job->pgid == id;
+  default:
+    return 0;
+  }
+}
+
+static int k_wait_pick_event_locked(const ksh_job_t *job, int want_exit, int want_stop, int want_cont)
+{
+  if(job == 0 || !job->used)
+    return K_WAIT_EVENT_NONE;
+  if(want_exit && job->done && job->wait_pending_exit)
+    return K_WAIT_EVENT_EXITED;
+  if(want_stop && !job->done && job->wait_pending_stop)
+    return K_WAIT_EVENT_STOPPED;
+  if(want_cont && !job->done && !job->stopped && job->wait_pending_cont)
+    return K_WAIT_EVENT_CONTINUED;
+  return K_WAIT_EVENT_NONE;
+}
+
+static void k_wait_fill_siginfo(siginfo_t *si, int pid, int event, int status)
+{
+  if(si == 0)
+    return;
+  memset(si, 0, sizeof(*si));
+  si->si_signo = SIGCHLD;
+  si->si_pid = (pid_t)pid;
+  switch(event){
+  case K_WAIT_EVENT_STOPPED:
+    si->si_code = CLD_STOPPED;
+    si->si_status = (status >> 8) & 0xff;
+    break;
+  case K_WAIT_EVENT_CONTINUED:
+    si->si_code = CLD_CONTINUED;
+    si->si_status = SIGCONT;
+    break;
+  case K_WAIT_EVENT_EXITED:
+  default:
+    if((status & 0x7f) == 0){
+      si->si_code = CLD_EXITED;
+      si->si_status = (status >> 8) & 0xff;
+    } else {
+      si->si_code = CLD_KILLED;
+      si->si_status = status & 0x7f;
+    }
+    break;
+  }
+}
+
+static int k_wait_consume_event_locked(int slot, int event, int nowait)
+{
+  if(slot < 0 || slot >= KSH_MAX_JOBS || g_jobs == 0 || !g_jobs[slot].used)
+    return -1;
+  if(nowait)
+    return 0;
+
+  switch(event){
+  case K_WAIT_EVENT_EXITED:
+    memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
+    return 0;
+  case K_WAIT_EVENT_STOPPED:
+    g_jobs[slot].wait_pending_stop = 0;
+    return 0;
+  case K_WAIT_EVENT_CONTINUED:
+    g_jobs[slot].wait_pending_cont = 0;
+    return 0;
+  default:
+    return -1;
+  }
+}
+
+static pid_t k_waitpid(pid_t pid, int *status, int options)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int *status_host;
+  int self_pid;
+  int self_pgid;
+
+  status_host = (int *)elf_loader_translate_ptr(status);
+  if(status && (status_host == 0 || !k_ptr_bytes_accessible(status_host, sizeof(*status_host)))){
+    errno = EINVAL;
+    return (pid_t)-1;
+  }
+  if((options & ~(WNOHANG | WUNTRACED | WCONTINUED)) != 0){
+    errno = EINVAL;
+    return (pid_t)-1;
+  }
+
+  while(1){
+    int i;
+    int has_child = 0;
+    int slot = -1;
+    int event = K_WAIT_EVENT_NONE;
+    int encoded_status = 0;
+    int child_pid = -1;
+
+    if(g_jobs_lock)
+      (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+    self_pid = proc_pid_for_task_locked(self);
+    self_pgid = proc_pgid_for_task_locked(self);
+    if(self_pid <= 0)
+      self_pid = g_shell_pid;
+    if(self_pgid <= 0)
+      self_pgid = g_shell_pgid;
+
+    if(g_jobs){
+      for(i = 0; i < KSH_MAX_JOBS; i++){
+        if(!k_waitpid_match_child_locked(&g_jobs[i], self_pid, self_pgid, pid))
+          continue;
+        has_child = 1;
+        event = k_wait_pick_event_locked(&g_jobs[i], 1, (options & WUNTRACED) != 0, (options & WCONTINUED) != 0);
+        if(event == K_WAIT_EVENT_NONE)
+          continue;
+        slot = i;
+        child_pid = g_jobs[i].pid;
+        encoded_status = k_wait_encode_status_locked(&g_jobs[i], event);
+        (void)k_wait_consume_event_locked(slot, event, 0);
+        break;
+      }
+    }
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+
+    if(slot >= 0){
+      if(status_host)
+        *status_host = encoded_status;
+      return (pid_t)child_pid;
+    }
+    if(!has_child){
+      errno = ECHILD;
+      return (pid_t)-1;
+    }
+    if(options & WNOHANG)
+      return (pid_t)0;
+
+    (void)k_signal_dispatch_pending_current();
+    hal_delay_ms(10);
+  }
+}
+
+static pid_t k_wait(int *status)
+{
+  return k_waitpid((pid_t)-1, status, 0);
+}
+
+static int k_waitid(int idtype, int id, siginfo_t *infop, int options)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  siginfo_t *si;
+  int self_pid;
+  int self_pgid;
+  int want_exit;
+  int want_stop;
+  int want_cont;
+  int nowait;
+
+  si = (siginfo_t *)elf_loader_translate_ptr(infop);
+  if(si == 0 || !k_ptr_bytes_accessible(si, sizeof(*si))){
+    errno = EINVAL;
+    return -1;
+  }
+
+  if((options & ~(WNOHANG | WNOWAIT | WEXITED | WSTOPPED | WCONTINUED)) != 0){
+    errno = EINVAL;
+    return -1;
+  }
+
+  want_exit = (options & WEXITED) != 0;
+  want_stop = (options & WSTOPPED) != 0;
+  want_cont = (options & WCONTINUED) != 0;
+  if(!want_exit && !want_stop && !want_cont){
+    errno = EINVAL;
+    return -1;
+  }
+
+  if(idtype != P_ALL && idtype != P_PID && idtype != P_PGID){
+    errno = EINVAL;
+    return -1;
+  }
+  nowait = (options & WNOWAIT) ? 1 : 0;
+
+  while(1){
+    int i;
+    int has_child = 0;
+    int slot = -1;
+    int event = K_WAIT_EVENT_NONE;
+    int encoded_status = 0;
+    int child_pid = -1;
+
+    if(g_jobs_lock)
+      (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+    self_pid = proc_pid_for_task_locked(self);
+    self_pgid = proc_pgid_for_task_locked(self);
+    if(self_pid <= 0)
+      self_pid = g_shell_pid;
+    if(self_pgid <= 0)
+      self_pgid = g_shell_pgid;
+
+    if(g_jobs){
+      for(i = 0; i < KSH_MAX_JOBS; i++){
+        if(!k_waitid_match_child_locked(&g_jobs[i], self_pid, self_pgid, idtype, id))
+          continue;
+        has_child = 1;
+        event = k_wait_pick_event_locked(&g_jobs[i], want_exit, want_stop, want_cont);
+        if(event == K_WAIT_EVENT_NONE)
+          continue;
+        slot = i;
+        child_pid = g_jobs[i].pid;
+        encoded_status = k_wait_encode_status_locked(&g_jobs[i], event);
+        (void)k_wait_consume_event_locked(slot, event, nowait);
+        break;
+      }
+    }
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+
+    if(slot >= 0){
+      k_wait_fill_siginfo(si, child_pid, event, encoded_status);
+      return 0;
+    }
+    if(!has_child){
+      errno = ECHILD;
+      return -1;
+    }
+    if(options & WNOHANG){
+      memset(si, 0, sizeof(*si));
+      return 0;
+    }
+
+    (void)k_signal_dispatch_pending_current();
+    hal_delay_ms(10);
+  }
+}
+
 static pid_t k_getpid(void)
 {
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
@@ -2943,6 +3288,28 @@ static clock_t k__times_r(struct _reent *r, struct tms *buf)
 static int k__kill_r(struct _reent *r, int pid, int sig)
 {
   return k_reent_finish_int(r, k_kill(pid, sig));
+}
+
+static int k__wait_r(struct _reent *r, int *status)
+{
+  pid_t rc = k_wait(status);
+  if(rc < 0){
+    k_reent_set_errno(r, errno);
+    return -1;
+  }
+  k_reent_clear_errno(r);
+  return (int)rc;
+}
+
+static int k__waitpid_r(struct _reent *r, int pid, int *status, int options)
+{
+  pid_t rc = k_waitpid((pid_t)pid, status, options);
+  if(rc < 0){
+    k_reent_set_errno(r, errno);
+    return -1;
+  }
+  k_reent_clear_errno(r);
+  return (int)rc;
 }
 
 static int k__getpid_r(struct _reent *r)

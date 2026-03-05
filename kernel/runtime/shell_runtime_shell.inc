@@ -782,6 +782,9 @@ static void enforce_job_limits(void)
         kill_ctx[nkill++] = (ksh_job_task_t *)g_jobs[i].task_ctx;
       g_jobs[i].done = 1;
       g_jobs[i].stopped = 0;
+      g_jobs[i].wait_pending_exit = 1;
+      g_jobs[i].wait_pending_stop = 0;
+      g_jobs[i].wait_pending_cont = 0;
       g_jobs[i].exit_code = 124;
       g_jobs[i].reason = JOB_REASON_TIMEOUT;
       g_jobs[i].task = 0;
@@ -826,6 +829,9 @@ static void job_task(void *arg)
   if(t->slot >= 0 && t->slot < KSH_MAX_JOBS && g_jobs[t->slot].used){
     g_jobs[t->slot].done = 1;
     g_jobs[t->slot].stopped = 0;
+    g_jobs[t->slot].wait_pending_exit = 1;
+    g_jobs[t->slot].wait_pending_stop = 0;
+    g_jobs[t->slot].wait_pending_cont = 0;
     g_jobs[t->slot].exit_code = exit_code;
     g_jobs[t->slot].reason = (g_jobs[t->slot].reason == JOB_REASON_NONE) ? JOB_REASON_EXIT : g_jobs[t->slot].reason;
     g_jobs[t->slot].task = 0;
@@ -865,6 +871,9 @@ static int terminate_job_id(int id, int exit_code, int reason)
     }
     g_jobs[slot].done = 1;
     g_jobs[slot].stopped = 0;
+    g_jobs[slot].wait_pending_exit = 1;
+    g_jobs[slot].wait_pending_stop = 0;
+    g_jobs[slot].wait_pending_cont = 0;
     g_jobs[slot].exit_code = exit_code;
     g_jobs[slot].reason = reason;
     g_jobs[slot].task = 0;
@@ -906,6 +915,8 @@ static int suspend_job_id(int id)
     task = g_jobs[slot].task;
     if(task && !g_jobs[slot].stopped){
       g_jobs[slot].stopped = 1;
+      g_jobs[slot].wait_pending_stop = 1;
+      g_jobs[slot].wait_pending_cont = 0;
       g_jobs[slot].reason = JOB_REASON_STOPPED;
       g_jobs[slot].user_visible = 1;
       should_suspend = 1;
@@ -945,6 +956,7 @@ static int resume_job_id(int id)
     task = g_jobs[slot].task;
     if(task && g_jobs[slot].stopped){
       g_jobs[slot].stopped = 0;
+      g_jobs[slot].wait_pending_cont = 1;
       g_jobs[slot].reason = JOB_REASON_NONE;
       should_resume = 1;
       if(task != self)
@@ -1225,6 +1237,9 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
   g_jobs[slot].user_visible = quiet_start ? 0 : 1;
   g_jobs[slot].is_pipe = is_pipe;
   g_jobs[slot].stopped = 0;
+  g_jobs[slot].wait_pending_exit = 0;
+  g_jobs[slot].wait_pending_stop = 0;
+  g_jobs[slot].wait_pending_cont = 0;
   g_jobs[slot].max_heap_kb = max_heap_kb;
   g_jobs[slot].max_runtime_ms = max_runtime_ms;
   g_jobs[slot].started_ms = (uint32)k_ticks();
@@ -2462,6 +2477,12 @@ static int register_default_symbols(void)
     { "__xv6_host_getppid", (void *)k_getppid },
     { "kill", (void *)k_kill },
     { "__xv6_host_kill", (void *)k_kill },
+    { "wait", (void *)k_wait },
+    { "__xv6_host_wait", (void *)k_wait },
+    { "waitpid", (void *)k_waitpid },
+    { "__xv6_host_waitpid", (void *)k_waitpid },
+    { "waitid", (void *)k_waitid },
+    { "__xv6_host_waitid", (void *)k_waitid },
     { "setpgid", (void *)k_setpgid },
     { "getpgid", (void *)k_getpgid },
     { "getpgrp", (void *)k_getpgrp },
@@ -2520,6 +2541,8 @@ static int register_default_symbols(void)
     { "_gettimeofday_r", (void *)k__gettimeofday_r },
     { "_times_r", (void *)k__times_r },
     { "_kill_r", (void *)k__kill_r },
+    { "_wait_r", (void *)k__wait_r },
+    { "_waitpid_r", (void *)k__waitpid_r },
     { "_getpid_r", (void *)k__getpid_r },
     { "_sbrk_r", (void *)k__sbrk_r },
     { "_sbrk", (void *)k__sbrk },

@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <time.h>
 #include "lwip/api.h"
@@ -73,6 +74,9 @@ typedef struct {
   int sid;
   int done;
   int stopped;
+  int wait_pending_exit;
+  int wait_pending_stop;
+  int wait_pending_cont;
   int exit_code;
   int reason;
   int user_visible;
