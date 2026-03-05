@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "core/types.h"
+#include "hostabi/hostabi_posix_io.h"
 #include "platform/hal.h"
 
 #define MAXPATH 256
@@ -139,6 +140,13 @@ int vfs_dev_read(const char *path, uint32 off, void *buf, uint32 size)
         /* Wait a bit for data */
         hal_delay_ms(1);
         continue;
+      }
+      {
+        int sig = hostabi_posix_tty_signal_for_char(c);
+        if(sig != 0){
+          (void)hostabi_posix_tty_dispatch_signal(sig);
+          continue;
+        }
       }
       p[i++] = (uint8)c;
       /* Stop on line ending */

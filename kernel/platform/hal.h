@@ -22,6 +22,13 @@ void hal_console_init(void);
 int hal_console_getc(void);
 
 /**
+ * @brief Poll console for a specific byte without consuming other bytes
+ * @param target Byte value to detect (0..255)
+ * @return 1 if target byte was received, 0 otherwise
+ */
+int hal_console_poll_byte(int target);
+
+/**
  * @brief Poll console for Ctrl+C without consuming other bytes
  * @return 1 if Ctrl+C was received, 0 otherwise
  */

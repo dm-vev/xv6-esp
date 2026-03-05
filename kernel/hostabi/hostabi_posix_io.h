@@ -118,4 +118,38 @@ int hostabi_posix_tcsetattr(int fd, int optional_actions, const struct termios *
  */
 void hostabi_posix_cfmakeraw(struct termios *tio);
 
+/** Callback used to deliver TTY-generated signals to foreground process group. */
+typedef int (*hostabi_posix_tty_signal_handler_t)(int sig);
+
+/**
+ * @brief Register TTY signal delivery callback
+ * @param handler Callback invoked for line-discipline signals
+ */
+void hostabi_posix_set_tty_signal_handler(hostabi_posix_tty_signal_handler_t handler);
+
+/**
+ * @brief Map an input byte to a TTY-generated signal according to line discipline
+ * @param c Input byte (0..255)
+ * @return Signal number (e.g. SIGINT/SIGTSTP) or 0 if byte is not a signal char
+ *
+ * Uses current controlling TTY settings (ISIG, VINTR, VSUSP).
+ */
+int hostabi_posix_tty_signal_for_char(int c);
+
+/**
+ * @brief Deliver a line-discipline signal via registered callback
+ * @param sig Signal number to deliver
+ * @return 0 on success, -1 if callback is missing or delivery failed
+ */
+int hostabi_posix_tty_dispatch_signal(int sig);
+
+/**
+ * @brief Poll console and return TTY-generated signal from line discipline
+ * @return Signal number (e.g. SIGINT/SIGTSTP) or 0 if no signal char was received
+ *
+ * Polls bytes configured by line discipline control chars without consuming
+ * unrelated input bytes.
+ */
+int hostabi_posix_tty_poll_signal(void);
+
 #endif

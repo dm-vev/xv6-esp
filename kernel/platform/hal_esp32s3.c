@@ -187,10 +187,12 @@ int hal_console_getc(void)
   return hal_console_getc_hw();
 }
 
-static int hal_console_poll_ctrl_byte(int target)
+int hal_console_poll_byte(int target)
 {
   int queued;
   int c;
+  if(target < 0 || target > 0xff)
+    return 0;
   portENTER_CRITICAL(&g_console_pushback_mu);
   queued = hal_console_peek_pushback_locked();
   if(queued == target){
@@ -211,12 +213,12 @@ static int hal_console_poll_ctrl_byte(int target)
 
 int hal_console_poll_ctrl_c(void)
 {
-  return hal_console_poll_ctrl_byte(0x03);
+  return hal_console_poll_byte(0x03);
 }
 
 int hal_console_poll_ctrl_z(void)
 {
-  return hal_console_poll_ctrl_byte(0x1a);
+  return hal_console_poll_byte(0x1a);
 }
 
 void hal_console_putc(int c)

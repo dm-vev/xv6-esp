@@ -976,6 +976,8 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
     int stopped = 0;
     int exit_code = 0;
     int pgid = -1;
+    int poll_ctrl = 0;
+    int tty_sig = 0;
 
     if(g_jobs_lock)
       (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -1009,9 +1011,16 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
       return 0;
     }
 
-    if(allow_ctrl_c && shell_allow_ctrl_c_poll() && (interrupt_pending || hal_console_poll_ctrl_c())){
+    poll_ctrl = (allow_ctrl_c && shell_allow_ctrl_c_poll()) ? 1 : 0;
+    if(poll_ctrl)
+      tty_sig = hostabi_posix_tty_poll_signal();
+
+    if(poll_ctrl && (interrupt_pending || tty_sig == SIGINT)){
+      int sig_rc = -1;
       interrupt_pending = 1;
-      if((pgid > 0 && k_kill(-pgid, SIGINT) == 0) || terminate_job_id(id, 130, JOB_REASON_KILLED) == 0){
+      if(tty_sig == SIGINT)
+        sig_rc = hostabi_posix_tty_dispatch_signal(SIGINT);
+      if(sig_rc == 0 || (pgid > 0 && k_kill(-pgid, SIGINT) == 0) || terminate_job_id(id, 130, JOB_REASON_KILLED) == 0){
         puts_line("^C");
         if(out_exit_code)
           *out_exit_code = 130;
@@ -1029,9 +1038,12 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
       interrupt_pending = 0;
     }
 
-    if(allow_ctrl_c && shell_allow_ctrl_c_poll() && (suspend_pending || hal_console_poll_ctrl_z())){
+    if(poll_ctrl && (suspend_pending || tty_sig == SIGTSTP)){
+      int sig_rc = -1;
       suspend_pending = 1;
-      if((pgid > 0 && k_kill(-pgid, SIGTSTP) == 0) || suspend_job_id(id) == 0){
+      if(tty_sig == SIGTSTP)
+        sig_rc = hostabi_posix_tty_dispatch_signal(SIGTSTP);
+      if(sig_rc == 0 || (pgid > 0 && k_kill(-pgid, SIGTSTP) == 0) || suspend_job_id(id) == 0){
         puts_line("^Z");
         if(out_exit_code)
           *out_exit_code = 128 + SIGTSTP;
@@ -1796,7 +1808,7 @@ static int cmd_wait(int argc, char **argv)
         (void)xSemaphoreGive(g_jobs_lock);
       if(!has_running)
         break;
-      if(shell_allow_ctrl_c_poll() && hal_console_poll_ctrl_c()){
+      if(shell_allow_ctrl_c_poll() && hostabi_posix_tty_poll_signal() == SIGINT){
         puts_line("^C");
         return 130;
       }
@@ -2766,6 +2778,7 @@ int shell_runtime_init(void)
   }
   xv6_vfs_reset();
   hostabi_posix_io_init();
+  hostabi_posix_set_tty_signal_handler(k_tty_signal_handler);
   memset(&kcfg, 0, sizeof(kcfg));
   kcfg.dev_mode = XV6_KMOD_DEV_MODE_DEFAULT;
   kcfg.allow_unsigned_dev = XV6_KMOD_ALLOW_UNSIGNED_DEV_DEFAULT;
@@ -2843,6 +2856,7 @@ int shell_runtime_run_interactive(void)
   tty_puts("xv6> ");
   for(;;){
     int c;
+    int ldisc_sig = 0;
 
     enforce_job_limits();
     (void)k_signal_dispatch_pending_current();
@@ -2853,21 +2867,21 @@ int shell_runtime_run_interactive(void)
       continue;
     }
 
-    if(c != 0x03 && c != 0x1a && c != '\r' && c != '\n' && c != '\b' && c != 0x7f && c != '\t' &&
-       (c < 0x20 || c > 0x7e))
+    ldisc_sig = hostabi_posix_tty_signal_for_char(c);
+    if(ldisc_sig == 0 && c != '\r' && c != '\n' && c != '\b' && c != 0x7f && c != '\t' && (c < 0x20 || c > 0x7e))
     {
       taskYIELD();
       continue;
     }
 
-    if(c == 0x03){
+    if(ldisc_sig == SIGINT){
       puts_line("^C");
       len = 0;
       tty_puts("xv6> ");
       continue;
     }
 
-    if(c == 0x1a){
+    if(ldisc_sig == SIGTSTP){
       puts_line("^Z");
       len = 0;
       tty_puts("xv6> ");

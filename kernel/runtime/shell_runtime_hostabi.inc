@@ -1610,6 +1610,7 @@ static int g_shell_sid = 1;
 static int g_shell_pgid = 1;
 static int g_tty_fg_pgid = 1;
 
+static int k_tty_signal_handler(int sig);
 static int terminate_job_id(int id, int exit_code, int reason);
 static int suspend_job_id(int id);
 static int resume_job_id(int id);
@@ -2275,6 +2276,30 @@ static int k_kill(int pid, int sig)
   if(k_signal_group_jobs(pgid, sig, &any) == 0 || any)
     return 0;
   return -1;
+}
+
+static int k_tty_signal_handler(int sig)
+{
+  int fg_pgid;
+
+  if(sig != SIGINT && sig != SIGTSTP){
+    errno = EINVAL;
+    return -1;
+  }
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  fg_pgid = g_tty_fg_pgid;
+  if(fg_pgid <= 0)
+    fg_pgid = g_shell_pgid;
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(fg_pgid <= 0){
+    errno = ESRCH;
+    return -1;
+  }
+  return k_kill(-fg_pgid, sig);
 }
 
 static pid_t k_getpid(void)

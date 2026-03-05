@@ -16,6 +16,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -24,6 +25,7 @@
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "platform/hal.h"
 #include "vfs/vfs.h"
 
 #define HOSTABI_FD_META_MAX XV6_FD_CAP
@@ -57,6 +59,7 @@ typedef struct {
 static SemaphoreHandle_t g_fd_meta_lock; /**< Lock for metadata array */
 static hostabi_fd_meta_t *g_fd_meta;     /**< Metadata per fd */
 static int g_fd_meta_cap;                /**< Allocated metadata slots */
+static hostabi_posix_tty_signal_handler_t g_tty_signal_handler;
 
 /**
  * @brief Acquire the metadata lock
@@ -172,6 +175,12 @@ static void fd_meta_make_termios(struct termios *t)
   t->c_oflag = OPOST | ONLCR;
   t->c_cflag = CREAD | CS8;
   t->c_lflag = ECHO | ICANON | IEXTEN | ISIG;
+#ifdef VINTR
+  t->c_cc[VINTR] = 0x03;
+#endif
+#ifdef VSUSP
+  t->c_cc[VSUSP] = 0x1a;
+#endif
 #ifdef VMIN
   t->c_cc[VMIN] = 1;
 #endif
@@ -339,6 +348,7 @@ void hostabi_posix_io_init(void)
     (void)fd_meta_set_locked(fd, &m);
   }
   fd_meta_lock_give();
+  g_tty_signal_handler = 0;
 }
 
 /**
@@ -637,6 +647,86 @@ void hostabi_posix_cfmakeraw(struct termios *tio)
 #ifdef VTIME
   tio->c_cc[VTIME] = 0;
 #endif
+}
+
+void hostabi_posix_set_tty_signal_handler(hostabi_posix_tty_signal_handler_t handler)
+{
+  g_tty_signal_handler = handler;
+}
+
+static int tty_cc_enabled(cc_t cc)
+{
+#ifdef _POSIX_VDISABLE
+  if(cc == (cc_t)_POSIX_VDISABLE)
+    return 0;
+#endif
+  return 1;
+}
+
+int hostabi_posix_tty_signal_for_char(int c)
+{
+  hostabi_fd_meta_t meta;
+  unsigned char uc;
+
+  if(c < 0 || c > 0xff)
+    return 0;
+  if(fd_meta_fetch(0, &meta) != 0 || !meta.is_tty)
+    return 0;
+  if((meta.tio.c_lflag & ISIG) == 0)
+    return 0;
+
+  uc = (unsigned char)c;
+#ifdef VINTR
+  if(tty_cc_enabled(meta.tio.c_cc[VINTR]) && uc == (unsigned char)meta.tio.c_cc[VINTR])
+    return SIGINT;
+#endif
+#ifdef VSUSP
+  if(tty_cc_enabled(meta.tio.c_cc[VSUSP]) && uc == (unsigned char)meta.tio.c_cc[VSUSP])
+    return SIGTSTP;
+#endif
+  return 0;
+}
+
+int hostabi_posix_tty_dispatch_signal(int sig)
+{
+  hostabi_posix_tty_signal_handler_t handler = g_tty_signal_handler;
+  if(handler == 0){
+    errno = ENOSYS;
+    return -1;
+  }
+  if(handler(sig) != 0){
+    if(errno == 0)
+      errno = EIO;
+    return -1;
+  }
+  return 0;
+}
+
+int hostabi_posix_tty_poll_signal(void)
+{
+  hostabi_fd_meta_t meta;
+  int vintr = -1;
+  int vsusp = -1;
+
+  if(fd_meta_fetch(0, &meta) != 0 || !meta.is_tty)
+    return 0;
+  if((meta.tio.c_lflag & ISIG) == 0)
+    return 0;
+
+#ifdef VINTR
+  if(tty_cc_enabled(meta.tio.c_cc[VINTR]))
+    vintr = (unsigned char)meta.tio.c_cc[VINTR];
+#endif
+#ifdef VSUSP
+  if(tty_cc_enabled(meta.tio.c_cc[VSUSP]))
+    vsusp = (unsigned char)meta.tio.c_cc[VSUSP];
+#endif
+
+  if(vintr >= 0 && hal_console_poll_byte(vintr))
+    return SIGINT;
+  if(vsusp >= 0 && vsusp != vintr && hal_console_poll_byte(vsusp))
+    return SIGTSTP;
+  return 0;
 }
 
 /**

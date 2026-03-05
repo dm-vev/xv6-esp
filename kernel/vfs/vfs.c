@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_memory_utils.h"
 #include "esp_heap_caps.h"
+#include "hostabi/hostabi_posix_io.h"
 #include "loader/elf_loader.h"
 #include "fs/fs.h"
 #include "platform/hal.h"
@@ -754,6 +755,13 @@ static int dev_read(const char *path, uint32 off, void *buf, uint32 size)
           break;
         hal_delay_ms(1);
         continue;
+      }
+      {
+        int sig = hostabi_posix_tty_signal_for_char(c);
+        if(sig != 0){
+          (void)hostabi_posix_tty_dispatch_signal(sig);
+          continue;
+        }
       }
       p[i++] = (uint8)c;
       if(c == '\n' || c == '\r')
