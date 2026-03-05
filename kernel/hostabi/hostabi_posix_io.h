@@ -121,11 +121,20 @@ void hostabi_posix_cfmakeraw(struct termios *tio);
 /** Callback used to deliver TTY-generated signals to foreground process group. */
 typedef int (*hostabi_posix_tty_signal_handler_t)(int sig);
 
+/** Callback used to query whether the current task owns the foreground TTY. */
+typedef int (*hostabi_posix_tty_foreground_query_t)(int fd);
+
 /**
  * @brief Register TTY signal delivery callback
  * @param handler Callback invoked for line-discipline signals
  */
 void hostabi_posix_set_tty_signal_handler(hostabi_posix_tty_signal_handler_t handler);
+
+/**
+ * @brief Register foreground/background ownership query for controlling TTY
+ * @param query Callback returning 1 for foreground, 0 for background, <0 on error
+ */
+void hostabi_posix_set_tty_foreground_query(hostabi_posix_tty_foreground_query_t query);
 
 /**
  * @brief Map an input byte to a TTY-generated signal according to line discipline
@@ -151,5 +160,26 @@ int hostabi_posix_tty_dispatch_signal(int sig);
  * unrelated input bytes.
  */
 int hostabi_posix_tty_poll_signal(void);
+
+/**
+ * @brief Enforce foreground/background rules before reading from a TTY
+ * @param fd File descriptor to read from
+ * @return 0 if access is allowed, -1 on failure
+ */
+int hostabi_posix_tty_before_read(int fd);
+
+/**
+ * @brief Enforce foreground/background rules before writing to a TTY
+ * @param fd File descriptor to write to
+ * @return 0 if access is allowed, -1 on failure
+ */
+int hostabi_posix_tty_before_write(int fd);
+
+/**
+ * @brief Enforce foreground/background rules before mutating TTY attributes
+ * @param fd File descriptor whose terminal settings are being changed
+ * @return 0 if access is allowed, -1 on failure
+ */
+int hostabi_posix_tty_before_attr_change(int fd);
 
 #endif

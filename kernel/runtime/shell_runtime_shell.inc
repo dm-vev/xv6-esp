@@ -245,7 +245,10 @@ static int cmd_help(void)
   puts_line("  <elf-command> [args]");
   puts_line("  <elf-command> [args] &");
   puts_line("  <a> | <b> | <c> ...");
+  puts_line("  lists: <a> ; <b>, <a> && <b>, <a> || <b>");
   puts_line("  redirection: < > >> 2> 2>>");
+  puts_line("  expansion: $VAR ${VAR} ${VAR:-def} ${VAR:+alt} $?");
+  puts_line("  globbing: * ? []");
   puts_line("  cd [dir], pwd");
   puts_line("  env, export NAME=VALUE, unset NAME");
   puts_line("  health");
@@ -759,10 +762,12 @@ static void enforce_job_limits(void)
   int i;
   uint32 now = (uint32)k_ticks();
   ksh_job_task_t *kill_ctx[KSH_MAX_JOBS];
+  int notify_ppid[KSH_MAX_JOBS];
   int nkill = 0;
-  int post_sigchld = 0;
+  int nnotify = 0;
 
   memset(kill_ctx, 0, sizeof(kill_ctx));
+  memset(notify_ppid, 0, sizeof(notify_ppid));
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -787,9 +792,11 @@ static void enforce_job_limits(void)
       g_jobs[i].wait_pending_cont = 0;
       g_jobs[i].exit_code = 124;
       g_jobs[i].reason = JOB_REASON_TIMEOUT;
+      g_jobs[i].stop_signal = 0;
       g_jobs[i].task = 0;
       g_jobs[i].task_ctx = 0;
-      post_sigchld = 1;
+      if(nnotify < KSH_MAX_JOBS)
+        notify_ppid[nnotify++] = g_jobs[i].ppid;
     }
   }
   if(g_jobs_lock)
@@ -799,14 +806,17 @@ static void enforce_job_limits(void)
     if(kill_ctx[i])
       free_job_ctx(kill_ctx[i]);
   }
-  if(post_sigchld)
-    k_signal_post_sigchld();
+  for(i = 0; i < nnotify; i++){
+    if(notify_ppid[i] > 0)
+      k_signal_post_sigchld(notify_ppid[i]);
+  }
 }
 
 static void job_task(void *arg)
 {
   ksh_job_task_t *t = (ksh_job_task_t *)arg;
   int exit_code = 127;
+  int parent_pid = 0;
   int running_core = current_core_id();
   TaskHandle_t self_task = xTaskGetCurrentTaskHandle();
 
@@ -834,6 +844,8 @@ static void job_task(void *arg)
     g_jobs[t->slot].wait_pending_cont = 0;
     g_jobs[t->slot].exit_code = exit_code;
     g_jobs[t->slot].reason = (g_jobs[t->slot].reason == JOB_REASON_NONE) ? JOB_REASON_EXIT : g_jobs[t->slot].reason;
+    g_jobs[t->slot].stop_signal = 0;
+    parent_pid = g_jobs[t->slot].ppid;
     g_jobs[t->slot].task = 0;
     g_jobs[t->slot].task_ctx = 0;
   }
@@ -841,7 +853,7 @@ static void job_task(void *arg)
     (void)xSemaphoreGive(g_jobs_lock);
 
   free_job_ctx(t);
-  k_signal_post_sigchld();
+  k_signal_post_sigchld(parent_pid);
   k_signal_task_cleanup(self_task);
   xv6_task_ctx_cleanup();
   vTaskDelete(NULL);
@@ -853,6 +865,7 @@ static int terminate_job_id(int id, int exit_code, int reason)
   TaskHandle_t task = 0;
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
   ksh_job_task_t *ctx = 0;
+  int parent_pid = 0;
   int self_delete = 0;
   int rc = -1;
 
@@ -876,6 +889,8 @@ static int terminate_job_id(int id, int exit_code, int reason)
     g_jobs[slot].wait_pending_cont = 0;
     g_jobs[slot].exit_code = exit_code;
     g_jobs[slot].reason = reason;
+    g_jobs[slot].stop_signal = 0;
+    parent_pid = g_jobs[slot].ppid;
     g_jobs[slot].task = 0;
     g_jobs[slot].task_ctx = 0;
     rc = 0;
@@ -887,7 +902,7 @@ static int terminate_job_id(int id, int exit_code, int reason)
     return -1;
   if(ctx)
     free_job_ctx(ctx);
-  k_signal_post_sigchld();
+  k_signal_post_sigchld(parent_pid);
   if(self_delete){
     netconn_thread_cleanup();
     k_signal_task_cleanup(self);
@@ -899,14 +914,18 @@ static int terminate_job_id(int id, int exit_code, int reason)
   return rc;
 }
 
-static int suspend_job_id(int id)
+static int suspend_job_id_with_signal(int id, int sig)
 {
   int slot;
   TaskHandle_t task = 0;
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int parent_pid = 0;
   int self_suspend = 0;
   int should_suspend = 0;
   int post_sigchld = 0;
+
+  if(sig <= 0 || sig >= KSH_SIG_MAX)
+    sig = SIGTSTP;
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -918,7 +937,9 @@ static int suspend_job_id(int id)
       g_jobs[slot].wait_pending_stop = 1;
       g_jobs[slot].wait_pending_cont = 0;
       g_jobs[slot].reason = JOB_REASON_STOPPED;
+      g_jobs[slot].stop_signal = sig;
       g_jobs[slot].user_visible = 1;
+      parent_pid = g_jobs[slot].ppid;
       should_suspend = 1;
       post_sigchld = 1;
       if(task == self){
@@ -936,10 +957,15 @@ static int suspend_job_id(int id)
     return -1;
   }
   if(post_sigchld)
-    k_signal_post_sigchld();
+    k_signal_post_sigchld(parent_pid);
   if(should_suspend && self_suspend)
     vTaskSuspend(NULL);
   return 0;
+}
+
+static int suspend_job_id(int id)
+{
+  return suspend_job_id_with_signal(id, SIGTSTP);
 }
 
 static int resume_job_id(int id)
@@ -947,6 +973,7 @@ static int resume_job_id(int id)
   int slot;
   TaskHandle_t task = 0;
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int parent_pid = 0;
   int should_resume = 0;
 
   if(g_jobs_lock)
@@ -958,6 +985,8 @@ static int resume_job_id(int id)
       g_jobs[slot].stopped = 0;
       g_jobs[slot].wait_pending_cont = 1;
       g_jobs[slot].reason = JOB_REASON_NONE;
+      g_jobs[slot].stop_signal = 0;
+      parent_pid = g_jobs[slot].ppid;
       should_resume = 1;
       if(task != self)
         vTaskResume(task);
@@ -974,6 +1003,8 @@ static int resume_job_id(int id)
     errno = EPERM;
     return -1;
   }
+  if(should_resume)
+    k_signal_post_sigchld(parent_pid);
   return 0;
 }
 
@@ -987,6 +1018,7 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
     int done = 0;
     int stopped = 0;
     int exit_code = 0;
+    int stop_signal = SIGTSTP;
     int pgid = -1;
     int poll_ctrl = 0;
     int tty_sig = 0;
@@ -1007,6 +1039,9 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
         memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
     } else {
       stopped = g_jobs[slot].stopped;
+      stop_signal = g_jobs[slot].stop_signal;
+      if(stop_signal <= 0 || stop_signal >= KSH_SIG_MAX)
+        stop_signal = SIGTSTP;
       pgid = g_jobs[slot].pgid;
     }
     if(g_jobs_lock)
@@ -1019,7 +1054,7 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
     }
     if(stopped){
       if(out_exit_code)
-        *out_exit_code = 128 + SIGTSTP;
+        *out_exit_code = 128 + stop_signal;
       return 0;
     }
 
@@ -1244,6 +1279,7 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
   g_jobs[slot].max_runtime_ms = max_runtime_ms;
   g_jobs[slot].started_ms = (uint32)k_ticks();
   g_jobs[slot].reason = JOB_REASON_NONE;
+  g_jobs[slot].stop_signal = 0;
   g_jobs[slot].assigned_core = assigned_core;
   g_jobs[slot].running_core = -1;
   g_jobs[slot].task_ctx = t;
@@ -1389,6 +1425,727 @@ static void close_io_custom_fds(const ksh_io_t *io, const ksh_io_t *base)
   }
 }
 
+static char decode_marker_char(char ch)
+{
+  unsigned char uc = (unsigned char)ch;
+  if(uc == (unsigned char)KSH_MARK_ESC_DOLLAR)
+    return '$';
+  if(uc == (unsigned char)KSH_MARK_ESC_STAR)
+    return '*';
+  if(uc == (unsigned char)KSH_MARK_ESC_QMARK)
+    return '?';
+  if(uc == (unsigned char)KSH_MARK_ESC_LBRACK)
+    return '[';
+  if(uc == (unsigned char)KSH_MARK_ESC_RBRACK)
+    return ']';
+  return ch;
+}
+
+static void decode_markers_inplace(char *s)
+{
+  if(s == 0)
+    return;
+  while(*s){
+    *s = decode_marker_char(*s);
+    s++;
+  }
+}
+
+static int token_has_unescaped_glob(const char *s)
+{
+  while(s && *s){
+    if(*s == '*' || *s == '?' || *s == '[')
+      return 1;
+    s++;
+  }
+  return 0;
+}
+
+static int token_has_unescaped_var(const char *s)
+{
+  while(s && *s){
+    if(*s == '$')
+      return 1;
+    s++;
+  }
+  return 0;
+}
+
+static int is_var_name_start(char ch)
+{
+  return (ch == '_' || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) ? 1 : 0;
+}
+
+static int is_var_name_char(char ch)
+{
+  return (is_var_name_start(ch) || (ch >= '0' && ch <= '9')) ? 1 : 0;
+}
+
+static int append_char_checked(char *dst, int dst_len, int *pos, char ch)
+{
+  if(dst == 0 || pos == 0 || dst_len <= 1)
+    return -1;
+  if(*pos >= dst_len - 1)
+    return -1;
+  dst[*pos] = ch;
+  (*pos)++;
+  dst[*pos] = 0;
+  return 0;
+}
+
+static int append_cstr_checked(char *dst, int dst_len, int *pos, const char *src)
+{
+  int i;
+  if(src == 0)
+    return 0;
+  for(i = 0; src[i]; i++){
+    if(append_char_checked(dst, dst_len, pos, src[i]) != 0)
+      return -1;
+  }
+  return 0;
+}
+
+static int append_decoded_span(char *dst, int dst_len, int *pos, const char *src, int n)
+{
+  int i;
+  for(i = 0; i < n; i++){
+    if(append_char_checked(dst, dst_len, pos, decode_marker_char(src[i])) != 0)
+      return -1;
+  }
+  return 0;
+}
+
+static int append_u32_checked(char *dst, int dst_len, int *pos, uint32 v)
+{
+  char tmp[11];
+  int i = 0;
+  if(v == 0)
+    return append_char_checked(dst, dst_len, pos, '0');
+  while(v > 0 && i < (int)sizeof(tmp)){
+    tmp[i++] = (char)('0' + (v % 10u));
+    v /= 10u;
+  }
+  while(i > 0){
+    if(append_char_checked(dst, dst_len, pos, tmp[--i]) != 0)
+      return -1;
+  }
+  return 0;
+}
+
+static char *expand_vars_alloc(const char *token, int last_status)
+{
+  char out[512];
+  int pos = 0;
+  int i = 0;
+
+  if(token == 0)
+    return 0;
+  out[0] = 0;
+
+  if(!token_has_unescaped_var(token)){
+    if(append_decoded_span(out, sizeof(out), &pos, token, (int)strlen(token)) != 0)
+      return 0;
+    return strdup(out);
+  }
+
+  while(token[i]){
+    char ch = token[i];
+    if(ch != '$'){
+      if(append_char_checked(out, sizeof(out), &pos, decode_marker_char(ch)) != 0)
+        return 0;
+      i++;
+      continue;
+    }
+
+    if(token[i + 1] == '$'){
+      if(append_u32_checked(out, sizeof(out), &pos, (uint32)k_getpid()) != 0)
+        return 0;
+      i += 2;
+      continue;
+    }
+    if(token[i + 1] == '?'){
+      if(append_u32_checked(out, sizeof(out), &pos, (uint32)(last_status & 0xff)) != 0)
+        return 0;
+      i += 2;
+      continue;
+    }
+    if(token[i + 1] == '{'){
+      int j = i + 2;
+      int name_start = j;
+      int name_len = 0;
+      char name[KSH_ENV_KEY];
+      const char *val;
+      int is_set;
+      int is_nonempty;
+
+      if(!is_var_name_start(token[j])){
+        if(append_char_checked(out, sizeof(out), &pos, '$') != 0)
+          return 0;
+        i++;
+        continue;
+      }
+      while(token[j] && is_var_name_char(token[j]))
+        j++;
+      name_len = j - name_start;
+      if(name_len <= 0 || name_len >= (int)sizeof(name)){
+        if(append_char_checked(out, sizeof(out), &pos, '$') != 0)
+          return 0;
+        i++;
+        continue;
+      }
+      memcpy(name, token + name_start, (size_t)name_len);
+      name[name_len] = 0;
+      val = env_get(name);
+      is_set = (val != 0) ? 1 : 0;
+      is_nonempty = (is_set && val[0] != 0) ? 1 : 0;
+
+      if(token[j] == '}'){
+        if(val && append_cstr_checked(out, sizeof(out), &pos, val) != 0)
+          return 0;
+        i = j + 1;
+        continue;
+      }
+
+      if((token[j] == '-' || token[j] == '+') || (token[j] == ':' && (token[j + 1] == '-' || token[j + 1] == '+'))){
+        int op_colon = (token[j] == ':') ? 1 : 0;
+        char op = op_colon ? token[j + 1] : token[j];
+        int word_start = j + (op_colon ? 2 : 1);
+        int k = word_start;
+        const char *emit_word = 0;
+        int emit_word_len = 0;
+
+        while(token[k] && token[k] != '}')
+          k++;
+        if(token[k] != '}'){
+          if(append_char_checked(out, sizeof(out), &pos, '$') != 0)
+            return 0;
+          i++;
+          continue;
+        }
+
+        if(op == '-'){
+          if((op_colon && !is_nonempty) || (!op_colon && !is_set)){
+            emit_word = token + word_start;
+            emit_word_len = k - word_start;
+          } else if(val && append_cstr_checked(out, sizeof(out), &pos, val) != 0){
+            return 0;
+          }
+        } else {
+          if((op_colon && is_nonempty) || (!op_colon && is_set)){
+            emit_word = token + word_start;
+            emit_word_len = k - word_start;
+          }
+        }
+
+        if(emit_word && append_decoded_span(out, sizeof(out), &pos, emit_word, emit_word_len) != 0)
+          return 0;
+        i = k + 1;
+        continue;
+      }
+
+      if(append_char_checked(out, sizeof(out), &pos, '$') != 0)
+        return 0;
+      i++;
+      continue;
+    }
+
+    if(is_var_name_start(token[i + 1])){
+      int j = i + 1;
+      char name[KSH_ENV_KEY];
+      int name_len;
+      const char *val;
+
+      while(token[j] && is_var_name_char(token[j]))
+        j++;
+      name_len = j - (i + 1);
+      if(name_len <= 0 || name_len >= (int)sizeof(name)){
+        if(append_char_checked(out, sizeof(out), &pos, '$') != 0)
+          return 0;
+        i++;
+        continue;
+      }
+      memcpy(name, token + i + 1, (size_t)name_len);
+      name[name_len] = 0;
+      val = env_get(name);
+      if(val && append_cstr_checked(out, sizeof(out), &pos, val) != 0)
+        return 0;
+      i = j;
+      continue;
+    }
+
+    if(append_char_checked(out, sizeof(out), &pos, '$') != 0)
+      return 0;
+    i++;
+  }
+
+  return strdup(out);
+}
+
+static int glob_match_char_class(const char *pat, char ch, int *consumed)
+{
+  int i = 1;
+  int neg = 0;
+  int matched = 0;
+  int have_close = 0;
+
+  if(pat[i] == '!' || pat[i] == '^'){
+    neg = 1;
+    i++;
+  }
+
+  while(pat[i]){
+    char pch = pat[i];
+    if(pch == ']'){
+      have_close = 1;
+      i++;
+      break;
+    }
+    if(pat[i + 1] == '-' && pat[i + 2] != 0 && pat[i + 2] != ']'){
+      char a = decode_marker_char(pch);
+      char b = decode_marker_char(pat[i + 2]);
+      if(a <= b){
+        if(ch >= a && ch <= b)
+          matched = 1;
+      } else {
+        if(ch >= b && ch <= a)
+          matched = 1;
+      }
+      i += 3;
+      continue;
+    }
+    if(ch == decode_marker_char(pch))
+      matched = 1;
+    i++;
+  }
+
+  if(!have_close){
+    if(consumed)
+      *consumed = 0;
+    return (ch == '[') ? 1 : 0;
+  }
+  if(consumed)
+    *consumed = i;
+  return neg ? (!matched) : matched;
+}
+
+static int glob_match_pattern(const char *pat, const char *text)
+{
+  while(*pat){
+    if(*pat == '*'){
+      while(*pat == '*')
+        pat++;
+      if(*pat == 0)
+        return 1;
+      while(*text){
+        if(glob_match_pattern(pat, text))
+          return 1;
+        text++;
+      }
+      return 0;
+    }
+    if(*text == 0)
+      return 0;
+    if(*pat == '?'){
+      pat++;
+      text++;
+      continue;
+    }
+    if(*pat == '['){
+      int consumed = 0;
+      if(!glob_match_char_class(pat, *text, &consumed))
+        return 0;
+      if(consumed > 0){
+        pat += consumed;
+        text++;
+        continue;
+      }
+    }
+    if(decode_marker_char(*pat) != *text)
+      return 0;
+    pat++;
+    text++;
+  }
+  return (*text == 0) ? 1 : 0;
+}
+
+static int glob_segment_has_meta(const char *seg)
+{
+  int i;
+  for(i = 0; seg[i]; i++){
+    if(seg[i] == '*' || seg[i] == '?' || seg[i] == '[')
+      return 1;
+  }
+  return 0;
+}
+
+static int glob_segment_match_hidden(const char *seg)
+{
+  if(seg == 0 || seg[0] == 0)
+    return 0;
+  return (decode_marker_char(seg[0]) == '.') ? 1 : 0;
+}
+
+static int path_join_checked(char *out, int out_len, const char *base, const char *name)
+{
+  int n;
+  if(out == 0 || out_len <= 1 || base == 0 || name == 0)
+    return -1;
+  if(strcmp(base, "/") == 0)
+    n = snprintf(out, (size_t)out_len, "/%s", name);
+  else
+    n = snprintf(out, (size_t)out_len, "%s/%s", base, name);
+  if(n <= 0 || n >= out_len)
+    return -1;
+  return 0;
+}
+
+static int path_append_unique(char paths[][MAXPATH], int *count, int max_count, const char *value)
+{
+  int i;
+  if(paths == 0 || count == 0 || value == 0)
+    return -1;
+  for(i = 0; i < *count; i++){
+    if(strcmp(paths[i], value) == 0)
+      return 0;
+  }
+  if(*count >= max_count)
+    return -1;
+  k_copy_cstr(paths[*count], MAXPATH, value);
+  (*count)++;
+  return 0;
+}
+
+static int expand_glob_token(const char *pattern, char **out_matches, int max_matches)
+{
+  char(*cur)[MAXPATH] = 0;
+  char(*next)[MAXPATH] = 0;
+  int cur_count = 0;
+  const char *p = pattern;
+  int i;
+  int rc = -1;
+
+  if(pattern == 0 || out_matches == 0 || max_matches <= 0)
+    return -1;
+  cur = (char(*)[MAXPATH])calloc((size_t)KSH_MAX_ARGS, sizeof(*cur));
+  next = (char(*)[MAXPATH])calloc((size_t)KSH_MAX_ARGS, sizeof(*next));
+  if(cur == 0 || next == 0)
+    goto out;
+
+  if(pattern[0] == '/'){
+    k_copy_cstr(cur[0], MAXPATH, "/");
+    cur_count = 1;
+    while(*p == '/')
+      p++;
+  } else {
+    if(xv6_getcwd(cur[0], MAXPATH) != 0)
+      goto out;
+    cur_count = 1;
+  }
+
+  if(*p == 0){
+    xv6_kstat_t st;
+    if(xv6_lstat_path(cur[0], &st) != 0)
+      goto empty;
+    out_matches[0] = strdup(cur[0]);
+    if(out_matches[0] == 0)
+      goto out;
+    rc = 1;
+    goto out;
+  }
+
+  while(1){
+    char seg[MAXPATH];
+    int seg_len = 0;
+    int last = 0;
+    int next_count = 0;
+    int seg_has_meta;
+
+    while(*p && *p != '/'){
+      if(seg_len >= MAXPATH - 1)
+        goto out;
+      seg[seg_len++] = *p++;
+    }
+    seg[seg_len] = 0;
+    while(*p == '/')
+      p++;
+    last = (*p == 0) ? 1 : 0;
+    if(seg_len == 0){
+      if(last)
+        break;
+      continue;
+    }
+
+    seg_has_meta = glob_segment_has_meta(seg);
+    for(i = 0; i < cur_count; i++){
+      const char *base = cur[i];
+      if(seg_has_meta){
+        int idx = 0;
+        int include_hidden = glob_segment_match_hidden(seg);
+        while(1){
+          char name[MAXPATH];
+          uint16 typ = 0;
+          uint32 sz = 0;
+          char cand[MAXPATH];
+          xv6_kstat_t st;
+          if(xv6fs_list_path(base, idx, name, sizeof(name), &typ, &sz) != 0)
+            break;
+          idx++;
+          if(strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+            continue;
+          if(name[0] == '.' && !include_hidden)
+            continue;
+          if(!glob_match_pattern(seg, name))
+            continue;
+          if(path_join_checked(cand, sizeof(cand), base, name) != 0)
+            continue;
+          if(!last){
+            if(xv6_lstat_path(cand, &st) != 0 || st.type != 1)
+              continue;
+          }
+          if(path_append_unique(next, &next_count, max_matches, cand) != 0)
+            break;
+        }
+      } else {
+        char seg_dec[MAXPATH];
+        char cand[MAXPATH];
+        xv6_kstat_t st;
+        int k;
+        for(k = 0; k < seg_len; k++)
+          seg_dec[k] = decode_marker_char(seg[k]);
+        seg_dec[seg_len] = 0;
+        if(path_join_checked(cand, sizeof(cand), base, seg_dec) != 0)
+          continue;
+        if(xv6_lstat_path(cand, &st) != 0)
+          continue;
+        if(!last && st.type != 1)
+          continue;
+        if(path_append_unique(next, &next_count, max_matches, cand) != 0)
+          break;
+      }
+      if(next_count >= max_matches)
+        break;
+    }
+
+    cur_count = next_count;
+    for(i = 0; i < cur_count; i++)
+      k_copy_cstr(cur[i], MAXPATH, next[i]);
+    if(cur_count == 0)
+      goto empty;
+    if(last)
+      break;
+  }
+
+  for(i = 0; i < cur_count; i++){
+    int j;
+    for(j = i + 1; j < cur_count; j++){
+      if(strcmp(cur[j], cur[i]) < 0){
+        char tmp[MAXPATH];
+        k_copy_cstr(tmp, sizeof(tmp), cur[i]);
+        k_copy_cstr(cur[i], sizeof(cur[i]), cur[j]);
+        k_copy_cstr(cur[j], sizeof(cur[j]), tmp);
+      }
+    }
+  }
+
+  for(i = 0; i < cur_count; i++){
+    out_matches[i] = strdup(cur[i]);
+    if(out_matches[i] == 0){
+      int j;
+      for(j = 0; j < i; j++){
+        free(out_matches[j]);
+        out_matches[j] = 0;
+      }
+      goto out;
+    }
+  }
+
+  rc = cur_count;
+  goto out;
+
+empty:
+  rc = 0;
+
+out:
+  if(cur)
+    free(cur);
+  if(next)
+    free(next);
+  return rc;
+}
+
+static int dispatch_expanded_command(int argc, char **argv, int run_bg, int last_status, int *out_status)
+{
+  char *expanded[KSH_MAX_ARGS];
+  char *owned[KSH_MAX_ARGS];
+  int expanded_argc = 0;
+  int owned_n = 0;
+  int i;
+  int rc;
+
+  if(out_status)
+    *out_status = 1;
+  if(argc <= 0 || argv == 0)
+    return -1;
+
+  for(i = 0; i < argc; i++){
+    char *v = expand_vars_alloc(argv[i], last_status);
+    int fd_tok = 0;
+    if(v == 0){
+      puts_line("expand: no memory");
+      goto fail;
+    }
+    if(owned_n >= KSH_MAX_ARGS){
+      free(v);
+      puts_line("expand: too many args");
+      goto fail;
+    }
+    owned[owned_n++] = v;
+
+    if(!is_redir_token(v) && strcmp(v, "|") != 0 && strcmp(v, "&") != 0 && !is_fd_token(v, &fd_tok) &&
+       token_has_unescaped_glob(v))
+    {
+      char *matches[KSH_MAX_ARGS];
+      int mcount;
+      int m;
+      memset(matches, 0, sizeof(matches));
+      mcount = expand_glob_token(v, matches, KSH_MAX_ARGS - expanded_argc);
+      if(mcount < 0){
+        puts_line("glob: failed");
+        goto fail;
+      }
+      if(mcount == 0){
+        decode_markers_inplace(v);
+        if(expanded_argc >= KSH_MAX_ARGS){
+          puts_line("expand: too many args");
+          goto fail;
+        }
+        expanded[expanded_argc++] = v;
+      } else {
+        int replaced = 0;
+        for(m = 0; m < mcount; m++){
+          if(matches[m] == 0)
+            continue;
+          if(expanded_argc >= KSH_MAX_ARGS){
+            free(matches[m]);
+            puts_line("expand: too many args");
+            goto fail;
+          }
+          if(owned_n >= KSH_MAX_ARGS){
+            free(matches[m]);
+            puts_line("expand: too many args");
+            goto fail;
+          }
+          expanded[expanded_argc++] = matches[m];
+          owned[owned_n++] = matches[m];
+          replaced = 1;
+        }
+        if(replaced){
+          int j;
+          for(j = 0; j < owned_n; j++){
+            if(owned[j] == v){
+              free(owned[j]);
+              owned[j] = owned[owned_n - 1];
+              owned_n--;
+              break;
+            }
+          }
+        } else {
+          decode_markers_inplace(v);
+          if(expanded_argc >= KSH_MAX_ARGS){
+            puts_line("expand: too many args");
+            goto fail;
+          }
+          expanded[expanded_argc++] = v;
+        }
+      }
+    } else {
+      decode_markers_inplace(v);
+      if(expanded_argc >= KSH_MAX_ARGS){
+        puts_line("expand: too many args");
+        goto fail;
+      }
+      expanded[expanded_argc++] = v;
+    }
+  }
+
+  rc = dispatch_command(expanded_argc, expanded, run_bg);
+  for(i = 0; i < owned_n; i++)
+    free(owned[i]);
+  if(rc < 0){
+    if(out_status)
+      *out_status = 1;
+    return -1;
+  }
+  if(out_status)
+    *out_status = rc & 0xff;
+  return 0;
+
+fail:
+  for(i = 0; i < owned_n; i++)
+    free(owned[i]);
+  if(out_status)
+    *out_status = 1;
+  return -1;
+}
+
+static int list_sep_to_op(const char *tok)
+{
+  if(tok == 0)
+    return 0;
+  if(strcmp(tok, ";") == 0)
+    return 1;
+  if(strcmp(tok, "&&") == 0)
+    return 2;
+  if(strcmp(tok, "||") == 0)
+    return 3;
+  return 0;
+}
+
+static int parse_redir_op(const char *op, int *target_fd, int *is_input, int *is_append)
+{
+  if(op == 0 || target_fd == 0 || is_input == 0 || is_append == 0)
+    return -1;
+  if(op[0] >= '0' && op[0] <= '2'){
+    *target_fd = (int)(op[0] - '0');
+    if(op[1] == '<' && op[2] == 0){
+      *is_input = 1;
+      *is_append = 0;
+      return 0;
+    }
+    if(op[1] == '>' && op[2] == 0){
+      *is_input = 0;
+      *is_append = 0;
+      return 0;
+    }
+    if(op[1] == '>' && op[2] == '>' && op[3] == 0){
+      *is_input = 0;
+      *is_append = 1;
+      return 0;
+    }
+    return -1;
+  }
+
+  if(strcmp(op, "<") == 0){
+    *target_fd = 0;
+    *is_input = 1;
+    *is_append = 0;
+    return 0;
+  }
+  if(strcmp(op, ">") == 0){
+    *target_fd = 1;
+    *is_input = 0;
+    *is_append = 0;
+    return 0;
+  }
+  if(strcmp(op, ">>") == 0){
+    *target_fd = 1;
+    *is_input = 0;
+    *is_append = 1;
+    return 0;
+  }
+  return -1;
+}
+
 static int parse_exec_and_redir(int argc, char **argv, const ksh_io_t *base_io, char **exec_argv, int max_exec,
                                 int *out_argc, ksh_io_t *out_io, int *out_status)
 {
@@ -1404,6 +2161,8 @@ static int parse_exec_and_redir(int argc, char **argv, const ksh_io_t *base_io, 
   io = *base_io;
   for(i = 0; i < argc; i++){
     int target_fd;
+    int is_input;
+    int is_append;
     int flags;
     int fd;
     int *dst;
@@ -1411,7 +2170,9 @@ static int parse_exec_and_redir(int argc, char **argv, const ksh_io_t *base_io, 
     const char *path;
 
     if(!is_redir_token(op)){
-      if(strcmp(op, "|") == 0 || strcmp(op, "&") == 0){
+      if(strcmp(op, "|") == 0 || strcmp(op, "&") == 0 || strcmp(op, "&&") == 0 || strcmp(op, "||") == 0 ||
+         strcmp(op, ";") == 0)
+      {
         puts_line("syntax: bad token");
         if(out_status)
           *out_status = 2;
@@ -1427,10 +2188,13 @@ static int parse_exec_and_redir(int argc, char **argv, const ksh_io_t *base_io, 
       continue;
     }
 
-    target_fd = (op[0] == '<') ? 0 : 1;
-    if(n > 0 && is_fd_token(exec_argv[n - 1], &target_fd))
-      n--;
-    if(op[0] == '<' && target_fd != 0){
+    if(parse_redir_op(op, &target_fd, &is_input, &is_append) != 0){
+      puts_line("syntax: bad token");
+      if(out_status)
+        *out_status = 2;
+      goto fail;
+    }
+    if(is_input && target_fd != 0){
       puts_line("redir: bad input fd");
       if(out_status)
         *out_status = 2;
@@ -1451,9 +2215,9 @@ static int parse_exec_and_redir(int argc, char **argv, const ksh_io_t *base_io, 
       goto fail;
     }
 
-    if(op[0] == '<')
+    if(is_input)
       flags = O_RDONLY;
-    else if(strcmp(op, ">>") == 0)
+    else if(is_append)
       flags = O_WRONLY | O_CREAT | O_APPEND;
     else
       flags = O_WRONLY | O_CREAT | O_TRUNC;
@@ -2390,6 +3154,8 @@ static int register_default_symbols(void)
     { "pipe", (void *)hostabi_posix_fs_pipe },
     { "__xv6_host_pipe", (void *)hostabi_posix_fs_pipe },
     { "open", (void *)k_open },
+    { "openat", (void *)k_openat },
+    { "__xv6_host_openat", (void *)k_openat },
     { "creat", (void *)k_creat },
     { "read", (void *)k_read },
     { "write", (void *)k_write },
@@ -2463,9 +3229,15 @@ static int register_default_symbols(void)
     { "__xv6_host_lstat", (void *)k_lstat },
     { "fstat", (void *)k_fstat },
     { "__xv6_host_fstat", (void *)k_fstat },
+    { "fstatat", (void *)k_fstatat },
+    { "__xv6_host_fstatat", (void *)k_fstatat },
     { "access", (void *)k_access },
     { "mkdir", (void *)k_mkdir },
+    { "mkdirat", (void *)k_mkdirat },
+    { "__xv6_host_mkdirat", (void *)k_mkdirat },
     { "unlink", (void *)k_unlink },
+    { "unlinkat", (void *)k_unlinkat },
+    { "__xv6_host_unlinkat", (void *)k_unlinkat },
     { "rmdir", (void *)k_rmdir },
     { "chmod", (void *)k_chmod },
     { "chdir", (void *)k_chdir },
@@ -2508,8 +3280,14 @@ static int register_default_symbols(void)
     { "truncate", (void *)k_truncate },
     { "link", (void *)k_link },
     { "rename", (void *)k_rename },
+    { "renameat", (void *)k_renameat },
+    { "__xv6_host_renameat", (void *)k_renameat },
     { "symlink", (void *)k_symlink },
+    { "symlinkat", (void *)k_symlinkat },
+    { "__xv6_host_symlinkat", (void *)k_symlinkat },
     { "readlink", (void *)k_readlink },
+    { "readlinkat", (void *)k_readlinkat },
+    { "__xv6_host_readlinkat", (void *)k_readlinkat },
     { "mknod", (void *)k_mknod },
     { "mkfifo", (void *)k_mkfifo },
     { "signal", (void *)k_signal },
@@ -2517,6 +3295,8 @@ static int register_default_symbols(void)
     { "sigaction", (void *)k_sigaction },
     { "__xv6_host_sigaction", (void *)k_sigaction },
     { "sigprocmask", (void *)k_sigprocmask },
+    { "sigsuspend", (void *)k_sigsuspend },
+    { "__xv6_host_sigsuspend", (void *)k_sigsuspend },
     { "sigemptyset", (void *)k_sigemptyset },
     { "sigfillset", (void *)k_sigfillset },
     { "sigaddset", (void *)k_sigaddset },
@@ -2717,9 +3497,11 @@ static int eval_line_inner(const char *line, int *exit_code)
   char buf[256];
   char *argv[KSH_MAX_ARGS];
   int argc;
-  int run_bg = 0;
+  int seg_start;
+  int prev_op = 0;
+  int last_status = 0;
+  int i;
   size_t n;
-  int rc;
 
   if(line == 0)
     return -1;
@@ -2758,21 +3540,62 @@ static int eval_line_inner(const char *line, int *exit_code)
     return 0;
   }
 
-  if(strcmp(argv[argc - 1], "&") == 0){
-    run_bg = 1;
-    argc--;
-    if(argc == 0){
-      puts_line("syntax: command &");
+  seg_start = 0;
+  for(i = 0; i <= argc; i++){
+    int sep_op = 0;
+    int seg_len = 0;
+    int run_bg = 0;
+    int exec_len = 0;
+    int should_exec = 1;
+
+    if(i < argc)
+      sep_op = list_sep_to_op(argv[i]);
+    if(i < argc && sep_op == 0)
+      continue;
+
+    seg_len = i - seg_start;
+    if(seg_len <= 0){
+      puts_line("syntax: bad separator");
       if(exit_code)
         *exit_code = 2;
       return -1;
     }
+    exec_len = seg_len;
+    if(strcmp(argv[seg_start + exec_len - 1], "&") == 0){
+      run_bg = 1;
+      exec_len--;
+      if(exec_len <= 0){
+        puts_line("syntax: command &");
+        if(exit_code)
+          *exit_code = 2;
+        return -1;
+      }
+    }
+
+    if(prev_op == 2 && last_status != 0)
+      should_exec = 0;
+    else if(prev_op == 3 && last_status == 0)
+      should_exec = 0;
+
+    if(should_exec){
+      int cmd_status = 1;
+      if(dispatch_expanded_command(exec_len, &argv[seg_start], run_bg, last_status, &cmd_status) != 0){
+        if(exit_code)
+          *exit_code = 1;
+        return -1;
+      }
+      last_status = cmd_status & 0xff;
+    }
+
+    if(i == argc)
+      break;
+    prev_op = sep_op;
+    seg_start = i + 1;
   }
 
-  rc = dispatch_command(argc, argv, run_bg);
   if(exit_code)
-    *exit_code = (rc >= 0) ? rc : 1;
-  return (rc < 0) ? -1 : 0;
+    *exit_code = last_status & 0xff;
+  return 0;
 }
 
 int shell_runtime_init(void)
@@ -2802,6 +3625,7 @@ int shell_runtime_init(void)
   xv6_vfs_reset();
   hostabi_posix_io_init();
   hostabi_posix_set_tty_signal_handler(k_tty_signal_handler);
+  hostabi_posix_set_tty_foreground_query(k_tty_is_foreground_query);
   memset(&kcfg, 0, sizeof(kcfg));
   kcfg.dev_mode = XV6_KMOD_DEV_MODE_DEFAULT;
   kcfg.allow_unsigned_dev = XV6_KMOD_ALLOW_UNSIGNED_DEV_DEFAULT;

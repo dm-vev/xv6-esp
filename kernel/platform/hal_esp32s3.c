@@ -56,6 +56,13 @@ static void hal_console_pushback_byte_locked(uint8 c)
   g_console_pushback_n++;
 }
 
+static void hal_console_clear_pushback_locked(void)
+{
+  g_console_pushback_r = 0;
+  g_console_pushback_w = 0;
+  g_console_pushback_n = 0;
+}
+
 static int hal_console_pop_pushback(void)
 {
   int out;
@@ -219,6 +226,16 @@ int hal_console_poll_ctrl_c(void)
 int hal_console_poll_ctrl_z(void)
 {
   return hal_console_poll_byte(0x1a);
+}
+
+void hal_console_discard_input(void)
+{
+  portENTER_CRITICAL(&g_console_pushback_mu);
+  hal_console_clear_pushback_locked();
+  portEXIT_CRITICAL(&g_console_pushback_mu);
+
+  while(hal_console_getc_hw() >= 0){
+  }
 }
 
 void hal_console_putc(int c)

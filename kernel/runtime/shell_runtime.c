@@ -79,6 +79,7 @@ typedef struct {
   int wait_pending_cont;
   int exit_code;
   int reason;
+  int stop_signal;
   int user_visible;
   int is_pipe;
   int max_heap_kb;

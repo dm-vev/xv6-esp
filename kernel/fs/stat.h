@@ -7,6 +7,7 @@
  * - T_FILE: Regular file
  * - T_DEVICE: Device file
  * - T_SYMLINK: Symbolic link
+ * - T_FIFO: Named pipe (FIFO)
  *
  * Also defines struct stat for file metadata.
  */
@@ -14,6 +15,7 @@
 #define T_FILE    2   // File
 #define T_DEVICE  3   // Device
 #define T_SYMLINK 4   // Symbolic link
+#define T_FIFO    5   // Named pipe (FIFO)
 
 struct stat {
   int dev;     // File system's disk device

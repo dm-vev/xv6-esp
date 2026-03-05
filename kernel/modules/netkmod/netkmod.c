@@ -438,7 +438,7 @@ int netkmod_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfd
   }
 
   if(timeout != 0){
-    if(timeout->tv_sec < 0 || timeout->tv_usec < 0){
+    if(timeout->tv_sec < 0 || timeout->tv_usec < 0 || timeout->tv_usec >= 1000000){
       errno = EINVAL;
       return -1;
     }

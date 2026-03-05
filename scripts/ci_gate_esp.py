@@ -67,6 +67,10 @@ def main() -> int:
             f"XV6_SKIP_BUILD=1 python3 ./scripts/qemu_ci.py --skip-build --suite regressions --retries {qemu_retries}",
         ),
         (
+            "qemu_posix",
+            f"XV6_SKIP_BUILD=1 python3 ./scripts/qemu_ci.py --skip-build --suite posix --retries {qemu_retries}",
+        ),
+        (
             "qemu_stress",
             f"XV6_SKIP_BUILD=1 python3 ./scripts/qemu_ci.py --skip-build --suite stress --retries {qemu_retries}",
         ),

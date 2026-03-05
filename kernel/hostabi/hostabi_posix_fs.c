@@ -23,6 +23,7 @@
 #define XV6_KSTAT_T_FILE 2
 #define XV6_KSTAT_T_DEVICE 3
 #define XV6_KSTAT_T_SYMLINK 4
+#define XV6_KSTAT_T_FIFO 5
 
 /**
  * @brief Map xv6 errno to POSIX errno with fallback
@@ -80,6 +81,7 @@ static int map_open_flags(int flags)
  * Maps xv6 stat types to POSIX file types:
  * - XV6_KSTAT_T_DIR -> S_IFDIR
  * - XV6_KSTAT_T_DEVICE -> S_IFCHR
+ * - XV6_KSTAT_T_FIFO -> S_IFIFO
  * - otherwise -> S_IFREG
  */
 static mode_t mode_from_xv6(const xv6_kstat_t *kst)
@@ -95,6 +97,8 @@ static mode_t mode_from_xv6(const xv6_kstat_t *kst)
     type_bits = S_IFCHR;
   else if(kst->type == XV6_KSTAT_T_SYMLINK)
     type_bits = S_IFLNK;
+  else if(kst->type == XV6_KSTAT_T_FIFO)
+    type_bits = S_IFIFO;
   else if(kst->type == XV6_KSTAT_T_FILE)
     type_bits = S_IFREG;
 
@@ -205,6 +209,8 @@ int hostabi_posix_fs_read(int fd, void *buf, size_t size)
     errno = EINVAL;
     return -1;
   }
+  if(hostabi_posix_tty_before_read(fd) != 0)
+    return -1;
 
   rc = xv6_read(fd, buf, (uint32)size);
   if(rc < 0)
@@ -234,6 +240,8 @@ int hostabi_posix_fs_write(int fd, const void *buf, size_t size)
     errno = EINVAL;
     return -1;
   }
+  if(hostabi_posix_tty_before_write(fd) != 0)
+    return -1;
 
   rc = xv6_write(fd, buf, (uint32)size);
   if(rc < 0)
@@ -275,6 +283,10 @@ int hostabi_posix_fs_dup(int fd)
     return set_errno_from_xv6_or(EBADF);
 
   hostabi_posix_io_on_dup(fd, rc);
+#ifdef F_SETFD
+  /* POSIX: dup() returns descriptor with FD_CLOEXEC cleared. */
+  (void)hostabi_posix_fcntl(rc, F_SETFD, 0);
+#endif
   return rc;
 }
 
@@ -352,6 +364,10 @@ int hostabi_posix_fs_dup2(int oldfd, int newfd)
     (void)xv6_close(dups[i]);
     hostabi_posix_io_on_close(dups[i], 0);
   }
+#ifdef F_SETFD
+  /* POSIX: dup2() clears FD_CLOEXEC on the target descriptor. */
+  (void)hostabi_posix_fcntl(rc, F_SETFD, 0);
+#endif
   if(backup_fd >= 0){
     (void)xv6_close(backup_fd);
     hostabi_posix_io_on_close(backup_fd, 0);

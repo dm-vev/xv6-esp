@@ -41,7 +41,7 @@
 typedef struct {
   uint32 ino;     /**< Inode number */
   uint32 size;    /**< File size in bytes */
-  uint16 type;    /**< File type (1=dir, 2=file, 3=device, 4=symlink) */
+  uint16 type;    /**< File type (1=dir, 2=file, 3=device, 4=symlink, 5=fifo) */
   uint16 nlink;   /**< Number of hard links */
   uint16 mode;    /**< Permission bits (low 12 bits) */
   uint16 uid;     /**< Owner id */
@@ -130,6 +130,13 @@ int xv6fs_write_file_path(const char *path, const void *data, uint32 size);
  * @return 0 on success, -1 on failure
  */
 int xv6fs_mkdir_path(const char *path);
+
+/**
+ * @brief Create named pipe (FIFO)
+ * @param path FIFO path to create
+ * @return 0 on success, -1 on failure
+ */
+int xv6fs_mkfifo_path(const char *path);
 
 /**
  * @brief Remove file
@@ -276,6 +283,13 @@ int xv6_getcwd(char *out_path, int out_len);
 int xv6_ptsname(int master_fd, char *out_path, int out_len);
 
 /**
+ * @brief Flush unread input from a terminal-like descriptor
+ * @param fd File descriptor
+ * @return 0 on success, -1 on failure
+ */
+int xv6_tty_flush_input(int fd);
+
+/**
  * @brief Create pipe
  * @param out_read_fd Pointer for read end fd
  * @param out_write_fd Pointer for write end fd
@@ -349,6 +363,18 @@ int xv6_lstat_path(const char *path, xv6_kstat_t *st);
  * @return 0 on success, -1 on failure
  */
 int xv6_fstat(int fd, xv6_kstat_t *st);
+
+/**
+ * @brief Get canonical absolute path for an open descriptor
+ * @param fd File descriptor
+ * @param out_path Output buffer for absolute path
+ * @param out_len Output buffer size
+ * @return 0 on success, -1 on failure
+ *
+ * Returns the path tracked for the descriptor at open time. This is primarily
+ * used by host ABI wrappers that need dirfd-relative path resolution.
+ */
+int xv6_fd_path(int fd, char *out_path, int out_len);
 
 /**
  * @brief Get last errno for current task

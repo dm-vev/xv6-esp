@@ -67,6 +67,21 @@ static int shell_allow_ctrl_c_poll(void)
 #define CLD_CONTINUED 6
 #endif
 
+#ifndef AT_FDCWD
+#define AT_FDCWD (-100)
+#endif
+#ifndef AT_SYMLINK_NOFOLLOW
+#define AT_SYMLINK_NOFOLLOW 0x100
+#endif
+#ifndef AT_REMOVEDIR
+#define AT_REMOVEDIR 0x200
+#endif
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+
+#define K_AT_PATH_MAX 320
+
 static void k_copy_cstr(char *dst, int dst_len, const char *src)
 {
   if(dst == 0 || dst_len <= 0)
@@ -713,6 +728,245 @@ static int k_open(const char *path, int flags, ...)
   return hostabi_posix_fs_open_mode(path, flags, mode);
 }
 
+static int k_at_copy_path(const char *path, char *out, int out_len)
+{
+  int n;
+
+  path = (const char *)elf_loader_translate_ptr(path);
+  if(path == 0 || out == 0 || out_len <= 1){
+    errno = EINVAL;
+    return -1;
+  }
+
+  n = (int)strlen(path);
+  if(n >= out_len){
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  memcpy(out, path, (size_t)n + 1u);
+  return 0;
+}
+
+static int k_at_dir_base_path(int dirfd, char *out, int out_len)
+{
+  struct stat st;
+  int real_fd;
+
+  if(out == 0 || out_len <= 1){
+    errno = EINVAL;
+    return -1;
+  }
+
+  if(dirfd == AT_FDCWD){
+    if(xv6_getcwd(out, out_len) != 0){
+      errno = xv6_last_errno();
+      if(errno <= 0)
+        errno = EIO;
+      return -1;
+    }
+    return 0;
+  }
+
+  real_fd = hostabi_posix_fs_map_fd(dirfd);
+  if(real_fd < 0){
+    errno = EBADF;
+    return -1;
+  }
+
+  if(hostabi_posix_fs_fstat(real_fd, &st) != 0)
+    return -1;
+  if((st.st_mode & S_IFMT) != S_IFDIR){
+    errno = ENOTDIR;
+    return -1;
+  }
+
+  if(xv6_fd_path(real_fd, out, out_len) != 0){
+    errno = xv6_last_errno();
+    if(errno <= 0)
+      errno = EIO;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_at_resolve_path(int dirfd, const char *path, char *out, int out_len)
+{
+  char rel[K_AT_PATH_MAX];
+  char base[K_AT_PATH_MAX];
+  int n;
+
+  if(out == 0 || out_len <= 1){
+    errno = EINVAL;
+    return -1;
+  }
+  if(k_at_copy_path(path, rel, sizeof(rel)) != 0)
+    return -1;
+  if(rel[0] == 0){
+    errno = ENOENT;
+    return -1;
+  }
+
+  if(rel[0] == '/'){
+    n = (int)strlen(rel);
+    if(n >= out_len){
+      errno = ENAMETOOLONG;
+      return -1;
+    }
+    memcpy(out, rel, (size_t)n + 1u);
+    return 0;
+  }
+
+  if(k_at_dir_base_path(dirfd, base, sizeof(base)) != 0)
+    return -1;
+
+  if(strcmp(base, "/") == 0)
+    n = snprintf(out, (size_t)out_len, "/%s", rel);
+  else
+    n = snprintf(out, (size_t)out_len, "%s/%s", base, rel);
+  if(n < 0 || n >= out_len){
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_openat(int dirfd, const char *path, int flags, ...)
+{
+  mode_t mode = 0;
+  char abs_path[K_AT_PATH_MAX];
+
+  if(flags & O_CREAT){
+    va_list ap;
+    va_start(ap, flags);
+    mode = (mode_t)va_arg(ap, int);
+    va_end(ap);
+  }
+
+  if(k_at_resolve_path(dirfd, path, abs_path, sizeof(abs_path)) != 0)
+    return -1;
+  return hostabi_posix_fs_open_mode(abs_path, flags, mode);
+}
+
+static int k_fstatat(int dirfd, const char *path, struct stat *st, int flags)
+{
+  char user_path[K_AT_PATH_MAX];
+  char abs_path[K_AT_PATH_MAX];
+
+  if((flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) != 0){
+    errno = EINVAL;
+    return -1;
+  }
+
+  if(k_at_copy_path(path, user_path, sizeof(user_path)) != 0)
+    return -1;
+
+  if(user_path[0] == 0){
+    if((flags & AT_EMPTY_PATH) == 0){
+      errno = ENOENT;
+      return -1;
+    }
+    if(dirfd == AT_FDCWD){
+      errno = EINVAL;
+      return -1;
+    }
+    return hostabi_posix_fs_fstat(dirfd, st);
+  }
+
+  if(k_at_resolve_path(dirfd, user_path, abs_path, sizeof(abs_path)) != 0)
+    return -1;
+  if((flags & AT_SYMLINK_NOFOLLOW) != 0)
+    return hostabi_posix_fs_lstat(abs_path, st);
+  return hostabi_posix_fs_stat(abs_path, st);
+}
+
+static int k_unlinkat(int dirfd, const char *path, int flags)
+{
+  char abs_path[K_AT_PATH_MAX];
+  int rc;
+
+  if((flags & ~AT_REMOVEDIR) != 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(k_at_resolve_path(dirfd, path, abs_path, sizeof(abs_path)) != 0)
+    return -1;
+  if((flags & AT_REMOVEDIR) != 0)
+    rc = xv6fs_rmdir_path(abs_path);
+  else
+    rc = xv6fs_unlink_path(abs_path);
+  if(rc != 0){
+    errno = xv6_last_errno();
+    if(errno <= 0)
+      errno = EIO;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath)
+{
+  char old_abs[K_AT_PATH_MAX];
+  char new_abs[K_AT_PATH_MAX];
+
+  if(k_at_resolve_path(olddirfd, oldpath, old_abs, sizeof(old_abs)) != 0)
+    return -1;
+  if(k_at_resolve_path(newdirfd, newpath, new_abs, sizeof(new_abs)) != 0)
+    return -1;
+  if(xv6fs_rename_path(old_abs, new_abs) != 0){
+    errno = xv6_last_errno();
+    if(errno <= 0)
+      errno = EIO;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_mkdirat(int dirfd, const char *path, mode_t mode)
+{
+  char abs_path[K_AT_PATH_MAX];
+  (void)mode;
+
+  if(k_at_resolve_path(dirfd, path, abs_path, sizeof(abs_path)) != 0)
+    return -1;
+  if(xv6fs_mkdir_path(abs_path) != 0){
+    errno = xv6_last_errno();
+    if(errno <= 0)
+      errno = EIO;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_symlinkat(const char *target, int newdirfd, const char *linkpath)
+{
+  char abs_link[K_AT_PATH_MAX];
+  const char *target_host;
+
+  if(k_at_resolve_path(newdirfd, linkpath, abs_link, sizeof(abs_link)) != 0)
+    return -1;
+  target_host = (const char *)elf_loader_translate_ptr(target);
+  if(target_host == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(xv6fs_symlink_path(target_host, abs_link) != 0){
+    errno = xv6_last_errno();
+    if(errno <= 0)
+      errno = EIO;
+    return -1;
+  }
+  return 0;
+}
+
+static int k_readlinkat(int dirfd, const char *path, char *buf, size_t bufsz)
+{
+  char abs_path[K_AT_PATH_MAX];
+
+  if(k_at_resolve_path(dirfd, path, abs_path, sizeof(abs_path)) != 0)
+    return -1;
+  return hostabi_posix_fs_readlink(abs_path, buf, bufsz);
+}
+
 static int k_creat(const char *path, mode_t mode)
 {
   return hostabi_posix_fs_creat(path, mode);
@@ -1023,6 +1277,10 @@ static int k_posix_poll(struct pollfd *fds, nfds_t nfds, int timeout)
 static int k_posix_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
 {
   k_posix_socket_ctx_ensure();
+  if(nfds < 0 || nfds > FD_SETSIZE){
+    errno = EINVAL;
+    return -1;
+  }
   if(readfds != 0){
     readfds = (fd_set *)elf_loader_translate_ptr(readfds);
     if(readfds == 0){
@@ -1047,6 +1305,10 @@ static int k_posix_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *e
   if(timeout != 0){
     timeout = (struct timeval *)elf_loader_translate_ptr(timeout);
     if(timeout == 0){
+      errno = EINVAL;
+      return -1;
+    }
+    if(timeout->tv_sec < 0 || timeout->tv_usec < 0 || timeout->tv_usec >= 1000000){
       errno = EINVAL;
       return -1;
     }
@@ -1135,8 +1397,10 @@ static int k_posix_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen
 
 /*
  * Stable socket ABI stubs.
- * A network kmod can override these symbols at runtime; until then
- * they fail with ENOSYS instead of creating unresolved symbols.
+ * A network kmod can override these symbols at runtime.
+ * Socket entrypoints fail with ENOSYS until netkmod is active, while
+ * poll/select keep a host fallback so generic descriptor multiplexing
+ * remains available without a network module.
  */
 static int k_socket(int domain, int type, int protocol)
 {
@@ -1228,22 +1492,12 @@ static ssize_t k_recvfrom(int fd, void *buf, size_t len, int flags, struct socka
 
 static int k_poll(struct pollfd *fds, nfds_t nfds, int timeout)
 {
-  (void)fds;
-  (void)nfds;
-  (void)timeout;
-  errno = ENOSYS;
-  return -1;
+  return k_posix_poll(fds, nfds, timeout);
 }
 
 static int k_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
 {
-  (void)nfds;
-  (void)readfds;
-  (void)writefds;
-  (void)exceptfds;
-  (void)timeout;
-  errno = ENOSYS;
-  return -1;
+  return k_posix_select(nfds, readfds, writefds, exceptfds, timeout);
 }
 
 static int k_shutdown(int fd, int how)
@@ -1618,11 +1872,25 @@ static int k_readlink(const char *path, char *buf, size_t bufsz)
 static int k_mknod(const char *path, mode_t mode, dev_t dev)
 {
   path = (const char *)elf_loader_translate_ptr(path);
-  (void)mode;
   (void)dev;
   if(path == 0){
     errno = EINVAL;
     return -1;
+  }
+  if((mode & S_IFMT) == S_IFIFO){
+    if(xv6fs_mkfifo_path(path) != 0){
+      errno = xv6_last_errno();
+      if(errno <= 0)
+        errno = EIO;
+      return -1;
+    }
+    if(xv6_chmod(path, (int)(mode & 07777u)) != 0){
+      errno = xv6_last_errno();
+      if(errno <= 0)
+        errno = EIO;
+      return -1;
+    }
+    return 0;
   }
   errno = ENOSYS;
   return -1;
@@ -1631,13 +1899,23 @@ static int k_mknod(const char *path, mode_t mode, dev_t dev)
 static int k_mkfifo(const char *path, mode_t mode)
 {
   path = (const char *)elf_loader_translate_ptr(path);
-  (void)mode;
   if(path == 0){
     errno = EINVAL;
     return -1;
   }
-  errno = ENOSYS;
-  return -1;
+  if(xv6fs_mkfifo_path(path) != 0){
+    errno = xv6_last_errno();
+    if(errno <= 0)
+      errno = EIO;
+    return -1;
+  }
+  if(xv6_chmod(path, (int)(mode & 07777u)) != 0){
+    errno = xv6_last_errno();
+    if(errno <= 0)
+      errno = EIO;
+    return -1;
+  }
+  return 0;
 }
 
 #define KSH_SIG_MAX 32
@@ -1646,6 +1924,8 @@ static int k_mkfifo(const char *path, mode_t mode)
 typedef struct {
   TaskHandle_t task;
   void (*handlers[KSH_SIG_MAX])(int);
+  uint32 action_mask[KSH_SIG_MAX];
+  int action_flags[KSH_SIG_MAX];
   uint32 blocked_mask;
   uint32 pending_mask;
 } ksh_sig_state_t;
@@ -1659,8 +1939,10 @@ static int g_shell_pgid = 1;
 static int g_tty_fg_pgid = 1;
 
 static int k_tty_signal_handler(int sig);
+static int k_tty_is_foreground_query(int fd);
 static int terminate_job_id(int id, int exit_code, int reason);
 static int suspend_job_id(int id);
+static int suspend_job_id_with_signal(int id, int sig);
 static int resume_job_id(int id);
 
 static void sig_state_lock_take(void)
@@ -1698,7 +1980,32 @@ static uint32 k_sig_mask_bit(int sig)
 {
   if(!k_sig_valid(sig))
     return 0;
-  return (uint32)1u << (uint32)(sig - 1);
+  return (uint32)1u << (uint32)sig;
+}
+
+static uint32 k_sig_nonmaskable_bits(void)
+{
+  uint32 mask = 0;
+#ifdef SIGKILL
+  mask |= k_sig_mask_bit(SIGKILL);
+#endif
+#ifdef SIGSTOP
+  mask |= k_sig_mask_bit(SIGSTOP);
+#endif
+  return mask;
+}
+
+static int k_sig_catchable(int sig)
+{
+#ifdef SIGKILL
+  if(sig == SIGKILL)
+    return 0;
+#endif
+#ifdef SIGSTOP
+  if(sig == SIGSTOP)
+    return 0;
+#endif
+  return 1;
 }
 
 static ksh_sig_state_t *sig_state_slot_locked(TaskHandle_t task, int create)
@@ -1826,6 +2133,21 @@ static int proc_sid_for_task_locked(TaskHandle_t task)
   return g_shell_sid;
 }
 
+static TaskHandle_t proc_task_for_pid_locked(int pid)
+{
+  int slot;
+
+  if(pid <= 0)
+    return 0;
+  if(g_interactive_task && pid == g_shell_pid)
+    return g_interactive_task;
+
+  slot = job_find_slot_by_pid_locked(pid);
+  if(slot >= 0)
+    return g_jobs[slot].task;
+  return 0;
+}
+
 static int proc_group_exists_in_sid_locked(int pgid, int sid)
 {
   int i;
@@ -1868,20 +2190,34 @@ static void k_signal_post_pending(TaskHandle_t task, int sig)
   sig_state_lock_give();
 }
 
-static void k_signal_post_sigchld(void)
+static void k_signal_post_sigchld(int parent_pid)
 {
-  if(g_interactive_task)
-    k_signal_post_pending(g_interactive_task, SIGCHLD);
+  TaskHandle_t parent = 0;
+
+  if(parent_pid <= 0)
+    return;
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  parent = proc_task_for_pid_locked(parent_pid);
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+  if(parent)
+    k_signal_post_pending(parent, SIGCHLD);
 }
 
 static int k_signal_dispatch_pending_current(void)
 {
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int delivered_sig = 0;
 
   while(1){
     ksh_sig_state_t *slot;
     uint32 deliver_mask;
     uint32 bit;
+    uint32 old_blocked = 0;
+    uint32 blocked_during = 0;
+    uint32 action_mask = 0;
+    int action_flags = 0;
     int sig = 0;
     void (*handler)(int) = SIG_DFL;
 
@@ -1889,13 +2225,13 @@ static int k_signal_dispatch_pending_current(void)
     slot = sig_state_slot_locked(self, 0);
     if(slot == 0){
       sig_state_lock_give();
-      return 0;
+      return delivered_sig;
     }
 
     deliver_mask = slot->pending_mask & ~slot->blocked_mask;
     if(deliver_mask == 0){
       sig_state_lock_give();
-      return 0;
+      return delivered_sig;
     }
 
     for(sig = 1; sig < KSH_SIG_MAX; sig++){
@@ -1904,22 +2240,66 @@ static int k_signal_dispatch_pending_current(void)
         continue;
       slot->pending_mask &= ~bit;
       handler = slot->handlers[sig] ? slot->handlers[sig] : SIG_DFL;
+#ifdef SA_RESETHAND
+      action_flags = slot->action_flags[sig];
+      if((action_flags & SA_RESETHAND) != 0 && handler != SIG_DFL && handler != SIG_IGN){
+        slot->handlers[sig] = SIG_DFL;
+        slot->action_mask[sig] = 0;
+        slot->action_flags[sig] = 0;
+      }
+#else
+      action_flags = slot->action_flags[sig];
+#endif
+#if !defined(SA_NODEFER) && !defined(SA_RESETHAND)
+      (void)action_flags;
+#endif
+      action_mask = slot->action_mask[sig];
+      old_blocked = slot->blocked_mask;
+      blocked_during = old_blocked | action_mask;
+#ifdef SA_NODEFER
+      if((action_flags & SA_NODEFER) == 0)
+        blocked_during |= bit;
+#else
+      blocked_during |= bit;
+#endif
+      blocked_during &= ~k_sig_nonmaskable_bits();
+      slot->blocked_mask = blocked_during;
       break;
     }
     sig_state_lock_give();
 
     if(sig <= 0)
-      return 0;
+      return delivered_sig;
 
-    if(handler == SIG_IGN)
+    if(handler == SIG_IGN){
+      sig_state_lock_take();
+      slot = sig_state_slot_locked(self, 0);
+      if(slot && slot->blocked_mask == blocked_during)
+        slot->blocked_mask = old_blocked;
+      sig_state_lock_give();
       continue;
+    }
     if(handler == SIG_DFL){
-      if(sig == SIGCHLD)
+      if(sig == SIGCHLD){
+        sig_state_lock_take();
+        slot = sig_state_slot_locked(self, 0);
+        if(slot && slot->blocked_mask == blocked_during)
+          slot->blocked_mask = old_blocked;
+        sig_state_lock_give();
         continue;
+      }
       k_exit(128 + sig);
-      return 0;
+      return delivered_sig;
     }
     handler(sig);
+
+    sig_state_lock_take();
+    slot = sig_state_slot_locked(self, 0);
+    if(slot && slot->blocked_mask == blocked_during)
+      slot->blocked_mask = old_blocked;
+    sig_state_lock_give();
+
+    delivered_sig = sig;
   }
 }
 
@@ -1929,7 +2309,7 @@ static void (*k_signal(int sig, void (*handler)(int)))(int)
   ksh_sig_state_t *slot;
   void (*old_handler)(int);
 
-  if(!k_sig_valid(sig) || handler == SIG_ERR){
+  if(!k_sig_valid(sig) || !k_sig_catchable(sig) || handler == SIG_ERR){
     errno = EINVAL;
     return SIG_ERR;
   }
@@ -1944,6 +2324,8 @@ static void (*k_signal(int sig, void (*handler)(int)))(int)
 
   old_handler = slot->handlers[sig];
   slot->handlers[sig] = handler;
+  slot->action_mask[sig] = 0;
+  slot->action_flags[sig] = 0;
   sig_state_lock_give();
   return old_handler ? old_handler : SIG_DFL;
 }
@@ -1953,11 +2335,14 @@ static int k_sigaction(int sig, const struct sigaction *act, struct sigaction *o
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
   ksh_sig_state_t *slot;
   void (*old_handler)(int);
+  uint32 old_mask = 0;
+  uint32 new_mask = 0;
+  int old_flags = 0;
 
   act = (const struct sigaction *)elf_loader_translate_ptr(act);
   oldact = (struct sigaction *)elf_loader_translate_ptr(oldact);
 
-  if(!k_sig_valid(sig)){
+  if(!k_sig_valid(sig) || !k_sig_catchable(sig)){
     errno = EINVAL;
     return -1;
   }
@@ -1979,10 +2364,13 @@ static int k_sigaction(int sig, const struct sigaction *act, struct sigaction *o
   }
 
   old_handler = (slot && slot->handlers[sig]) ? slot->handlers[sig] : SIG_DFL;
+  old_mask = slot ? slot->action_mask[sig] : 0;
+  old_flags = slot ? slot->action_flags[sig] : 0;
   if(oldact){
     memset(oldact, 0, sizeof(*oldact));
     oldact->sa_handler = old_handler;
-    memset(&oldact->sa_mask, 0, sizeof(oldact->sa_mask));
+    memcpy(&oldact->sa_mask, &old_mask, sizeof(old_mask));
+    oldact->sa_flags = old_flags;
   }
   if(act){
     if(act->sa_handler == SIG_ERR){
@@ -1990,7 +2378,11 @@ static int k_sigaction(int sig, const struct sigaction *act, struct sigaction *o
       errno = EINVAL;
       return -1;
     }
+    memcpy(&new_mask, &act->sa_mask, sizeof(new_mask));
+    new_mask &= ~k_sig_nonmaskable_bits();
     slot->handlers[sig] = act->sa_handler;
+    slot->action_mask[sig] = new_mask;
+    slot->action_flags[sig] = act->sa_flags;
   }
   sig_state_lock_give();
   return 0;
@@ -2042,6 +2434,7 @@ static int k_sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
       errno = EINVAL;
       return -1;
     }
+    slot->blocked_mask &= ~k_sig_nonmaskable_bits();
   }
   if(oldset_host){
     memset(oldset_host, 0, sizeof(*oldset_host));
@@ -2050,6 +2443,50 @@ static int k_sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
   sig_state_lock_give();
   (void)k_signal_dispatch_pending_current();
   return 0;
+}
+
+static int k_sigsuspend(const sigset_t *mask)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  ksh_sig_state_t *slot;
+  const sigset_t *mask_host;
+  uint32 suspend_mask;
+  uint32 old_mask;
+  int sig;
+
+  mask_host = (const sigset_t *)elf_loader_translate_ptr(mask);
+  if(mask == 0 || mask_host == 0 || !k_ptr_bytes_accessible(mask_host, sizeof(*mask_host))){
+    errno = EINVAL;
+    return -1;
+  }
+
+  memcpy(&suspend_mask, mask_host, sizeof(suspend_mask));
+  suspend_mask &= ~k_sig_nonmaskable_bits();
+
+  sig_state_lock_take();
+  slot = sig_state_slot_locked(self, 1);
+  if(slot == 0){
+    sig_state_lock_give();
+    errno = ENOMEM;
+    return -1;
+  }
+  old_mask = slot->blocked_mask;
+  slot->blocked_mask = suspend_mask;
+  sig_state_lock_give();
+
+  while(1){
+    sig = k_signal_dispatch_pending_current();
+    if(sig > 0){
+      sig_state_lock_take();
+      slot = sig_state_slot_locked(self, 0);
+      if(slot)
+        slot->blocked_mask = old_mask;
+      sig_state_lock_give();
+      errno = EINTR;
+      return -1;
+    }
+    hal_delay_ms(10);
+  }
 }
 
 static int k_sigemptyset(sigset_t *set)
@@ -2149,14 +2586,12 @@ static int k_raise(int sig)
 {
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
   ksh_sig_state_t *slot;
-  void (*handler)(int) = SIG_DFL;
-  uint32 bit;
+  uint32 bit = k_sig_mask_bit(sig);
 
   if(!k_sig_valid(sig)){
     errno = EINVAL;
     return -1;
   }
-  bit = k_sig_mask_bit(sig);
 
   sig_state_lock_take();
   slot = sig_state_slot_locked(self, 1);
@@ -2165,24 +2600,9 @@ static int k_raise(int sig)
     errno = ENOMEM;
     return -1;
   }
-  if(slot && slot->handlers[sig])
-    handler = slot->handlers[sig];
-  if(slot && (slot->blocked_mask & bit) != 0){
-    slot->pending_mask |= bit;
-    sig_state_lock_give();
-    return 0;
-  }
+  slot->pending_mask |= bit;
   sig_state_lock_give();
 
-  if(handler == SIG_IGN)
-    return 0;
-  if(handler == SIG_DFL){
-    if(sig == SIGCHLD)
-      return 0;
-    k_exit(128 + sig);
-    return 0;
-  }
-  handler(sig);
   (void)k_signal_dispatch_pending_current();
   return 0;
 }
@@ -2208,8 +2628,18 @@ static int k_signal_job_pid(int pid, int sig)
     return 0;
   if(sig == SIGCONT)
     return resume_job_id(job_id);
-  if(sig == SIGTSTP)
-    return suspend_job_id(job_id);
+  if(sig == SIGTSTP
+#ifdef SIGTTIN
+     || sig == SIGTTIN
+#endif
+#ifdef SIGTTOU
+     || sig == SIGTTOU
+#endif
+#ifdef SIGSTOP
+     || sig == SIGSTOP
+#endif
+  )
+    return suspend_job_id_with_signal(job_id, sig);
   if(sig == SIGCHLD)
     return 0;
   return terminate_job_id(job_id, 128 + sig, JOB_REASON_KILLED);
@@ -2330,6 +2760,9 @@ static int k_tty_signal_handler(int sig)
 {
   int fg_pgid;
 
+  if(sig == SIGTTIN || sig == SIGTTOU)
+    return k_kill(0, sig);
+
   if(sig != SIGINT && sig != SIGTSTP){
     errno = EINVAL;
     return -1;
@@ -2348,6 +2781,31 @@ static int k_tty_signal_handler(int sig)
     return -1;
   }
   return k_kill(-fg_pgid, sig);
+}
+
+static int k_tty_is_foreground_query(int fd)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int self_pgid;
+  int fg_pgid;
+
+  (void)fd;
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  self_pgid = proc_pgid_for_task_locked(self);
+  if(self_pgid <= 0)
+    self_pgid = g_shell_pgid;
+  fg_pgid = g_tty_fg_pgid;
+  if(fg_pgid <= 0)
+    fg_pgid = g_shell_pgid;
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(self_pgid <= 0 || fg_pgid <= 0){
+    errno = ESRCH;
+    return -1;
+  }
+  return (self_pgid == fg_pgid) ? 1 : 0;
 }
 
 enum {
@@ -2375,7 +2833,10 @@ static int k_wait_encode_status_locked(const ksh_job_t *job, int event)
     }
     return (job->exit_code & 0xff) << 8;
   case K_WAIT_EVENT_STOPPED:
-    return ((SIGTSTP & 0xff) << 8) | 0x7f;
+    sig = job->stop_signal;
+    if(sig <= 0 || sig >= KSH_SIG_MAX)
+      sig = SIGTSTP;
+    return ((sig & 0xff) << 8) | 0x7f;
   case K_WAIT_EVENT_CONTINUED:
     return 0xffff;
   default:
@@ -2435,31 +2896,33 @@ static int k_wait_pick_event_locked(const ksh_job_t *job, int want_exit, int wan
 
 static void k_wait_fill_siginfo(siginfo_t *si, int pid, int event, int status)
 {
+  int wait_status = 0;
+
   if(si == 0)
     return;
   memset(si, 0, sizeof(*si));
   si->si_signo = SIGCHLD;
-  si->si_pid = (pid_t)pid;
   switch(event){
   case K_WAIT_EVENT_STOPPED:
     si->si_code = CLD_STOPPED;
-    si->si_status = (status >> 8) & 0xff;
+    wait_status = (status >> 8) & 0xff;
     break;
   case K_WAIT_EVENT_CONTINUED:
     si->si_code = CLD_CONTINUED;
-    si->si_status = SIGCONT;
+    wait_status = SIGCONT;
     break;
   case K_WAIT_EVENT_EXITED:
   default:
     if((status & 0x7f) == 0){
       si->si_code = CLD_EXITED;
-      si->si_status = (status >> 8) & 0xff;
+      wait_status = (status >> 8) & 0xff;
     } else {
       si->si_code = CLD_KILLED;
-      si->si_status = status & 0x7f;
+      wait_status = status & 0x7f;
     }
     break;
   }
+  si->si_value.sival_int = ((pid & 0xffff) << 16) | (wait_status & 0xffff);
 }
 
 static int k_wait_consume_event_locked(int slot, int event, int nowait)
@@ -2548,7 +3011,10 @@ static pid_t k_waitpid(pid_t pid, int *status, int options)
     if(options & WNOHANG)
       return (pid_t)0;
 
-    (void)k_signal_dispatch_pending_current();
+    if(k_signal_dispatch_pending_current() > 0){
+      errno = EINTR;
+      return (pid_t)-1;
+    }
     hal_delay_ms(10);
   }
 }
@@ -2642,7 +3108,10 @@ static int k_waitid(int idtype, int id, siginfo_t *infop, int options)
       return 0;
     }
 
-    (void)k_signal_dispatch_pending_current();
+    if(k_signal_dispatch_pending_current() > 0){
+      errno = EINTR;
+      return -1;
+    }
     hal_delay_ms(10);
   }
 }

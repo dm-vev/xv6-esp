@@ -312,6 +312,33 @@ class QemuShell:
             print(f"[qemu-ci] recover_prompt fallback: {exc}")
         self.sync_prompt(timeout_s=20.0)
 
+    def send_bytes(self, data: bytes) -> None:
+        if self.sock is None:
+            raise RuntimeError("qemu socket is not initialized")
+        self.sock.sendall(data)
+
+    def start_command(self, command: str) -> None:
+        self.drain_rx()
+        self.send_bytes((command + "\r").encode())
+
+    def ctrl_c(self, timeout_s: float = 12.0) -> str:
+        self.drain_rx()
+        self.send_bytes(b"\x03")
+        out = self.recv_until(PROMPT, timeout_s=timeout_s).decode(errors="ignore")
+        out = clean_output(out)
+        print("^C\n" + out)
+        self.assert_clean(out, "ctrl_c")
+        return out
+
+    def ctrl_z(self, timeout_s: float = 12.0) -> str:
+        self.drain_rx()
+        self.send_bytes(b"\x1a")
+        out = self.recv_until(PROMPT, timeout_s=timeout_s).decode(errors="ignore")
+        out = clean_output(out)
+        print("^Z\n" + out)
+        self.assert_clean(out, "ctrl_z")
+        return out
+
     def cmd(self, command: str, timeout_s: float = 20.0, retries: int = 2, echo: bool = True) -> str:
         if self.sock is None:
             raise RuntimeError("qemu socket is not initialized")
@@ -547,6 +574,62 @@ def run_suite_regressions(q: QemuShell) -> None:
             print(f"[qemu-ci][warn] {msg}; set XV6_HOSTABI_STRICT=1 to fail on this check")
 
 
+def run_suite_posix(q: QemuShell) -> None:
+    q.cmd("export PATH=/bin:/usr/bin:.")
+
+    q.start_command("sleep 5000")
+    time.sleep(0.2)
+    out = q.ctrl_z(timeout_s=15.0)
+    if "^Z" not in out:
+        raise SuiteError("posix: foreground Ctrl+Z did not surface shell stop handling")
+
+    out = q.cmd("jobs")
+    expect_contains(out, "stopped", "posix: jobs after ctrl-z")
+    expect_contains(out, "sleep 5000", "posix: stopped sleep job")
+    jid = extract_job_id(out)
+    if jid is None:
+        raise SuiteError("posix: failed to parse stopped job id after ctrl-z")
+
+    out = q.cmd(f"bg {jid}")
+    expect_contains(out, f"bg: continued {jid}", "posix: bg resume")
+
+    out = q.cmd("jobs")
+    expect_contains(out, "running", "posix: jobs after bg")
+    expect_contains(out, "sleep 5000", "posix: running sleep job")
+
+    q.start_command(f"fg {jid}")
+    time.sleep(0.2)
+    out = q.ctrl_c(timeout_s=15.0)
+    if "^C" not in out or "fg: done 130" not in out:
+        raise SuiteError("posix: foreground Ctrl+C did not terminate resumed job as expected")
+
+    out = q.cmd("cat /dev/tty &")
+    jid = extract_job_id(out)
+    if jid is None:
+        raise SuiteError("posix: failed to parse job id for background tty reader")
+    time.sleep(0.2)
+
+    out = q.cmd("jobs")
+    expect_contains(out, f"[{jid}]", "posix: jobs contains tty reader")
+    expect_contains(out, "stopped", "posix: background tty reader should stop")
+    expect_contains(out, "cat /dev/tty", "posix: background tty reader command")
+
+    out = q.cmd(f"kill {jid}")
+    expect_contains(out, "kill: ok", "posix: kill stopped tty reader")
+    out = q.cmd(f"wait {jid}")
+    expect_contains(out, "wait: done 137", "posix: wait killed tty reader")
+
+    if q.command_exists("ptydemo"):
+        out = q.cmd("ptydemo", timeout_s=30.0)
+        expect_contains(out, "slave:/dev/pts/", "posix: ptydemo slave path")
+        expect_contains(out, "master:", "posix: ptydemo master exchange")
+
+    out = q.cmd("hostabi_probe", timeout_s=90.0)
+    if "exec: command not found" in out:
+        raise SuiteError("posix: /bin/hostabi_probe is missing")
+    expect_contains(out, "PROBE SUMMARY failures=0", "posix: hostabi probe")
+
+
 def run_suite_net_diag(q: QemuShell) -> None:
     q.cmd("export PATH=/bin:/usr/bin:.")
     out = q.cmd("net_diag stats", timeout_s=45.0)
@@ -661,6 +744,8 @@ def run_suite(idf_export: str, suite: str, stress_iterations: int, soak_iteratio
             run_suite_smoke(q)
         elif suite == "regressions":
             run_suite_regressions(q)
+        elif suite == "posix":
+            run_suite_posix(q)
         elif suite == "net_diag":
             run_suite_net_diag(q)
         elif suite == "stress":
@@ -671,7 +756,7 @@ def run_suite(idf_export: str, suite: str, stress_iterations: int, soak_iteratio
             raise SuiteError(f"unknown suite: {suite}")
 
 
-SUITE_ORDER = ["smoke", "applets", "regressions", "stress", "soak"]
+SUITE_ORDER = ["smoke", "applets", "regressions", "posix", "stress", "soak"]
 EXTRA_SUITES = ["net_diag"]
 SUITE_CHOICES = [*SUITE_ORDER, *EXTRA_SUITES]
 

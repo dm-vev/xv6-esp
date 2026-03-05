@@ -21,6 +21,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 
+#include "core/param.h"
 #include "loader/elf_loader.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -29,7 +30,19 @@
 #include "vfs/vfs.h"
 
 #define HOSTABI_FD_META_MAX XV6_FD_CAP
-#define XV6_KSTAT_T_DEVICE 3
+
+#ifndef TIOCGWINSZ
+#define TIOCGWINSZ 0x5413UL
+#endif
+#ifndef TIOCSWINSZ
+#define TIOCSWINSZ 0x5414UL
+#endif
+
+enum {
+  HOSTABI_TTY_KIND_NONE = 0,
+  HOSTABI_TTY_KIND_CONSOLE,
+  HOSTABI_TTY_KIND_PTY,
+};
 
 /**
  * @brief Window size structure for terminal
@@ -40,6 +53,17 @@ typedef struct {
   unsigned short ws_xpixel;
   unsigned short ws_ypixel;
 } hostabi_winsize_t;
+
+typedef struct {
+  int kind;
+  int id;
+} hostabi_tty_ref_t;
+
+typedef struct {
+  int valid;
+  hostabi_winsize_t ws;
+  struct termios tio;
+} hostabi_tty_state_t;
 
 /**
  * @brief Metadata stored for each file descriptor
@@ -52,14 +76,16 @@ typedef struct {
   int fl;          /**< Open flags (O_RDONLY, O_WRONLY, etc.) */
   int fd_flags;    /**< FD flags (FD_CLOEXEC, etc.) */
   int is_tty;      /**< Whether this is a TTY */
-  hostabi_winsize_t ws; /**< Terminal window size */
-  struct termios tio;   /**< Terminal attributes */
+  hostabi_tty_ref_t tty_ref; /**< Shared TTY state key */
 } hostabi_fd_meta_t;
 
 static SemaphoreHandle_t g_fd_meta_lock; /**< Lock for metadata array */
 static hostabi_fd_meta_t *g_fd_meta;     /**< Metadata per fd */
 static int g_fd_meta_cap;                /**< Allocated metadata slots */
 static hostabi_posix_tty_signal_handler_t g_tty_signal_handler;
+static hostabi_posix_tty_foreground_query_t g_tty_foreground_query;
+static hostabi_tty_state_t g_console_tty;
+static hostabi_tty_state_t g_pty_tty[XV6_PTY_CAP];
 
 /**
  * @brief Acquire the metadata lock
@@ -166,7 +192,7 @@ static int fd_meta_in_range(int fd)
  * - Local flags: ECHO, ICANON, IEXTEN, ISIG
  * - Control characters: VMIN=1, VTIME=0
  */
-static void fd_meta_make_termios(struct termios *t)
+static void tty_make_termios_defaults(struct termios *t)
 {
   if(t == 0)
     return;
@@ -187,6 +213,158 @@ static void fd_meta_make_termios(struct termios *t)
 #ifdef VTIME
   t->c_cc[VTIME] = 0;
 #endif
+}
+
+static void tty_state_make_defaults(hostabi_tty_state_t *state)
+{
+  if(state == 0)
+    return;
+  memset(state, 0, sizeof(*state));
+  state->valid = 1;
+  state->ws.ws_row = 24;
+  state->ws.ws_col = 80;
+  state->ws.ws_xpixel = 0;
+  state->ws.ws_ypixel = 0;
+  tty_make_termios_defaults(&state->tio);
+}
+
+static void tty_state_reset_all_locked(void)
+{
+  int i;
+
+  tty_state_make_defaults(&g_console_tty);
+  for(i = 0; i < XV6_PTY_CAP; i++)
+    memset(&g_pty_tty[i], 0, sizeof(g_pty_tty[i]));
+}
+
+static void tty_ref_clear(hostabi_tty_ref_t *ref)
+{
+  if(ref == 0)
+    return;
+  ref->kind = HOSTABI_TTY_KIND_NONE;
+  ref->id = -1;
+}
+
+static void tty_ref_set_console(hostabi_tty_ref_t *ref)
+{
+  if(ref == 0)
+    return;
+  ref->kind = HOSTABI_TTY_KIND_CONSOLE;
+  ref->id = 0;
+}
+
+static void tty_ref_set_pty(hostabi_tty_ref_t *ref, int id)
+{
+  if(ref == 0)
+    return;
+  ref->kind = HOSTABI_TTY_KIND_PTY;
+  ref->id = id;
+}
+
+static int tty_ref_is_valid(const hostabi_tty_ref_t *ref)
+{
+  if(ref == 0)
+    return 0;
+  if(ref->kind == HOSTABI_TTY_KIND_CONSOLE)
+    return 1;
+  if(ref->kind == HOSTABI_TTY_KIND_PTY)
+    return (ref->id >= 0 && ref->id < XV6_PTY_CAP) ? 1 : 0;
+  return 0;
+}
+
+static hostabi_tty_state_t *tty_state_for_ref_locked(const hostabi_tty_ref_t *ref)
+{
+  if(!tty_ref_is_valid(ref))
+    return 0;
+  if(ref->kind == HOSTABI_TTY_KIND_CONSOLE)
+    return &g_console_tty;
+  if(ref->kind == HOSTABI_TTY_KIND_PTY)
+    return &g_pty_tty[ref->id];
+  return 0;
+}
+
+static int tty_state_get_locked(const hostabi_tty_ref_t *ref, hostabi_tty_state_t *out)
+{
+  hostabi_tty_state_t *state = tty_state_for_ref_locked(ref);
+
+  if(state == 0 || out == 0)
+    return -1;
+  if(!state->valid)
+    tty_state_make_defaults(state);
+  *out = *state;
+  return 0;
+}
+
+static int tty_state_set_locked(const hostabi_tty_ref_t *ref, const hostabi_tty_state_t *state)
+{
+  hostabi_tty_state_t *dst = tty_state_for_ref_locked(ref);
+
+  if(dst == 0 || state == 0)
+    return -1;
+  *dst = *state;
+  dst->valid = 1;
+  return 0;
+}
+
+static int path_is_console_tty(const char *path)
+{
+  if(path == 0)
+    return 0;
+  return (strcmp(path, "/dev/tty") == 0 || strcmp(path, "/dev/stdin") == 0 || strcmp(path, "/dev/stdout") == 0 ||
+          strcmp(path, "/dev/stderr") == 0 || strcmp(path, "/dev/console") == 0);
+}
+
+static int parse_pts_id_from_path(const char *path, int *out_id)
+{
+  int id;
+  const char *p;
+
+  if(path == 0 || out_id == 0)
+    return -1;
+  if(strncmp(path, "/dev/pts/", 9) != 0)
+    return -1;
+  p = path + 9;
+  if(*p < '0' || *p > '9')
+    return -1;
+
+  id = 0;
+  while(*p >= '0' && *p <= '9'){
+    id = (id * 10) + (*p - '0');
+    if(id >= XV6_PTY_CAP)
+      return -1;
+    p++;
+  }
+  if(*p != 0)
+    return -1;
+  *out_id = id;
+  return 0;
+}
+
+static int tty_ref_from_path_fd_locked(int fd, const char *path, hostabi_tty_ref_t *out_ref)
+{
+  char pts_path[MAXPATH];
+  int pty_id = -1;
+
+  if(out_ref == 0)
+    return -1;
+  tty_ref_clear(out_ref);
+
+  if(path_is_console_tty(path)){
+    tty_ref_set_console(out_ref);
+    return 0;
+  }
+  if(path && parse_pts_id_from_path(path, &pty_id) == 0){
+    tty_ref_set_pty(out_ref, pty_id);
+    return 0;
+  }
+  if(path && strcmp(path, "/dev/ptmx") == 0){
+    if(xv6_ptsname(fd, pts_path, sizeof(pts_path)) == 0 && parse_pts_id_from_path(pts_path, &pty_id) == 0){
+      tty_ref_set_pty(out_ref, pty_id);
+      return 0;
+    }
+  }
+
+  return -1;
 }
 
 /**
@@ -212,11 +390,9 @@ static void fd_meta_defaults_for_fd(int fd, hostabi_fd_meta_t *m)
     m->fl = O_WRONLY;
   else
     m->fl = O_RDWR;
-  m->ws.ws_row = 24;
-  m->ws.ws_col = 80;
-  m->ws.ws_xpixel = 0;
-  m->ws.ws_ypixel = 0;
-  fd_meta_make_termios(&m->tio);
+  tty_ref_clear(&m->tty_ref);
+  if(fd >= 0 && fd <= 2)
+    tty_ref_set_console(&m->tty_ref);
 }
 
 /**
@@ -261,21 +437,21 @@ static int fd_meta_get_locked(int fd, hostabi_fd_meta_t *out)
   return 0;
 }
 
-/**
- * @brief Check if path refers to a TTY-like device
- * @param path File path to check
- * @return 1 if TTY-like, 0 otherwise
- *
- * Recognizes /dev/tty, /dev/stdin, /dev/stdout, /dev/stderr,
- * /dev/console, /dev/ptmx, and /dev/pts/<n> as TTY devices.
- */
-static int path_is_tty_like(const char *path)
+static int tty_ref_from_fd_locked(int fd, hostabi_tty_ref_t *out_ref)
 {
-  if(path == 0)
+  char path[MAXPATH];
+
+  if(out_ref == 0)
+    return -1;
+  if(fd >= 0 && fd <= 2){
+    tty_ref_set_console(out_ref);
     return 0;
-  return (strcmp(path, "/dev/tty") == 0 || strcmp(path, "/dev/stdin") == 0 || strcmp(path, "/dev/stdout") == 0 ||
-          strcmp(path, "/dev/stderr") == 0 || strcmp(path, "/dev/console") == 0 || strcmp(path, "/dev/ptmx") == 0 ||
-          strncmp(path, "/dev/pts/", 9) == 0);
+  }
+  if(xv6_fd_path(fd, path, sizeof(path)) != 0){
+    tty_ref_clear(out_ref);
+    return -1;
+  }
+  return tty_ref_from_path_fd_locked(fd, path, out_ref);
 }
 
 /**
@@ -285,7 +461,7 @@ static int path_is_tty_like(const char *path)
  * @return 0 on success, -1 if unable to fetch/create
  *
  * Tries to get existing metadata. If none exists, attempts to create
- * defaults by querying xv6 for file type (device = TTY).
+ * defaults by resolving the current fd path into a shared TTY key.
  */
 static int fd_meta_fetch(int fd, hostabi_fd_meta_t *out)
 {
@@ -295,11 +471,20 @@ static int fd_meta_fetch(int fd, hostabi_fd_meta_t *out)
   rc = fd_meta_get_locked(real_fd, out);
   if(rc != 0 && fd_meta_in_range(real_fd)){
     hostabi_fd_meta_t m;
-    xv6_kstat_t st;
-    if(xv6_fstat(real_fd, &st) == 0){
+    char path[MAXPATH];
+    int have_path = 0;
+
+    if(real_fd >= 0 && real_fd <= 2)
+      have_path = 1;
+    else if(xv6_fd_path(real_fd, path, sizeof(path)) == 0)
+      have_path = 1;
+
+    if(have_path){
       fd_meta_defaults_for_fd(real_fd, &m);
-      if(st.type == XV6_KSTAT_T_DEVICE)
+      if(tty_ref_from_fd_locked(real_fd, &m.tty_ref) == 0)
         m.is_tty = 1;
+      else
+        tty_ref_clear(&m.tty_ref);
       if(fd_meta_set_locked(real_fd, &m) == 0){
         if(out)
           *out = m;
@@ -338,6 +523,7 @@ void hostabi_posix_io_init(void)
   int fd;
   fd_meta_lock_take();
   fd_meta_reset_table_locked();
+  tty_state_reset_all_locked();
   if(fd_meta_ensure_capacity_locked(3) != 0){
     fd_meta_lock_give();
     return;
@@ -349,6 +535,7 @@ void hostabi_posix_io_init(void)
   }
   fd_meta_lock_give();
   g_tty_signal_handler = 0;
+  g_tty_foreground_query = 0;
 }
 
 /**
@@ -363,11 +550,15 @@ void hostabi_posix_io_init(void)
 void hostabi_posix_io_on_open(int fd, int flags, const char *path)
 {
   hostabi_fd_meta_t meta;
+
   fd_meta_defaults_for_fd(fd, &meta);
   meta.fl = (flags & ~(O_CREAT | O_TRUNC)) | (meta.fl & O_ACCMODE);
   if((flags & O_ACCMODE) == O_WRONLY || (flags & O_ACCMODE) == O_RDWR || (flags & O_ACCMODE) == O_RDONLY)
     meta.fl = (meta.fl & ~O_ACCMODE) | (flags & O_ACCMODE);
-  meta.is_tty = path_is_tty_like(path);
+  if(tty_ref_from_path_fd_locked(fd, path, &meta.tty_ref) == 0)
+    meta.is_tty = 1;
+  else
+    tty_ref_clear(&meta.tty_ref);
   (void)fd_meta_store(fd, &meta);
 }
 
@@ -428,6 +619,129 @@ int hostabi_posix_isatty(int fd)
     return 1;
   errno = EBADF;
   return 0;
+}
+
+static int tty_state_snapshot_for_fd(int fd, hostabi_fd_meta_t *out_meta, hostabi_tty_state_t *out_state)
+{
+  hostabi_fd_meta_t meta;
+  hostabi_tty_state_t state;
+
+  if(fd_meta_fetch(fd, &meta) != 0){
+    errno = EBADF;
+    return -1;
+  }
+  if(!meta.is_tty || !tty_ref_is_valid(&meta.tty_ref)){
+    errno = ENOTTY;
+    return -1;
+  }
+
+  fd_meta_lock_take();
+  if(tty_state_get_locked(&meta.tty_ref, &state) != 0){
+    fd_meta_lock_give();
+    errno = ENOTTY;
+    return -1;
+  }
+  fd_meta_lock_give();
+
+  if(out_meta)
+    *out_meta = meta;
+  if(out_state)
+    *out_state = state;
+  return 0;
+}
+
+static int tty_state_store_for_fd(int fd, const hostabi_tty_state_t *state)
+{
+  hostabi_fd_meta_t meta;
+  int rc;
+
+  if(state == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(fd_meta_fetch(fd, &meta) != 0){
+    errno = EBADF;
+    return -1;
+  }
+  if(!meta.is_tty || !tty_ref_is_valid(&meta.tty_ref)){
+    errno = ENOTTY;
+    return -1;
+  }
+
+  fd_meta_lock_take();
+  rc = tty_state_set_locked(&meta.tty_ref, state);
+  fd_meta_lock_give();
+  if(rc != 0){
+    errno = ENOTTY;
+    return -1;
+  }
+  return 0;
+}
+
+void hostabi_posix_set_tty_foreground_query(hostabi_posix_tty_foreground_query_t query)
+{
+  g_tty_foreground_query = query;
+}
+
+enum {
+  HOSTABI_TTY_ACCESS_READ = 0,
+  HOSTABI_TTY_ACCESS_WRITE,
+  HOSTABI_TTY_ACCESS_ATTR,
+};
+
+static int tty_wait_access(int fd, int access)
+{
+  hostabi_tty_state_t state;
+  int fg;
+
+  if(tty_state_snapshot_for_fd(fd, 0, &state) != 0)
+    return (errno == ENOTTY) ? 0 : -1;
+  if(g_tty_foreground_query == 0)
+    return 0;
+
+  while(1){
+    fg = g_tty_foreground_query(fd);
+    if(fg > 0)
+      return 0;
+    if(fg < 0){
+      if(errno == 0)
+        errno = EIO;
+      return -1;
+    }
+
+    if(access == HOSTABI_TTY_ACCESS_WRITE){
+#ifdef TOSTOP
+      if((state.tio.c_lflag & TOSTOP) == 0)
+        return 0;
+#else
+      return 0;
+#endif
+    }
+
+    if(hostabi_posix_tty_dispatch_signal((access == HOSTABI_TTY_ACCESS_READ) ? SIGTTIN : SIGTTOU) != 0)
+      return -1;
+
+    if(tty_state_snapshot_for_fd(fd, 0, &state) != 0)
+      return -1;
+  }
+}
+
+int hostabi_posix_tty_before_read(int fd)
+{
+  fd = map_fd(fd);
+  return tty_wait_access(fd, HOSTABI_TTY_ACCESS_READ);
+}
+
+int hostabi_posix_tty_before_write(int fd)
+{
+  fd = map_fd(fd);
+  return tty_wait_access(fd, HOSTABI_TTY_ACCESS_WRITE);
+}
+
+int hostabi_posix_tty_before_attr_change(int fd)
+{
+  fd = map_fd(fd);
+  return tty_wait_access(fd, HOSTABI_TTY_ACCESS_ATTR);
 }
 
 /**
@@ -538,12 +852,15 @@ int hostabi_posix_fcntl(int fd, int cmd, ...)
         (void)xv6_close(dups[i]);
         hostabi_posix_io_on_close(dups[i], 0);
       }
+      if(fd_meta_fetch(rc, &meta) == 0){
 #ifdef F_DUPFD_CLOEXEC
-      if(cmd == F_DUPFD_CLOEXEC && fd_meta_fetch(rc, &meta) == 0){
-        meta.fd_flags |= FD_CLOEXEC;
+        if(cmd == F_DUPFD_CLOEXEC)
+          meta.fd_flags |= FD_CLOEXEC;
+        else
+#endif
+          meta.fd_flags &= ~FD_CLOEXEC;
         (void)fd_meta_store(rc, &meta);
       }
-#endif
       return rc;
 
 fail_dupfd:
@@ -569,22 +886,16 @@ fail_dupfd:
  */
 int hostabi_posix_tcgetattr(int fd, struct termios *tio)
 {
-  hostabi_fd_meta_t meta;
+  hostabi_tty_state_t state;
   tio = (struct termios *)elf_loader_translate_ptr(tio);
   if(tio == 0){
     errno = EINVAL;
     return -1;
   }
   fd = map_fd(fd);
-  if(fd_meta_fetch(fd, &meta) != 0){
-    errno = EBADF;
+  if(tty_state_snapshot_for_fd(fd, 0, &state) != 0)
     return -1;
-  }
-  if(!meta.is_tty){
-    errno = ENOTTY;
-    return -1;
-  }
-  *tio = meta.tio;
+  *tio = state.tio;
   return 0;
 }
 
@@ -601,7 +912,7 @@ int hostabi_posix_tcgetattr(int fd, struct termios *tio)
  */
 int hostabi_posix_tcsetattr(int fd, int optional_actions, const struct termios *tio)
 {
-  hostabi_fd_meta_t meta;
+  hostabi_tty_state_t state;
   tio = (const struct termios *)elf_loader_translate_ptr(tio);
   if(tio == 0){
     errno = EINVAL;
@@ -612,16 +923,21 @@ int hostabi_posix_tcsetattr(int fd, int optional_actions, const struct termios *
     return -1;
   }
   fd = map_fd(fd);
-  if(fd_meta_fetch(fd, &meta) != 0){
-    errno = EBADF;
+  if(hostabi_posix_tty_before_attr_change(fd) != 0)
     return -1;
-  }
-  if(!meta.is_tty){
-    errno = ENOTTY;
+  if(tty_state_snapshot_for_fd(fd, 0, &state) != 0)
     return -1;
+  state.tio = *tio;
+  if(tty_state_store_for_fd(fd, &state) != 0)
+    return -1;
+  if(optional_actions == TCSAFLUSH){
+    if(xv6_tty_flush_input(fd) != 0){
+      errno = xv6_last_errno();
+      if(errno <= 0)
+        errno = EIO;
+      return -1;
+    }
   }
-  meta.tio = *tio;
-  (void)fd_meta_store(fd, &meta);
   return 0;
 }
 
@@ -665,23 +981,23 @@ static int tty_cc_enabled(cc_t cc)
 
 int hostabi_posix_tty_signal_for_char(int c)
 {
-  hostabi_fd_meta_t meta;
+  hostabi_tty_state_t state;
   unsigned char uc;
 
   if(c < 0 || c > 0xff)
     return 0;
-  if(fd_meta_fetch(0, &meta) != 0 || !meta.is_tty)
+  if(tty_state_snapshot_for_fd(0, 0, &state) != 0)
     return 0;
-  if((meta.tio.c_lflag & ISIG) == 0)
+  if((state.tio.c_lflag & ISIG) == 0)
     return 0;
 
   uc = (unsigned char)c;
 #ifdef VINTR
-  if(tty_cc_enabled(meta.tio.c_cc[VINTR]) && uc == (unsigned char)meta.tio.c_cc[VINTR])
+  if(tty_cc_enabled(state.tio.c_cc[VINTR]) && uc == (unsigned char)state.tio.c_cc[VINTR])
     return SIGINT;
 #endif
 #ifdef VSUSP
-  if(tty_cc_enabled(meta.tio.c_cc[VSUSP]) && uc == (unsigned char)meta.tio.c_cc[VSUSP])
+  if(tty_cc_enabled(state.tio.c_cc[VSUSP]) && uc == (unsigned char)state.tio.c_cc[VSUSP])
     return SIGTSTP;
 #endif
   return 0;
@@ -704,22 +1020,22 @@ int hostabi_posix_tty_dispatch_signal(int sig)
 
 int hostabi_posix_tty_poll_signal(void)
 {
-  hostabi_fd_meta_t meta;
+  hostabi_tty_state_t state;
   int vintr = -1;
   int vsusp = -1;
 
-  if(fd_meta_fetch(0, &meta) != 0 || !meta.is_tty)
+  if(tty_state_snapshot_for_fd(0, 0, &state) != 0)
     return 0;
-  if((meta.tio.c_lflag & ISIG) == 0)
+  if((state.tio.c_lflag & ISIG) == 0)
     return 0;
 
 #ifdef VINTR
-  if(tty_cc_enabled(meta.tio.c_cc[VINTR]))
-    vintr = (unsigned char)meta.tio.c_cc[VINTR];
+  if(tty_cc_enabled(state.tio.c_cc[VINTR]))
+    vintr = (unsigned char)state.tio.c_cc[VINTR];
 #endif
 #ifdef VSUSP
-  if(tty_cc_enabled(meta.tio.c_cc[VSUSP]))
-    vsusp = (unsigned char)meta.tio.c_cc[VSUSP];
+  if(tty_cc_enabled(state.tio.c_cc[VSUSP]))
+    vsusp = (unsigned char)state.tio.c_cc[VSUSP];
 #endif
 
   if(vintr >= 0 && hal_console_poll_byte(vintr))
@@ -748,6 +1064,7 @@ int hostabi_posix_tty_poll_signal(void)
 int hostabi_posix_ioctl(int fd, unsigned long request, ...)
 {
   hostabi_fd_meta_t meta;
+  hostabi_tty_state_t state;
   fd = map_fd(fd);
 
   if(fd_meta_fetch(fd, &meta) != 0){
@@ -790,11 +1107,9 @@ int hostabi_posix_ioctl(int fd, unsigned long request, ...)
       errno = EINVAL;
       return -1;
     }
-    if(!meta.is_tty){
-      errno = ENOTTY;
+    if(tty_state_snapshot_for_fd(fd, 0, &state) != 0)
       return -1;
-    }
-    *ws = meta.ws;
+    *ws = state.ws;
     return 0;
   }
 #endif
@@ -811,12 +1126,13 @@ int hostabi_posix_ioctl(int fd, unsigned long request, ...)
       errno = EINVAL;
       return -1;
     }
-    if(!meta.is_tty){
-      errno = ENOTTY;
+    if(hostabi_posix_tty_before_attr_change(fd) != 0)
       return -1;
-    }
-    meta.ws = *ws;
-    (void)fd_meta_store(fd, &meta);
+    if(tty_state_snapshot_for_fd(fd, 0, &state) != 0)
+      return -1;
+    state.ws = *ws;
+    if(tty_state_store_for_fd(fd, &state) != 0)
+      return -1;
     return 0;
   }
 #endif

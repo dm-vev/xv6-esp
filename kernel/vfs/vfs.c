@@ -113,6 +113,7 @@ static int g_next_fd_group = 1;
 #define XV6_DEFAULT_DIR_MODE 0777u
 #define XV6_DEFAULT_SYMLINK_MODE 0777u
 #define XV6_DEFAULT_DEV_MODE 0666u
+#define XV6_DEFAULT_FIFO_MODE 0666u
 
 #define XV6_SYMLINK_MAX_DEPTH 8
 #define XV6_SYMLINK_TARGET_MAX VFS_PATH_MAX
@@ -135,6 +136,8 @@ static uint16 inode_default_mode(short type)
     return (uint16)XV6_DEFAULT_SYMLINK_MODE;
   if(type == T_DEVICE)
     return (uint16)XV6_DEFAULT_DEV_MODE;
+  if(type == T_FIFO)
+    return (uint16)XV6_DEFAULT_FIFO_MODE;
   return (uint16)XV6_DEFAULT_FILE_MODE;
 }
 
@@ -266,6 +269,14 @@ typedef struct {
 } xv6_pipe_t;
 
 static xv6_pipe_t g_pipes[XV6_MAX_PIPE];
+
+typedef struct {
+  int used;
+  uint32 inum;
+  int pipe_id;
+} xv6_fifo_link_t;
+
+static xv6_fifo_link_t g_fifo_links[XV6_MAX_PIPE];
 
 #define XV6_PTY_BUF_CAP 256u
 #define XV6_PIPE_BUF_CAP 512u
@@ -646,6 +657,15 @@ static int pty_q_pop(uint8 *buf, uint16 *r, uint16 *n, uint16 cap, uint8 *dst, u
   return (int)out;
 }
 
+static void pty_q_drop_all(uint16 *r, uint16 *w, uint16 *n)
+{
+  if(r == 0 || w == 0 || n == 0)
+    return;
+  *r = 0;
+  *w = 0;
+  *n = 0;
+}
+
 static int pty_alloc_id(void)
 {
   int i;
@@ -712,6 +732,82 @@ static void pipe_try_free(int id)
     return;
   if(g_pipes[id].alloc && g_pipes[id].readers == 0 && g_pipes[id].writers == 0)
     pipe_slot_reset(&g_pipes[id]);
+}
+
+static int pipe_endpoints_from_flags(int flags, int *readers, int *writers)
+{
+  int acc_mode = (flags & XV6_O_ACCMODE);
+
+  if(readers == 0 || writers == 0)
+    return -1;
+  *readers = 0;
+  *writers = 0;
+  if(acc_mode == XV6_O_RDONLY){
+    *readers = 1;
+    return 0;
+  }
+  if(acc_mode == XV6_O_WRONLY){
+    *writers = 1;
+    return 0;
+  }
+  if(acc_mode == XV6_O_RDWR){
+    *readers = 1;
+    *writers = 1;
+    return 0;
+  }
+  return -1;
+}
+
+static void fifo_unbind_pipe_locked(int pipe_id)
+{
+  int i;
+
+  if(pipe_id < 0 || pipe_id >= XV6_MAX_PIPE)
+    return;
+  for(i = 0; i < XV6_MAX_PIPE; i++){
+    if(g_fifo_links[i].used && g_fifo_links[i].pipe_id == pipe_id){
+      memset(&g_fifo_links[i], 0, sizeof(g_fifo_links[i]));
+      return;
+    }
+  }
+}
+
+static int fifo_bind_or_get_pipe_locked(uint32 inum)
+{
+  int i;
+  int free_idx = -1;
+  int pipe_id;
+
+  if(inum == 0)
+    return -1;
+  for(i = 0; i < XV6_MAX_PIPE; i++){
+    if(!g_fifo_links[i].used){
+      if(free_idx < 0)
+        free_idx = i;
+      continue;
+    }
+    if(g_fifo_links[i].inum != inum)
+      continue;
+    pipe_id = g_fifo_links[i].pipe_id;
+    if(pipe_id >= 0 && pipe_id < XV6_MAX_PIPE && g_pipes[pipe_id].alloc)
+      return pipe_id;
+    memset(&g_fifo_links[i], 0, sizeof(g_fifo_links[i]));
+    free_idx = i;
+    break;
+  }
+
+  pipe_id = pipe_alloc_id();
+  if(pipe_id < 0)
+    return -1;
+  if(free_idx < 0){
+    pipe_slot_reset(&g_pipes[pipe_id]);
+    return -1;
+  }
+
+  g_fifo_links[free_idx].used = 1;
+  g_fifo_links[free_idx].inum = inum;
+  g_fifo_links[free_idx].pipe_id = pipe_id;
+  return pipe_id;
 }
 
 static int dev_prng_fill(void *buf, uint32 n)
@@ -2014,6 +2110,71 @@ out_err:
   return rc;
 }
 
+int xv6fs_mkfifo_path(const char *path)
+{
+  char abs_path[VFS_PATH_MAX];
+  char name[DIRSIZ + 1];
+  uint32 pinum = 0;
+  uint32 inum = 0;
+  int lookup_rc;
+  int created = 0;
+  int linked = 0;
+  int err = EIO;
+
+  task_ctx_clear_errno();
+  if(path == 0 || !g_ready){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(path_resolve(path, abs_path, sizeof(abs_path)) != 0){
+    task_ctx_set_errno(ENOENT);
+    return -1;
+  }
+  if(is_dev_node(abs_path)){
+    task_ctx_set_errno(EPERM);
+    return -1;
+  }
+
+  vfs_lock();
+  lookup_rc = path_lookup(abs_path, 0, 0);
+  if(lookup_rc == 0){
+    err = EEXIST;
+    goto out;
+  }
+  if(lookup_rc != 1){
+    err = EIO;
+    goto out;
+  }
+  if(path_parent(abs_path, &pinum, name) != 0){
+    err = ENOENT;
+    goto out;
+  }
+  if(strcmp(name, ".") == 0 || strcmp(name, "..") == 0){
+    err = EINVAL;
+    goto out;
+  }
+
+  if(alloc_inode(T_FIFO, &inum) != 0){
+    err = ENOSPC;
+    goto out;
+  }
+  created = 1;
+  if(dir_add_entry(pinum, name, inum) != 0){
+    err = ENOSPC;
+    goto out;
+  }
+  linked = 1;
+  vfs_unlock();
+  return 0;
+
+out:
+  if(created && !linked)
+    inode_reclaim_orphan_locked(inum);
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
+}
+
 int xv6fs_write_file_path(const char *path, const void *data, uint32 size)
 {
   char abs_path[VFS_PATH_MAX];
@@ -2775,6 +2936,7 @@ void xv6_vfs_reset(void)
     pty_slot_reset(&g_ptys[i]);
   for(i = 0; i < XV6_MAX_PIPE; i++)
     pipe_slot_reset(&g_pipes[i]);
+  memset(g_fifo_links, 0, sizeof(g_fifo_links));
   g_next_fd_group = 1;
 
   g_fds[0].used = 1;
@@ -2904,6 +3066,28 @@ int xv6_open(const char *path, int flags)
       err = EISDIR;
       goto fail;
     }
+  } else if(ip.type == T_FIFO){
+    int pipe_id;
+    int add_readers = 0;
+    int add_writers = 0;
+
+    if(pipe_endpoints_from_flags(flags, &add_readers, &add_writers) != 0){
+      err = EINVAL;
+      goto fail;
+    }
+    pipe_id = fifo_bind_or_get_pipe_locked(inum);
+    if(pipe_id < 0){
+      err = ENFILE;
+      goto fail;
+    }
+    g_fds[fd].kind = VFD_PIPE;
+    g_fds[fd].dev_id = pipe_id;
+    g_fds[fd].inum = inum;
+    copy_cstr(g_fds[fd].path, sizeof(g_fds[fd].path), abs_path);
+    g_pipes[pipe_id].readers += add_readers;
+    g_pipes[pipe_id].writers += add_writers;
+    vfs_unlock();
+    return fd;
   } else if(ip.type != T_FILE){
     err = ENOENT;
     goto fail;
@@ -2929,6 +3113,7 @@ int xv6_open(const char *path, int flags)
   } else if((flags & XV6_O_APPEND) && ip.type == T_FILE){
     g_fds[fd].off = inode_get_size(&ip);
   }
+  copy_cstr(g_fds[fd].path, sizeof(g_fds[fd].path), abs_path);
   fd_group_set_off_locked(fd, g_fds[fd].off);
   vfs_unlock();
   return fd;
@@ -3180,15 +3365,19 @@ int xv6_dup(int fd)
   g_fds[nfd].owner = xTaskGetCurrentTaskHandle();
 
   if(g_fds[nfd].kind == VFD_PIPE){
+    int add_readers = 0;
+    int add_writers = 0;
     int id = g_fds[nfd].dev_id;
     if(id < 0 || id >= XV6_MAX_PIPE || !g_pipes[id].alloc){
       err = EIO;
       goto fail_clear;
     }
-    if((g_fds[nfd].flags & XV6_O_WRONLY) != 0)
-      g_pipes[id].writers++;
-    else
-      g_pipes[id].readers++;
+    if(pipe_endpoints_from_flags(g_fds[nfd].flags, &add_readers, &add_writers) != 0){
+      err = EIO;
+      goto fail_clear;
+    }
+    g_pipes[id].readers += add_readers;
+    g_pipes[id].writers += add_writers;
   } else if(g_fds[nfd].kind == VFD_DEV){
     int id = g_fds[nfd].dev_id;
     if(g_fds[nfd].dev_role == DEV_ROLE_PTY_MASTER){
@@ -3471,17 +3660,21 @@ static void vfs_close_fd_locked(int real_fd)
       pty_try_free(id);
     }
   } else if(g_fds[real_fd].kind == VFD_PIPE){
+    int rem_readers = 0;
+    int rem_writers = 0;
     int id = g_fds[real_fd].dev_id;
     if(id >= 0 && id < XV6_MAX_PIPE && g_pipes[id].alloc){
-      if((g_fds[real_fd].flags & XV6_O_WRONLY) != 0)
-        g_pipes[id].writers--;
-      else
-        g_pipes[id].readers--;
+      if(pipe_endpoints_from_flags(g_fds[real_fd].flags, &rem_readers, &rem_writers) == 0){
+        g_pipes[id].readers -= rem_readers;
+        g_pipes[id].writers -= rem_writers;
+      }
       if(g_pipes[id].writers < 0)
         g_pipes[id].writers = 0;
       if(g_pipes[id].readers < 0)
         g_pipes[id].readers = 0;
       pipe_try_free(id);
+      if(!g_pipes[id].alloc)
+        fifo_unbind_pipe_locked(id);
     }
   }
   memset(&g_fds[real_fd], 0, sizeof(g_fds[real_fd]));
@@ -3645,6 +3838,20 @@ int xv6_fstat(int fd, xv6_kstat_t *st)
     vfs_unlock();
     return 0;
   }
+  if(g_fds[real_fd].kind == VFD_PIPE){
+    if(g_fds[real_fd].inum != 0 && read_inode(g_fds[real_fd].inum, &ip) == 0 && ip.type == T_FIFO){
+      fill_kstat_from_inode_locked(g_fds[real_fd].inum, &ip, st);
+      vfs_unlock();
+      return 0;
+    }
+    st->type = T_FIFO;
+    st->nlink = 1;
+    st->mode = (uint16)XV6_DEFAULT_FIFO_MODE;
+    st->uid = 0;
+    st->gid = 0;
+    vfs_unlock();
+    return 0;
+  }
   if(g_fds[real_fd].kind != VFD_FILE){
     task_ctx_set_errno(EBADF);
     vfs_unlock();
@@ -3658,6 +3865,45 @@ int xv6_fstat(int fd, xv6_kstat_t *st)
   fill_kstat_from_inode_locked(g_fds[real_fd].inum, &ip, st);
   vfs_unlock();
   return 0;
+}
+
+int xv6_fd_path(int fd, char *out_path, int out_len)
+{
+  int real_fd = stdio_map_fd(fd);
+  int err = EIO;
+
+  task_ctx_clear_errno();
+  if(out_path == 0 || out_len <= 1){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+  if(real_fd < 0 || real_fd >= XV6_MAX_FD){
+    task_ctx_set_errno(EBADF);
+    return -1;
+  }
+
+  vfs_lock();
+  if(!g_fds[real_fd].used){
+    err = EBADF;
+    goto out_fail;
+  }
+  if(g_fds[real_fd].path[0] == 0){
+    err = ENOENT;
+    goto out_fail;
+  }
+  if((int)strlen(g_fds[real_fd].path) >= out_len){
+    err = ERANGE;
+    goto out_fail;
+  }
+
+  copy_cstr(out_path, out_len, g_fds[real_fd].path);
+  vfs_unlock();
+  return 0;
+
+out_fail:
+  task_ctx_set_errno(err);
+  vfs_unlock();
+  return -1;
 }
 
 int xv6_access(const char *path, int mode)
@@ -4004,6 +4250,56 @@ int xv6_ptsname(int master_fd, char *out_path, int out_len)
   return 0;
 
 fail:
+  vfs_unlock();
+  return -1;
+}
+
+int xv6_tty_flush_input(int fd)
+{
+  int real_fd = stdio_map_fd(fd);
+
+  task_ctx_clear_errno();
+  if(real_fd < 0 || real_fd >= XV6_MAX_FD){
+    task_ctx_set_errno(EBADF);
+    return -1;
+  }
+
+  vfs_lock();
+  if(!g_fds[real_fd].used){
+    task_ctx_set_errno(EBADF);
+    vfs_unlock();
+    return -1;
+  }
+  if(g_fds[real_fd].kind != VFD_DEV){
+    task_ctx_set_errno(ENOTTY);
+    vfs_unlock();
+    return -1;
+  }
+  if(g_fds[real_fd].dev_role == DEV_ROLE_PTY_MASTER || g_fds[real_fd].dev_role == DEV_ROLE_PTY_SLAVE){
+    int id = g_fds[real_fd].dev_id;
+
+    if(id < 0 || id >= XV6_MAX_PTY || !g_ptys[id].alloc){
+      task_ctx_set_errno(ENOTTY);
+      vfs_unlock();
+      return -1;
+    }
+    if(g_fds[real_fd].dev_role == DEV_ROLE_PTY_MASTER)
+      pty_q_drop_all(&g_ptys[id].s2m_r, &g_ptys[id].s2m_w, &g_ptys[id].s2m_n);
+    else
+      pty_q_drop_all(&g_ptys[id].m2s_r, &g_ptys[id].m2s_w, &g_ptys[id].m2s_n);
+    vfs_unlock();
+    return 0;
+  }
+  if(strcmp(g_fds[real_fd].path, "/dev/tty") == 0 || strcmp(g_fds[real_fd].path, "/dev/stdin") == 0 ||
+     strcmp(g_fds[real_fd].path, "/dev/stdout") == 0 || strcmp(g_fds[real_fd].path, "/dev/stderr") == 0 ||
+     strcmp(g_fds[real_fd].path, "/dev/console") == 0)
+  {
+    vfs_unlock();
+    hal_console_discard_input();
+    return 0;
+  }
+
+  task_ctx_set_errno(ENOTTY);
   vfs_unlock();
   return -1;
 }

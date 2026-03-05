@@ -41,6 +41,11 @@ int hal_console_poll_ctrl_c(void);
 int hal_console_poll_ctrl_z(void);
 
 /**
+ * @brief Discard any queued console input bytes
+ */
+void hal_console_discard_input(void);
+
+/**
  * @brief Put character to console
  * @param c Character to output
  */

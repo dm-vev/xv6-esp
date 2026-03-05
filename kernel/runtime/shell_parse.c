@@ -2,6 +2,36 @@
 
 #include <string.h>
 
+static char *redir_token_with_fd(int fd, char op, int append)
+{
+  static char *const in_tok[3] = {"0<", "1<", "2<"};
+  static char *const out_tok[3] = {"0>", "1>", "2>"};
+  static char *const out_append_tok[3] = {"0>>", "1>>", "2>>"};
+
+  if(fd < 0 || fd > 2)
+    return 0;
+  if(op == '<')
+    return in_tok[fd];
+  if(append)
+    return out_append_tok[fd];
+  return out_tok[fd];
+}
+
+static char protect_meta_char(char ch, int protect_var)
+{
+  if(protect_var && ch == '$')
+    return KSH_MARK_ESC_DOLLAR;
+  if(ch == '*')
+    return KSH_MARK_ESC_STAR;
+  if(ch == '?')
+    return KSH_MARK_ESC_QMARK;
+  if(ch == '[')
+    return KSH_MARK_ESC_LBRACK;
+  if(ch == ']')
+    return KSH_MARK_ESC_RBRACK;
+  return ch;
+}
+
 int parse_u32_dec(const char *s, uint32 *out)
 {
   uint32 v = 0;
@@ -79,7 +109,7 @@ int parse_line(char *line, char **argv, int max_args)
     if(esc){
       if(tok == 0)
         tok = dst;
-      *dst++ = ch;
+      *dst++ = protect_meta_char(ch, 1);
       esc = 0;
       continue;
     }
@@ -95,7 +125,7 @@ int parse_line(char *line, char **argv, int max_args)
       else {
         if(tok == 0)
           tok = dst;
-        *dst++ = ch;
+        *dst++ = protect_meta_char(ch, 1);
       }
       continue;
     }
@@ -106,7 +136,7 @@ int parse_line(char *line, char **argv, int max_args)
       else {
         if(tok == 0)
           tok = dst;
-        *dst++ = ch;
+        *dst++ = protect_meta_char(ch, 0);
       }
       continue;
     }
@@ -136,8 +166,15 @@ int parse_line(char *line, char **argv, int max_args)
       continue;
     }
 
-    if(ch == '|' || ch == '&' || ch == '<' || ch == '>'){
-      if(tok){
+    if(ch == '|' || ch == '&' || ch == ';' || ch == '<' || ch == '>'){
+      int inline_redir_fd = -1;
+      if((ch == '<' || ch == '>') && tok && dst == tok + 1 && tok[0] >= '0' && tok[0] <= '2')
+        inline_redir_fd = (int)(tok[0] - '0');
+
+      if(inline_redir_fd >= 0){
+        dst = tok;
+        tok = 0;
+      } else if(tok){
         *dst++ = 0;
         if(argc >= max_args)
           return -2;
@@ -146,17 +183,38 @@ int parse_line(char *line, char **argv, int max_args)
       }
       if(argc >= max_args)
         return -2;
-      if(ch == '|')
-        argv[argc++] = "|";
-      else if(ch == '&')
-        argv[argc++] = "&";
-      else if(ch == '<')
-        argv[argc++] = "<";
-      else if(*src == '>'){
-        src++;
-        argv[argc++] = ">>";
-      } else
-        argv[argc++] = ">";
+      if(ch == '|'){
+        if(*src == '|'){
+          src++;
+          argv[argc++] = "||";
+        } else {
+          argv[argc++] = "|";
+        }
+      } else if(ch == '&'){
+        if(*src == '&'){
+          src++;
+          argv[argc++] = "&&";
+        } else {
+          argv[argc++] = "&";
+        }
+      } else if(ch == ';')
+        argv[argc++] = ";";
+      else if(ch == '<'){
+        if(inline_redir_fd >= 0)
+          argv[argc++] = redir_token_with_fd(inline_redir_fd, '<', 0);
+        else
+          argv[argc++] = "<";
+      } else {
+        int append = 0;
+        if(*src == '>'){
+          src++;
+          append = 1;
+        }
+        if(inline_redir_fd >= 0)
+          argv[argc++] = redir_token_with_fd(inline_redir_fd, '>', append);
+        else
+          argv[argc++] = append ? ">>" : ">";
+      }
       continue;
     }
 
@@ -198,12 +256,25 @@ int is_fd_token(const char *s, int *out_fd)
 
 int is_redir_token(const char *s)
 {
-  return (strcmp(s, "<") == 0 || strcmp(s, ">") == 0 || strcmp(s, ">>") == 0);
+  if(s == 0)
+    return 0;
+  if(strcmp(s, "<") == 0 || strcmp(s, ">") == 0 || strcmp(s, ">>") == 0)
+    return 1;
+  if(s[0] >= '0' && s[0] <= '2'){
+    if(s[1] == '<' && s[2] == 0)
+      return 1;
+    if(s[1] == '>' && s[2] == 0)
+      return 1;
+    if(s[1] == '>' && s[2] == '>' && s[3] == 0)
+      return 1;
+  }
+  return 0;
 }
 
 int is_control_token(const char *s)
 {
-  return (strcmp(s, "|") == 0 || strcmp(s, "&") == 0 || is_redir_token(s));
+  return (strcmp(s, "|") == 0 || strcmp(s, "&") == 0 || strcmp(s, "&&") == 0 || strcmp(s, "||") == 0 ||
+          strcmp(s, ";") == 0 || is_redir_token(s));
 }
 
 int find_pipe_pos(int argc, char **argv)
