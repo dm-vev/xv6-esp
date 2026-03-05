@@ -1598,11 +1598,21 @@ static int k_mkfifo(const char *path, mode_t mode)
 typedef struct {
   TaskHandle_t task;
   void (*handlers[KSH_SIG_MAX])(int);
+  uint32 blocked_mask;
+  uint32 pending_mask;
 } ksh_sig_state_t;
 
 static SemaphoreHandle_t g_sig_state_lock;
 static ksh_sig_state_t *g_sig_state;
 static int g_sig_state_cap;
+static int g_shell_pid = 1;
+static int g_shell_sid = 1;
+static int g_shell_pgid = 1;
+static int g_tty_fg_pgid = 1;
+
+static int terminate_job_id(int id, int exit_code, int reason);
+static int suspend_job_id(int id);
+static int resume_job_id(int id);
 
 static void sig_state_lock_take(void)
 {
@@ -1633,6 +1643,13 @@ static int sig_state_ensure_table_locked(void)
 static int k_sig_valid(int sig)
 {
   return (sig > 0 && sig < KSH_SIG_MAX) ? 1 : 0;
+}
+
+static uint32 k_sig_mask_bit(int sig)
+{
+  if(!k_sig_valid(sig))
+    return 0;
+  return (uint32)1u << (uint32)(sig - 1);
 }
 
 static ksh_sig_state_t *sig_state_slot_locked(TaskHandle_t task, int create)
@@ -1670,6 +1687,191 @@ static void k_signal_task_cleanup(TaskHandle_t task)
     }
   }
   sig_state_lock_give();
+}
+
+static int job_find_slot_by_task_locked(TaskHandle_t task)
+{
+  int i;
+  if(task == 0 || g_jobs == 0)
+    return -1;
+  for(i = 0; i < KSH_MAX_JOBS; i++){
+    if(!g_jobs[i].used)
+      continue;
+    if(g_jobs[i].task == task)
+      return i;
+  }
+  return -1;
+}
+
+static int job_find_slot_by_pid_locked(int pid)
+{
+  int i;
+  if(pid <= 0 || g_jobs == 0)
+    return -1;
+  for(i = 0; i < KSH_MAX_JOBS; i++){
+    if(!g_jobs[i].used)
+      continue;
+    if(g_jobs[i].pid == pid)
+      return i;
+  }
+  return -1;
+}
+
+static int proc_pid_for_task_locked(TaskHandle_t task)
+{
+  int slot;
+
+  if(task == 0)
+    return -1;
+  if(g_interactive_task && task == g_interactive_task)
+    return g_shell_pid;
+
+  slot = job_find_slot_by_task_locked(task);
+  if(slot >= 0)
+    return g_jobs[slot].pid;
+  return g_shell_pid;
+}
+
+static int proc_ppid_for_task_locked(TaskHandle_t task)
+{
+  int slot;
+
+  if(task == 0)
+    return -1;
+  if(g_interactive_task && task == g_interactive_task)
+    return 0;
+
+  slot = job_find_slot_by_task_locked(task);
+  if(slot >= 0)
+    return g_jobs[slot].ppid;
+  return g_shell_pid;
+}
+
+static int proc_pgid_for_task_locked(TaskHandle_t task)
+{
+  int slot;
+
+  if(task == 0)
+    return -1;
+  if(g_interactive_task && task == g_interactive_task)
+    return g_shell_pgid;
+
+  slot = job_find_slot_by_task_locked(task);
+  if(slot >= 0)
+    return g_jobs[slot].pgid;
+  return g_shell_pgid;
+}
+
+static int proc_sid_for_task_locked(TaskHandle_t task)
+{
+  int slot;
+
+  if(task == 0)
+    return -1;
+  if(g_interactive_task && task == g_interactive_task)
+    return g_shell_sid;
+
+  slot = job_find_slot_by_task_locked(task);
+  if(slot >= 0)
+    return g_jobs[slot].sid;
+  return g_shell_sid;
+}
+
+static int proc_group_exists_in_sid_locked(int pgid, int sid)
+{
+  int i;
+
+  if(pgid <= 0 || sid <= 0)
+    return 0;
+  if(g_shell_pgid == pgid && g_shell_sid == sid)
+    return 1;
+  if(g_jobs == 0)
+    return 0;
+  for(i = 0; i < KSH_MAX_JOBS; i++){
+    if(!g_jobs[i].used)
+      continue;
+    if(g_jobs[i].pgid == pgid && g_jobs[i].sid == sid)
+      return 1;
+  }
+  return 0;
+}
+
+static int sig_state_post_pending_locked(TaskHandle_t task, int sig)
+{
+  ksh_sig_state_t *slot;
+  uint32 bit = k_sig_mask_bit(sig);
+
+  if(task == 0 || bit == 0)
+    return -1;
+
+  slot = sig_state_slot_locked(task, 1);
+  if(slot == 0)
+    return -1;
+
+  slot->pending_mask |= bit;
+  return 0;
+}
+
+static void k_signal_post_pending(TaskHandle_t task, int sig)
+{
+  sig_state_lock_take();
+  (void)sig_state_post_pending_locked(task, sig);
+  sig_state_lock_give();
+}
+
+static void k_signal_post_sigchld(void)
+{
+  if(g_interactive_task)
+    k_signal_post_pending(g_interactive_task, SIGCHLD);
+}
+
+static int k_signal_dispatch_pending_current(void)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+
+  while(1){
+    ksh_sig_state_t *slot;
+    uint32 deliver_mask;
+    uint32 bit;
+    int sig = 0;
+    void (*handler)(int) = SIG_DFL;
+
+    sig_state_lock_take();
+    slot = sig_state_slot_locked(self, 0);
+    if(slot == 0){
+      sig_state_lock_give();
+      return 0;
+    }
+
+    deliver_mask = slot->pending_mask & ~slot->blocked_mask;
+    if(deliver_mask == 0){
+      sig_state_lock_give();
+      return 0;
+    }
+
+    for(sig = 1; sig < KSH_SIG_MAX; sig++){
+      bit = k_sig_mask_bit(sig);
+      if((deliver_mask & bit) == 0)
+        continue;
+      slot->pending_mask &= ~bit;
+      handler = slot->handlers[sig] ? slot->handlers[sig] : SIG_DFL;
+      break;
+    }
+    sig_state_lock_give();
+
+    if(sig <= 0)
+      return 0;
+
+    if(handler == SIG_IGN)
+      continue;
+    if(handler == SIG_DFL){
+      if(sig == SIGCHLD)
+        continue;
+      k_exit(128 + sig);
+      return 0;
+    }
+    handler(sig);
+  }
 }
 
 static void (*k_signal(int sig, void (*handler)(int)))(int)
@@ -1747,16 +1949,68 @@ static int k_sigaction(int sig, const struct sigaction *act, struct sigaction *o
 
 static int k_sigprocmask(int how, const sigset_t *set, sigset_t *oldset)
 {
-  (void)how;
-  (void)set;
-  if(oldset)
-    (void)sigemptyset(oldset);
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  ksh_sig_state_t *slot;
+  const sigset_t *set_host;
+  sigset_t *oldset_host;
+  uint32 new_mask;
+  uint32 old_mask = 0;
+
+  set_host = (const sigset_t *)elf_loader_translate_ptr(set);
+  oldset_host = (sigset_t *)elf_loader_translate_ptr(oldset);
+  if(set && (set_host == 0 || !k_ptr_bytes_accessible(set_host, sizeof(*set_host)))){
+    errno = EINVAL;
+    return -1;
+  }
+  if(oldset && (oldset_host == 0 || !k_ptr_bytes_accessible(oldset_host, sizeof(*oldset_host)))){
+    errno = EINVAL;
+    return -1;
+  }
+
+  sig_state_lock_take();
+  slot = sig_state_slot_locked(self, 1);
+  if(slot == 0){
+    sig_state_lock_give();
+    errno = ENOMEM;
+    return -1;
+  }
+
+  old_mask = slot->blocked_mask;
+  if(set_host){
+    memcpy(&new_mask, set_host, sizeof(new_mask));
+    switch(how){
+    case SIG_BLOCK:
+      slot->blocked_mask |= new_mask;
+      break;
+    case SIG_UNBLOCK:
+      slot->blocked_mask &= ~new_mask;
+      break;
+    case SIG_SETMASK:
+      slot->blocked_mask = new_mask;
+      break;
+    default:
+      sig_state_lock_give();
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(oldset_host){
+    memset(oldset_host, 0, sizeof(*oldset_host));
+    memcpy(oldset_host, &old_mask, sizeof(old_mask));
+  }
+  sig_state_lock_give();
+  (void)k_signal_dispatch_pending_current();
   return 0;
 }
 
 static int k_sigemptyset(sigset_t *set)
 {
+  set = (sigset_t *)elf_loader_translate_ptr(set);
   if(set == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(!k_ptr_bytes_accessible(set, sizeof(*set))){
     errno = EINVAL;
     return -1;
   }
@@ -1766,7 +2020,12 @@ static int k_sigemptyset(sigset_t *set)
 
 static int k_sigfillset(sigset_t *set)
 {
+  set = (sigset_t *)elf_loader_translate_ptr(set);
   if(set == 0){
+    errno = EINVAL;
+    return -1;
+  }
+  if(!k_ptr_bytes_accessible(set, sizeof(*set))){
     errno = EINVAL;
     return -1;
   }
@@ -1776,29 +2035,65 @@ static int k_sigfillset(sigset_t *set)
 
 static int k_sigaddset(sigset_t *set, int signo)
 {
-  (void)signo;
+  uint32 mask;
+
+  set = (sigset_t *)elf_loader_translate_ptr(set);
   if(set == 0){
     errno = EINVAL;
     return -1;
   }
+  if(!k_ptr_bytes_accessible(set, sizeof(*set))){
+    errno = EINVAL;
+    return -1;
+  }
+  if(!k_sig_valid(signo)){
+    errno = EINVAL;
+    return -1;
+  }
+  memcpy(&mask, set, sizeof(mask));
+  mask |= k_sig_mask_bit(signo);
+  memcpy(set, &mask, sizeof(mask));
   return 0;
 }
 
 static int k_sigdelset(sigset_t *set, int signo)
 {
-  (void)signo;
+  uint32 mask;
+
+  set = (sigset_t *)elf_loader_translate_ptr(set);
   if(set == 0){
     errno = EINVAL;
     return -1;
   }
+  if(!k_ptr_bytes_accessible(set, sizeof(*set))){
+    errno = EINVAL;
+    return -1;
+  }
+  if(!k_sig_valid(signo)){
+    errno = EINVAL;
+    return -1;
+  }
+  memcpy(&mask, set, sizeof(mask));
+  mask &= ~k_sig_mask_bit(signo);
+  memcpy(set, &mask, sizeof(mask));
   return 0;
 }
 
 static int k_sigismember(const sigset_t *set, int signo)
 {
-  (void)set;
-  (void)signo;
-  return 0;
+  uint32 mask;
+
+  set = (const sigset_t *)elf_loader_translate_ptr(set);
+  if(set == 0 || !k_sig_valid(signo)){
+    errno = EINVAL;
+    return -1;
+  }
+  if(!k_ptr_bytes_accessible(set, sizeof(*set))){
+    errno = EINVAL;
+    return -1;
+  }
+  memcpy(&mask, set, sizeof(mask));
+  return (mask & k_sig_mask_bit(signo)) ? 1 : 0;
 }
 
 static int k_raise(int sig)
@@ -1806,25 +2101,462 @@ static int k_raise(int sig)
   TaskHandle_t self = xTaskGetCurrentTaskHandle();
   ksh_sig_state_t *slot;
   void (*handler)(int) = SIG_DFL;
+  uint32 bit;
 
   if(!k_sig_valid(sig)){
     errno = EINVAL;
     return -1;
   }
+  bit = k_sig_mask_bit(sig);
 
   sig_state_lock_take();
-  slot = sig_state_slot_locked(self, 0);
+  slot = sig_state_slot_locked(self, 1);
+  if(slot == 0){
+    sig_state_lock_give();
+    errno = ENOMEM;
+    return -1;
+  }
   if(slot && slot->handlers[sig])
     handler = slot->handlers[sig];
+  if(slot && (slot->blocked_mask & bit) != 0){
+    slot->pending_mask |= bit;
+    sig_state_lock_give();
+    return 0;
+  }
   sig_state_lock_give();
 
   if(handler == SIG_IGN)
     return 0;
   if(handler == SIG_DFL){
+    if(sig == SIGCHLD)
+      return 0;
     k_exit(128 + sig);
     return 0;
   }
   handler(sig);
+  (void)k_signal_dispatch_pending_current();
+  return 0;
+}
+
+static int k_signal_job_pid(int pid, int sig)
+{
+  int slot = -1;
+  int job_id = -1;
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  slot = job_find_slot_by_pid_locked(pid);
+  if(slot >= 0 && g_jobs[slot].used)
+    job_id = g_jobs[slot].id;
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(job_id <= 0){
+    errno = ESRCH;
+    return -1;
+  }
+  if(sig == 0)
+    return 0;
+  if(sig == SIGCONT)
+    return resume_job_id(job_id);
+  if(sig == SIGTSTP)
+    return suspend_job_id(job_id);
+  if(sig == SIGCHLD)
+    return 0;
+  return terminate_job_id(job_id, 128 + sig, JOB_REASON_KILLED);
+}
+
+static int k_signal_group_jobs(int pgid, int sig, int *out_any)
+{
+  int i;
+  int any = 0;
+  int pids[KSH_MAX_JOBS];
+  int npids = 0;
+
+  if(pgid <= 0){
+    errno = EINVAL;
+    return -1;
+  }
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  if(g_jobs){
+    for(i = 0; i < KSH_MAX_JOBS; i++){
+      if(!g_jobs[i].used)
+        continue;
+      if(g_jobs[i].pgid != pgid)
+        continue;
+      if(npids < KSH_MAX_JOBS)
+        pids[npids++] = g_jobs[i].pid;
+    }
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  for(i = 0; i < npids; i++){
+    if(k_signal_job_pid(pids[i], sig) == 0)
+      any = 1;
+  }
+  if(out_any)
+    *out_any = any;
+  if(any)
+    return 0;
+  errno = ESRCH;
+  return -1;
+}
+
+static int k_kill(int pid, int sig)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int self_pid;
+  int pgid;
+  int any = 0;
+
+  if(sig < 0 || sig >= KSH_SIG_MAX){
+    errno = EINVAL;
+    return -1;
+  }
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  self_pid = proc_pid_for_task_locked(self);
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(pid > 0){
+    if(pid == g_shell_pid){
+      if(sig == 0)
+        return 0;
+      if(self_pid == g_shell_pid)
+        return k_raise(sig);
+      errno = EPERM;
+      return -1;
+    }
+    return k_signal_job_pid(pid, sig);
+  }
+
+  if(pid == 0){
+    if(g_jobs_lock)
+      (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+    pgid = proc_pgid_for_task_locked(self);
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+    if(pgid <= 0){
+      errno = ESRCH;
+      return -1;
+    }
+    if(pgid == g_shell_pgid){
+      if(self_pid == g_shell_pid && sig != 0){
+        (void)k_raise(sig);
+        any = 1;
+      } else if(sig == 0){
+        any = 1;
+      }
+    }
+    if(k_signal_group_jobs(pgid, sig, &any) == 0 || any)
+      return 0;
+    return -1;
+  }
+
+  if(pid == -1){
+    errno = EPERM;
+    return -1;
+  }
+
+  pgid = -pid;
+  if(pgid == g_shell_pgid){
+    if(self_pid == g_shell_pid && sig != 0){
+      (void)k_raise(sig);
+      any = 1;
+    } else if(sig == 0){
+      any = 1;
+    }
+  }
+  if(k_signal_group_jobs(pgid, sig, &any) == 0 || any)
+    return 0;
+  return -1;
+}
+
+static pid_t k_getpid(void)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int pid;
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  pid = proc_pid_for_task_locked(self);
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+  if(pid <= 0)
+    pid = g_shell_pid;
+  return (pid_t)pid;
+}
+
+static pid_t k_getppid(void)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int ppid;
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  ppid = proc_ppid_for_task_locked(self);
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+  if(ppid < 0)
+    ppid = 0;
+  return (pid_t)ppid;
+}
+
+static pid_t k_getpgid(pid_t pid)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int target = (int)pid;
+  int pgid = -1;
+  int slot = -1;
+
+  if(target == 0){
+    if(g_jobs_lock)
+      (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+    pgid = proc_pgid_for_task_locked(self);
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+    if(pgid <= 0)
+      pgid = g_shell_pgid;
+    return (pid_t)pgid;
+  }
+  if(target < 0){
+    errno = EINVAL;
+    return (pid_t)-1;
+  }
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  if(target == g_shell_pid)
+    pgid = g_shell_pgid;
+  else {
+    slot = job_find_slot_by_pid_locked(target);
+    if(slot >= 0 && g_jobs[slot].used)
+      pgid = g_jobs[slot].pgid;
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(pgid <= 0){
+    errno = ESRCH;
+    return (pid_t)-1;
+  }
+  return (pid_t)pgid;
+}
+
+static pid_t k_getpgrp(void)
+{
+  return k_getpgid((pid_t)0);
+}
+
+static int k_setpgid(pid_t pid, pid_t pgid)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int self_pid;
+  int target;
+  int new_pgid;
+  int sid;
+  int slot = -1;
+  int rc = -1;
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+
+  self_pid = proc_pid_for_task_locked(self);
+  target = (pid == 0) ? self_pid : (int)pid;
+  if(target <= 0){
+    errno = EINVAL;
+    goto out;
+  }
+
+  new_pgid = (pgid == 0) ? target : (int)pgid;
+  if(new_pgid <= 0){
+    errno = EINVAL;
+    goto out;
+  }
+
+  if(target == g_shell_pid){
+    if(self_pid != g_shell_pid){
+      errno = EPERM;
+      goto out;
+    }
+    sid = g_shell_sid;
+    if(new_pgid != target && !proc_group_exists_in_sid_locked(new_pgid, sid)){
+      errno = EPERM;
+      goto out;
+    }
+    g_shell_pgid = new_pgid;
+    rc = 0;
+    goto out;
+  }
+
+  slot = job_find_slot_by_pid_locked(target);
+  if(slot < 0 || !g_jobs[slot].used){
+    errno = ESRCH;
+    goto out;
+  }
+  if(self_pid != g_shell_pid && self_pid != target){
+    errno = EPERM;
+    goto out;
+  }
+
+  sid = g_jobs[slot].sid;
+  if(sid <= 0)
+    sid = target;
+  if(new_pgid != target && !proc_group_exists_in_sid_locked(new_pgid, sid)){
+    errno = EPERM;
+    goto out;
+  }
+
+  g_jobs[slot].pgid = new_pgid;
+  rc = 0;
+
+out:
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+  return rc;
+}
+
+static pid_t k_setsid(void)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int self_pid;
+  int self_pgid;
+  int slot = -1;
+  int sid = -1;
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+
+  self_pid = proc_pid_for_task_locked(self);
+  self_pgid = proc_pgid_for_task_locked(self);
+  if(self_pid <= 0){
+    errno = ESRCH;
+    goto out;
+  }
+  if(self_pid == self_pgid){
+    errno = EPERM;
+    goto out;
+  }
+
+  if(self_pid == g_shell_pid){
+    g_shell_sid = self_pid;
+    g_shell_pgid = self_pid;
+    sid = g_shell_sid;
+    goto out;
+  }
+
+  slot = job_find_slot_by_pid_locked(self_pid);
+  if(slot < 0 || !g_jobs[slot].used){
+    errno = ESRCH;
+    goto out;
+  }
+  g_jobs[slot].sid = self_pid;
+  g_jobs[slot].pgid = self_pid;
+  sid = g_jobs[slot].sid;
+
+out:
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+  return (sid > 0) ? (pid_t)sid : (pid_t)-1;
+}
+
+static pid_t k_getsid(pid_t pid)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int target = (int)pid;
+  int sid = -1;
+  int slot = -1;
+
+  if(target == 0){
+    if(g_jobs_lock)
+      (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+    sid = proc_sid_for_task_locked(self);
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+    if(sid <= 0)
+      sid = g_shell_sid;
+    return (pid_t)sid;
+  }
+  if(target < 0){
+    errno = EINVAL;
+    return (pid_t)-1;
+  }
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  if(target == g_shell_pid)
+    sid = g_shell_sid;
+  else {
+    slot = job_find_slot_by_pid_locked(target);
+    if(slot >= 0 && g_jobs[slot].used)
+      sid = g_jobs[slot].sid;
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(sid <= 0){
+    errno = ESRCH;
+    return (pid_t)-1;
+  }
+  return (pid_t)sid;
+}
+
+static int k_tcgetpgrp(int fd)
+{
+  if(hostabi_posix_isatty(fd) == 0){
+    if(errno == 0)
+      errno = ENOTTY;
+    return -1;
+  }
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  fd = g_tty_fg_pgid;
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(fd <= 0){
+    errno = ESRCH;
+    return -1;
+  }
+  return fd;
+}
+
+static int k_tcsetpgrp(int fd, pid_t pgrp)
+{
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int sid;
+  int target_pgrp = (int)pgrp;
+
+  if(hostabi_posix_isatty(fd) == 0){
+    if(errno == 0)
+      errno = ENOTTY;
+    return -1;
+  }
+  if(target_pgrp <= 0){
+    errno = EINVAL;
+    return -1;
+  }
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  sid = proc_sid_for_task_locked(self);
+  if(sid <= 0)
+    sid = g_shell_sid;
+  if(!proc_group_exists_in_sid_locked(target_pgrp, sid)){
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+    errno = EPERM;
+    return -1;
+  }
+  g_tty_fg_pgid = target_pgrp;
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
   return 0;
 }
 
@@ -2185,16 +2917,13 @@ static clock_t k__times_r(struct _reent *r, struct tms *buf)
 
 static int k__kill_r(struct _reent *r, int pid, int sig)
 {
-  (void)pid;
-  (void)sig;
-  k_reent_set_errno(r, ENOSYS);
-  return -1;
+  return k_reent_finish_int(r, k_kill(pid, sig));
 }
 
 static int k__getpid_r(struct _reent *r)
 {
-  (void)r;
-  return 1;
+  k_reent_clear_errno(r);
+  return (int)k_getpid();
 }
 
 static void k__exit(int code)

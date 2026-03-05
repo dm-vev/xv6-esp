@@ -28,6 +28,12 @@ int hal_console_getc(void);
 int hal_console_poll_ctrl_c(void);
 
 /**
+ * @brief Poll console for Ctrl+Z without consuming other bytes
+ * @return 1 if Ctrl+Z was received, 0 otherwise
+ */
+int hal_console_poll_ctrl_z(void);
+
+/**
  * @brief Put character to console
  * @param c Character to output
  */

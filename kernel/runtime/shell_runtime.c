@@ -50,7 +50,7 @@
 #define KSH_MAX_ENV 16
 #define KSH_ENV_KEY 24
 #define KSH_ENV_VAL 128
-#define KSH_BG_STACK 6144
+#define KSH_BG_STACK 12288
 #define KSH_MAX_CORES 8
 
 _Static_assert(XV6_TASK_CTX_CAP >= (KSH_MAX_JOBS + 2), "XV6_TASK_CTX_CAP must cover shell + background jobs");
@@ -61,12 +61,18 @@ enum {
   JOB_REASON_EXIT,
   JOB_REASON_TIMEOUT,
   JOB_REASON_KILLED,
+  JOB_REASON_STOPPED,
 };
 
 typedef struct {
   int used;
   int id;
+  int pid;
+  int ppid;
+  int pgid;
+  int sid;
   int done;
+  int stopped;
   int exit_code;
   int reason;
   int user_visible;
@@ -83,6 +89,10 @@ typedef struct {
 
 typedef struct {
   int slot;
+  int pid;
+  int ppid;
+  int pgid;
+  int sid;
   int argc;
   char **argv;
   int in_fd;
@@ -105,7 +115,8 @@ typedef struct {
 } ksh_env_t;
 
 static ksh_job_t *g_jobs;
-static int g_next_job_id = 1;
+/* Reserve pid/pgid=1 for interactive shell process metadata. */
+static int g_next_job_id = 2;
 static int g_next_core_hint = 0;
 static uint32 g_ulimit_ms = 0;
 static int g_ulimit_heap_kb = 0;

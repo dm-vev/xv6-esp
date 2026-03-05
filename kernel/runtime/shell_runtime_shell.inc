@@ -230,6 +230,8 @@ static const char *job_reason_str(int reason)
     return "timeout";
   case JOB_REASON_KILLED:
     return "killed";
+  case JOB_REASON_STOPPED:
+    return "stopped";
   default:
     return "-";
   }
@@ -250,6 +252,7 @@ static int cmd_help(void)
   puts_line("  ps");
   puts_line("  jobs");
   puts_line("  fg <jobid>");
+  puts_line("  bg <jobid>");
   puts_line("  kill <jobid>");
   puts_line("  wait [jobid]");
   puts_line("  time <cmd...>");
@@ -640,12 +643,14 @@ static int alloc_job_id_locked(void)
 {
   int attempts = KSH_MAX_JOBS + 1;
 
-  if(g_next_job_id < 1)
-    g_next_job_id = 1;
+  if(g_next_job_id <= 1)
+    g_next_job_id = 2;
   while(attempts-- > 0){
     int id = g_next_job_id++;
-    if(g_next_job_id < 1)
-      g_next_job_id = 1;
+    if(g_next_job_id <= 1)
+      g_next_job_id = 2;
+    if(id == g_shell_pid)
+      continue;
     if(!job_id_in_use_locked(id))
       return id;
   }
@@ -755,6 +760,7 @@ static void enforce_job_limits(void)
   uint32 now = (uint32)k_ticks();
   ksh_job_task_t *kill_ctx[KSH_MAX_JOBS];
   int nkill = 0;
+  int post_sigchld = 0;
 
   memset(kill_ctx, 0, sizeof(kill_ctx));
 
@@ -775,10 +781,12 @@ static void enforce_job_limits(void)
       if(nkill < KSH_MAX_JOBS && g_jobs[i].task_ctx)
         kill_ctx[nkill++] = (ksh_job_task_t *)g_jobs[i].task_ctx;
       g_jobs[i].done = 1;
+      g_jobs[i].stopped = 0;
       g_jobs[i].exit_code = 124;
       g_jobs[i].reason = JOB_REASON_TIMEOUT;
       g_jobs[i].task = 0;
       g_jobs[i].task_ctx = 0;
+      post_sigchld = 1;
     }
   }
   if(g_jobs_lock)
@@ -788,6 +796,8 @@ static void enforce_job_limits(void)
     if(kill_ctx[i])
       free_job_ctx(kill_ctx[i]);
   }
+  if(post_sigchld)
+    k_signal_post_sigchld();
 }
 
 static void job_task(void *arg)
@@ -795,11 +805,14 @@ static void job_task(void *arg)
   ksh_job_task_t *t = (ksh_job_task_t *)arg;
   int exit_code = 127;
   int running_core = current_core_id();
+  TaskHandle_t self_task = xTaskGetCurrentTaskHandle();
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
-  if(t->slot >= 0 && t->slot < KSH_MAX_JOBS && g_jobs[t->slot].used)
+  if(t->slot >= 0 && t->slot < KSH_MAX_JOBS && g_jobs[t->slot].used){
+    g_jobs[t->slot].task = self_task;
     g_jobs[t->slot].running_core = running_core;
+  }
   if(g_jobs_lock)
     (void)xSemaphoreGive(g_jobs_lock);
 
@@ -812,6 +825,7 @@ static void job_task(void *arg)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
   if(t->slot >= 0 && t->slot < KSH_MAX_JOBS && g_jobs[t->slot].used){
     g_jobs[t->slot].done = 1;
+    g_jobs[t->slot].stopped = 0;
     g_jobs[t->slot].exit_code = exit_code;
     g_jobs[t->slot].reason = (g_jobs[t->slot].reason == JOB_REASON_NONE) ? JOB_REASON_EXIT : g_jobs[t->slot].reason;
     g_jobs[t->slot].task = 0;
@@ -821,7 +835,8 @@ static void job_task(void *arg)
     (void)xSemaphoreGive(g_jobs_lock);
 
   free_job_ctx(t);
-  k_signal_task_cleanup(xTaskGetCurrentTaskHandle());
+  k_signal_post_sigchld();
+  k_signal_task_cleanup(self_task);
   xv6_task_ctx_cleanup();
   vTaskDelete(NULL);
 }
@@ -829,9 +844,10 @@ static void job_task(void *arg)
 static int terminate_job_id(int id, int exit_code, int reason)
 {
   int slot;
-  // cppcheck-suppress unreadVariable
   TaskHandle_t task = 0;
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
   ksh_job_task_t *ctx = 0;
+  int self_delete = 0;
   int rc = -1;
 
   if(g_jobs_lock)
@@ -840,12 +856,15 @@ static int terminate_job_id(int id, int exit_code, int reason)
   if(slot >= 0 && g_jobs[slot].used && !g_jobs[slot].done){
     task = g_jobs[slot].task;
     ctx = (ksh_job_task_t *)g_jobs[slot].task_ctx;
-    if(task){
+    if(task && task != self){
       vTaskDelete(task);
       xv6_task_ctx_cleanup_for_handle((void *)task);
       k_signal_task_cleanup(task);
+    } else if(task && task == self){
+      self_delete = 1;
     }
     g_jobs[slot].done = 1;
+    g_jobs[slot].stopped = 0;
     g_jobs[slot].exit_code = exit_code;
     g_jobs[slot].reason = reason;
     g_jobs[slot].task = 0;
@@ -859,17 +878,104 @@ static int terminate_job_id(int id, int exit_code, int reason)
     return -1;
   if(ctx)
     free_job_ctx(ctx);
+  k_signal_post_sigchld();
+  if(self_delete){
+    netconn_thread_cleanup();
+    k_signal_task_cleanup(self);
+    xv6_task_ctx_cleanup();
+    vTaskDelete(NULL);
+    for(;;){
+    }
+  }
   return rc;
+}
+
+static int suspend_job_id(int id)
+{
+  int slot;
+  TaskHandle_t task = 0;
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int self_suspend = 0;
+  int should_suspend = 0;
+  int post_sigchld = 0;
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  slot = job_find_slot_by_id(id);
+  if(slot >= 0 && g_jobs[slot].used && !g_jobs[slot].done){
+    task = g_jobs[slot].task;
+    if(task && !g_jobs[slot].stopped){
+      g_jobs[slot].stopped = 1;
+      g_jobs[slot].reason = JOB_REASON_STOPPED;
+      g_jobs[slot].user_visible = 1;
+      should_suspend = 1;
+      post_sigchld = 1;
+      if(task == self){
+        self_suspend = 1;
+      } else {
+        vTaskSuspend(task);
+      }
+    }
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(task == 0){
+    errno = ESRCH;
+    return -1;
+  }
+  if(post_sigchld)
+    k_signal_post_sigchld();
+  if(should_suspend && self_suspend)
+    vTaskSuspend(NULL);
+  return 0;
+}
+
+static int resume_job_id(int id)
+{
+  int slot;
+  TaskHandle_t task = 0;
+  TaskHandle_t self = xTaskGetCurrentTaskHandle();
+  int should_resume = 0;
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  slot = job_find_slot_by_id(id);
+  if(slot >= 0 && g_jobs[slot].used && !g_jobs[slot].done){
+    task = g_jobs[slot].task;
+    if(task && g_jobs[slot].stopped){
+      g_jobs[slot].stopped = 0;
+      g_jobs[slot].reason = JOB_REASON_NONE;
+      should_resume = 1;
+      if(task != self)
+        vTaskResume(task);
+    }
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(task == 0){
+    errno = ESRCH;
+    return -1;
+  }
+  if(should_resume && task == self){
+    errno = EPERM;
+    return -1;
+  }
+  return 0;
 }
 
 static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctrl_c)
 {
   int interrupt_pending = 0;
+  int suspend_pending = 0;
 
   while(1){
     int slot;
     int done = 0;
+    int stopped = 0;
     int exit_code = 0;
+    int pgid = -1;
 
     if(g_jobs_lock)
       (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -885,6 +991,9 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
       exit_code = g_jobs[slot].exit_code;
       if(consume)
         memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
+    } else {
+      stopped = g_jobs[slot].stopped;
+      pgid = g_jobs[slot].pgid;
     }
     if(g_jobs_lock)
       (void)xSemaphoreGive(g_jobs_lock);
@@ -894,12 +1003,15 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
         *out_exit_code = exit_code;
       return 0;
     }
+    if(stopped){
+      if(out_exit_code)
+        *out_exit_code = 128 + SIGTSTP;
+      return 0;
+    }
 
-    if(allow_ctrl_c && (interrupt_pending || hal_console_poll_ctrl_c())){
-      int term_rc;
+    if(allow_ctrl_c && shell_allow_ctrl_c_poll() && (interrupt_pending || hal_console_poll_ctrl_c())){
       interrupt_pending = 1;
-      term_rc = terminate_job_id(id, 130, JOB_REASON_KILLED);
-      if(term_rc == 0){
+      if((pgid > 0 && k_kill(-pgid, SIGINT) == 0) || terminate_job_id(id, 130, JOB_REASON_KILLED) == 0){
         puts_line("^C");
         if(out_exit_code)
           *out_exit_code = 130;
@@ -917,7 +1029,19 @@ static int wait_job_id_ex(int id, int *out_exit_code, int consume, int allow_ctr
       interrupt_pending = 0;
     }
 
+    if(allow_ctrl_c && shell_allow_ctrl_c_poll() && (suspend_pending || hal_console_poll_ctrl_z())){
+      suspend_pending = 1;
+      if((pgid > 0 && k_kill(-pgid, SIGTSTP) == 0) || suspend_job_id(id) == 0){
+        puts_line("^Z");
+        if(out_exit_code)
+          *out_exit_code = 128 + SIGTSTP;
+        return 0;
+      }
+      suspend_pending = 0;
+    }
+
     enforce_job_limits();
+    (void)k_signal_dispatch_pending_current();
     hal_delay_ms(10);
   }
 }
@@ -941,11 +1065,14 @@ static void cleanup_spawned_jobs(int *jobs, int njobs)
 }
 
 static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int err_fd, int is_pipe, int quiet_start,
-                               int max_heap_kb, uint32 max_runtime_ms, int *out_job_id)
+                               int max_heap_kb, uint32 max_runtime_ms, int pgid_hint, int *out_job_id)
 {
   int i;
   int slot = -1;
   int id = 0;
+  int ppid = 1;
+  int sid = 1;
+  int pgid = 0;
   int pos = 0;
   int assigned_core = 0;
   TaskHandle_t handle = 0;
@@ -955,6 +1082,11 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
     puts_line("jobs: invalid arguments");
     return -1;
   }
+
+  ppid = (int)k_getpid();
+  sid = (int)k_getsid((pid_t)0);
+  if(ppid <= 0)
+    ppid = 1;
 
   if(g_jobs_lock)
     (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
@@ -1063,13 +1195,24 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
     return -1;
   }
 
+  if(sid <= 0)
+    sid = id;
+  pgid = (pgid_hint > 0) ? pgid_hint : id;
+  if(ppid <= 0)
+    ppid = 1;
+
   assigned_core = select_job_core_locked();
 
   memset(&g_jobs[slot], 0, sizeof(g_jobs[slot]));
   g_jobs[slot].used = 1;
   g_jobs[slot].id = id;
+  g_jobs[slot].pid = id;
+  g_jobs[slot].ppid = ppid;
+  g_jobs[slot].pgid = pgid;
+  g_jobs[slot].sid = sid;
   g_jobs[slot].user_visible = quiet_start ? 0 : 1;
   g_jobs[slot].is_pipe = is_pipe;
+  g_jobs[slot].stopped = 0;
   g_jobs[slot].max_heap_kb = max_heap_kb;
   g_jobs[slot].max_runtime_ms = max_runtime_ms;
   g_jobs[slot].started_ms = (uint32)k_ticks();
@@ -1077,6 +1220,11 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
   g_jobs[slot].assigned_core = assigned_core;
   g_jobs[slot].running_core = -1;
   g_jobs[slot].task_ctx = t;
+
+  t->pid = id;
+  t->ppid = ppid;
+  t->pgid = pgid;
+  t->sid = sid;
 
   for(i = 0; i < argc; i++){
     int n = snprintf(g_jobs[slot].cmd + pos, sizeof(g_jobs[slot].cmd) - (unsigned)pos, "%s%s", (i ? " " : ""),
@@ -1123,12 +1271,13 @@ static int spawn_background_ex(int argc, char **argv, int in_fd, int out_fd, int
 }
 
 static int run_foreground_with_limits(int argc, char **argv, int in_fd, int out_fd, int err_fd, int max_heap_kb,
-                                      uint32 max_runtime_ms)
+                                      uint32 max_runtime_ms, int pgid_hint)
 {
   int rc;
   int job_id = -1;
   int exit_code = 127;
   int allow_ctrl_c = shell_allow_ctrl_c_poll();
+  int fg_pgid = -1;
 
   /*
    * duktape_demo has its own interactive Ctrl+C handling in user space.
@@ -1144,28 +1293,32 @@ static int run_foreground_with_limits(int argc, char **argv, int in_fd, int out_
       allow_ctrl_c = 0;
   }
 
-  /*
-   * Keep default foreground execution on the interactive shell task when no
-   * runtime limit is requested. Spawning a worker task for every command
-   * increases stack pressure and can destabilize simple applets.
-   */
-  if(max_runtime_ms == 0){
-    rc = run_elf_command(argc, argv, &exit_code, in_fd, out_fd, err_fd, max_heap_kb);
-    if(rc != 0)
-      return -1;
-    return exit_code;
-  }
-
-  rc = spawn_background_ex(argc, argv, in_fd, out_fd, err_fd, 0, 1, max_heap_kb, max_runtime_ms, &job_id);
+  rc = spawn_background_ex(argc, argv, in_fd, out_fd, err_fd, 0, 1, max_heap_kb, max_runtime_ms, pgid_hint, &job_id);
   if(rc != 0)
     return -1;
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  {
+    int slot = job_find_slot_by_id(job_id);
+    if(slot >= 0 && g_jobs[slot].used)
+      fg_pgid = g_jobs[slot].pgid;
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+  if(fg_pgid > 0)
+    (void)k_tcsetpgrp(0, (pid_t)fg_pgid);
+
   rc = wait_job_id_ex(job_id, &exit_code, 1, allow_ctrl_c);
+  (void)k_tcsetpgrp(0, (pid_t)g_shell_pgid);
   if(rc != 0)
     return -1;
   if(exit_code == 124){
     puts_line("limit: timeout");
     return 124;
   }
+  if(exit_code == (128 + SIGTSTP))
+    return exit_code & 0xff;
   return exit_code;
 }
 
@@ -1334,6 +1487,7 @@ static int run_pipeline(int argc, char **argv, int run_bg, int max_heap_kb, uint
   int i;
   int final_rc = 0;
   int fail_rc = 1;
+  int pipeline_pgid = 0;
 
   for(i = 0; i < KSH_MAX_STAGES - 1; i++){
     pipe_r[i] = -1;
@@ -1389,7 +1543,7 @@ static int run_pipeline(int argc, char **argv, int run_bg, int max_heap_kb, uint
 
     if(i == stage_count - 1 && !run_bg){
       final_rc = run_foreground_with_limits(stage_exec_argc, stage_exec, io.in_fd, io.out_fd, io.err_fd, max_heap_kb,
-                                            max_runtime_ms);
+                                            max_runtime_ms, pipeline_pgid);
       if(final_rc < 0){
         close_io_custom_fds(&io, &base_io);
         fail_rc = 1;
@@ -1397,12 +1551,14 @@ static int run_pipeline(int argc, char **argv, int run_bg, int max_heap_kb, uint
       }
     } else {
       if(spawn_background_ex(stage_exec_argc, stage_exec, io.in_fd, io.out_fd, io.err_fd, 1, run_bg ? 0 : 1, max_heap_kb,
-                             max_runtime_ms, &sid) != 0)
+                             max_runtime_ms, pipeline_pgid, &sid) != 0)
       {
         close_io_custom_fds(&io, &base_io);
         fail_rc = 1;
         goto fail;
       }
+      if(pipeline_pgid == 0)
+        pipeline_pgid = sid;
       jobs[njobs++] = sid;
     }
     close_io_custom_fds(&io, &base_io);
@@ -1466,9 +1622,10 @@ static int execute_external(int argc, char **argv, int run_bg, int max_heap_kb, 
     return parse_status;
 
   if(run_bg)
-    rc = spawn_background_ex(exec_argc, exec_argv, io.in_fd, io.out_fd, io.err_fd, 0, 0, max_heap_kb, max_runtime_ms, 0);
+    rc = spawn_background_ex(exec_argc, exec_argv, io.in_fd, io.out_fd, io.err_fd, 0, 0, max_heap_kb, max_runtime_ms, 0,
+                             0);
   else
-    rc = run_foreground_with_limits(exec_argc, exec_argv, io.in_fd, io.out_fd, io.err_fd, max_heap_kb, max_runtime_ms);
+    rc = run_foreground_with_limits(exec_argc, exec_argv, io.in_fd, io.out_fd, io.err_fd, max_heap_kb, max_runtime_ms, 0);
 
   close_io_custom_fds(&io, &base_io);
   if(rc < 0)
@@ -1486,7 +1643,12 @@ static int cmd_jobs(void)
   for(i = 0; i < KSH_MAX_JOBS; i++){
     if(!g_jobs[i].used || !g_jobs[i].user_visible)
       continue;
-    k_printf("[%d] %s %s\r\n", g_jobs[i].id, g_jobs[i].done ? "done" : "running", g_jobs[i].cmd);
+    if(g_jobs[i].done)
+      k_printf("[%d] done %s\r\n", g_jobs[i].id, g_jobs[i].cmd);
+    else if(g_jobs[i].stopped)
+      k_printf("[%d] stopped %s\r\n", g_jobs[i].id, g_jobs[i].cmd);
+    else
+      k_printf("[%d] running %s\r\n", g_jobs[i].id, g_jobs[i].cmd);
     any = 1;
   }
   if(g_jobs_lock)
@@ -1515,6 +1677,9 @@ static int cmd_ps(void)
       k_printf("%d DONE %d %s %d/%d %u/%d %s\r\n", g_jobs[i].id, g_jobs[i].exit_code, job_reason_str(g_jobs[i].reason),
                g_jobs[i].assigned_core, g_jobs[i].running_core, (unsigned)g_jobs[i].max_runtime_ms,
                g_jobs[i].max_heap_kb, g_jobs[i].cmd);
+    } else if(g_jobs[i].stopped){
+      k_printf("%d STOP - %s %d/%d %u/%d %s\r\n", g_jobs[i].id, job_reason_str(g_jobs[i].reason), g_jobs[i].assigned_core,
+               g_jobs[i].running_core, (unsigned)g_jobs[i].max_runtime_ms, g_jobs[i].max_heap_kb, g_jobs[i].cmd);
     } else {
       k_printf("%d RUN - - %d/%d %u/%d %s\r\n", g_jobs[i].id, g_jobs[i].assigned_core, g_jobs[i].running_core,
                (unsigned)g_jobs[i].max_runtime_ms, g_jobs[i].max_heap_kb, g_jobs[i].cmd);
@@ -1614,7 +1779,6 @@ static int cmd_health(void)
 static int cmd_wait(int argc, char **argv)
 {
   if(argc == 1){
-    int allow_ctrl_c = shell_allow_ctrl_c_poll();
     while(1){
       int i;
       int has_running = 0;
@@ -1625,14 +1789,14 @@ static int cmd_wait(int argc, char **argv)
           continue;
         if(g_jobs[i].done)
           memset(&g_jobs[i], 0, sizeof(g_jobs[i]));
-        else if(g_jobs[i].user_visible)
+        else if(g_jobs[i].user_visible && !g_jobs[i].stopped)
           has_running = 1;
       }
       if(g_jobs_lock)
         (void)xSemaphoreGive(g_jobs_lock);
       if(!has_running)
         break;
-      if(allow_ctrl_c && hal_console_poll_ctrl_c()){
+      if(shell_allow_ctrl_c_poll() && hal_console_poll_ctrl_c()){
         puts_line("^C");
         return 130;
       }
@@ -1692,6 +1856,8 @@ static int cmd_fg(int argc, char **argv)
 {
   uint32 id = 0;
   int exit_code = 0;
+  int pgid = -1;
+  int was_stopped = 0;
 
   if(argc != 2 || parse_u32_dec(argv[1], &id) != 0){
     puts_line("usage: fg <jobid>");
@@ -1702,13 +1868,59 @@ static int cmd_fg(int argc, char **argv)
     puts_line("fg: no such job");
     return 1;
   }
+
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  {
+    int slot = job_find_slot_by_id((int)id);
+    if(slot >= 0 && g_jobs[slot].used){
+      pgid = g_jobs[slot].pgid;
+      was_stopped = g_jobs[slot].stopped;
+    }
+  }
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
+
+  if(was_stopped)
+    (void)resume_job_id((int)id);
+  if(pgid > 0)
+    (void)k_tcsetpgrp(0, (pid_t)pgid);
+
   if(wait_job_id_ex((int)id, &exit_code, 1, shell_allow_ctrl_c_poll()) != 0){
+    (void)k_tcsetpgrp(0, (pid_t)g_shell_pgid);
     puts_line("fg: no such job");
     return 1;
   }
 
+  (void)k_tcsetpgrp(0, (pid_t)g_shell_pgid);
+  if(exit_code == (128 + SIGTSTP)){
+    k_printf("fg: stopped %u\r\n", (unsigned)id);
+    return exit_code & 0xff;
+  }
+
   k_printf("fg: done %u\r\n", (unsigned)exit_code);
   return exit_code & 0xff;
+}
+
+static int cmd_bg(int argc, char **argv)
+{
+  uint32 id = 0;
+
+  if(argc != 2 || parse_u32_dec(argv[1], &id) != 0){
+    puts_line("usage: bg <jobid>");
+    return 2;
+  }
+  if(!job_is_user_visible_id((int)id)){
+    puts_line("bg: no such job");
+    return 1;
+  }
+  if(resume_job_id((int)id) != 0){
+    puts_line("bg: no such stopped job");
+    return 1;
+  }
+
+  k_printf("bg: continued %u\r\n", (unsigned)id);
+  return 0;
 }
 
 static int cmd_ulimit(int argc, char **argv)
@@ -2232,6 +2444,19 @@ static int register_default_symbols(void)
     { "chdir", (void *)k_chdir },
     { "getcwd", (void *)k_getcwd },
     { "isatty", (void *)k_isatty },
+    { "getpid", (void *)k_getpid },
+    { "__xv6_host_getpid", (void *)k_getpid },
+    { "getppid", (void *)k_getppid },
+    { "__xv6_host_getppid", (void *)k_getppid },
+    { "kill", (void *)k_kill },
+    { "__xv6_host_kill", (void *)k_kill },
+    { "setpgid", (void *)k_setpgid },
+    { "getpgid", (void *)k_getpgid },
+    { "getpgrp", (void *)k_getpgrp },
+    { "setsid", (void *)k_setsid },
+    { "getsid", (void *)k_getsid },
+    { "tcsetpgrp", (void *)k_tcsetpgrp },
+    { "tcgetpgrp", (void *)k_tcgetpgrp },
     { "tcgetattr", (void *)hostabi_posix_tcgetattr },
     { "tcsetattr", (void *)hostabi_posix_tcsetattr },
     { "cfmakeraw", (void *)hostabi_posix_cfmakeraw },
@@ -2338,6 +2563,7 @@ static int is_builtin_command(const char *cmd)
           strcmp(cmd, "health") == 0 ||
           strcmp(cmd, "unset") == 0 || strcmp(cmd, "ps") == 0 || strcmp(cmd, "jobs") == 0 ||
           strcmp(cmd, "wait") == 0 || strcmp(cmd, "kill") == 0 || strcmp(cmd, "fg") == 0 ||
+          strcmp(cmd, "bg") == 0 ||
           strcmp(cmd, "time") == 0 || strcmp(cmd, "ulimit") == 0 || strcmp(cmd, "limit") == 0 ||
           strcmp(cmd, "kmod") == 0);
 }
@@ -2387,6 +2613,9 @@ static int dispatch_builtin_command(int argc, char **argv, int run_bg)
   }
   if(strcmp(argv[0], "fg") == 0){
     return cmd_fg(argc, argv);
+  }
+  if(strcmp(argv[0], "bg") == 0){
+    return cmd_bg(argc, argv);
   }
   if(strcmp(argv[0], "kmod") == 0){
     return cmd_kmod(argc, argv);
@@ -2565,6 +2794,14 @@ int shell_runtime_eval_line(const char *line, int *exit_code)
 {
   if(shell_runtime_init() != 0)
     return -1;
+  if(g_interactive_task == 0){
+    g_interactive_task = xTaskGetCurrentTaskHandle();
+    if(g_jobs_lock)
+      (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+    g_tty_fg_pgid = g_shell_pgid;
+    if(g_jobs_lock)
+      (void)xSemaphoreGive(g_jobs_lock);
+  }
   return eval_line_inner(line, exit_code);
 }
 
@@ -2598,11 +2835,17 @@ int shell_runtime_run_interactive(void)
     return -1;
 
   g_interactive_task = xTaskGetCurrentTaskHandle();
+  if(g_jobs_lock)
+    (void)xSemaphoreTake(g_jobs_lock, portMAX_DELAY);
+  g_tty_fg_pgid = g_shell_pgid;
+  if(g_jobs_lock)
+    (void)xSemaphoreGive(g_jobs_lock);
   tty_puts("xv6> ");
   for(;;){
     int c;
 
     enforce_job_limits();
+    (void)k_signal_dispatch_pending_current();
 
     c = hal_console_getc();
     if(c < 0){
@@ -2610,13 +2853,22 @@ int shell_runtime_run_interactive(void)
       continue;
     }
 
-    if(c != 0x03 && c != '\r' && c != '\n' && c != '\b' && c != 0x7f && c != '\t' && (c < 0x20 || c > 0x7e)){
+    if(c != 0x03 && c != 0x1a && c != '\r' && c != '\n' && c != '\b' && c != 0x7f && c != '\t' &&
+       (c < 0x20 || c > 0x7e))
+    {
       taskYIELD();
       continue;
     }
 
     if(c == 0x03){
       puts_line("^C");
+      len = 0;
+      tty_puts("xv6> ");
+      continue;
+    }
+
+    if(c == 0x1a){
+      puts_line("^Z");
       len = 0;
       tty_puts("xv6> ");
       continue;
