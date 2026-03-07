@@ -31,6 +31,8 @@ PROBE ptsname_r_ok rc=0 errno=OK
 PROBE pty_tcgetattr_master rc=0 errno=OK
 PROBE pty_tcsetattr_shared rc=0 errno=OK
 PROBE pty_tcsetattr_flush rc=0 errno=OK
+PROBE poll_pty_slave_read_ready rc=1 errno=OK
+PROBE select_pty_slave_read_ready rc=1 errno=OK
 PROBE posix_openpt_rdonly rc=-1 errno=EINVAL
 PROBE fdopendir rc=0 errno=OK
 PROBE at_openat_rel rc=0 errno=OK
@@ -49,6 +51,12 @@ PROBE ctype_ascii rc=0 errno=OK
 PROBE chown_ok rc=0 errno=OK
 PROBE poll_bad_timeout rc=-1 errno=EINVAL
 PROBE poll_zero_ok rc=0 errno=OK
+PROBE poll_pipe_write_ready rc=1 errno=OK
+PROBE poll_pipe_read_ready rc=1 errno=OK
+PROBE poll_pipe_hup rc=1 errno=OK
+PROBE select_pipe_read_hup rc=1 errno=OK
+PROBE poll_fifo_write_ready rc=1 errno=OK
+PROBE select_fifo_read_ready rc=1 errno=OK
 PROBE select_zero_ok rc=0 errno=OK
 PROBE select_bad_timeval rc=-1 errno=EINVAL
 PROBE shell_and_shortcircuit rc=0 errno=OK

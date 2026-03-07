@@ -21,6 +21,19 @@
 #include "core/param.h"
 #include "fs/stat.h"
 
+#ifndef POLLIN
+#define POLLIN 0x0001
+#endif
+#ifndef POLLOUT
+#define POLLOUT 0x0004
+#endif
+#ifndef POLLERR
+#define POLLERR 0x0008
+#endif
+#ifndef POLLHUP
+#define POLLHUP 0x0010
+#endif
+
 /**
  * @file xv6fs_ro.c
  * @brief Read-only xv6 virtual file system implementation
@@ -4302,6 +4315,129 @@ int xv6_tty_flush_input(int fd)
   task_ctx_set_errno(ENOTTY);
   vfs_unlock();
   return -1;
+}
+
+static int vfd_can_read_locked(const xv6_vfd_t *fd)
+{
+  if(fd == 0)
+    return 0;
+  return ((fd->flags & XV6_O_ACCMODE) == XV6_O_WRONLY) ? 0 : 1;
+}
+
+static int vfd_can_write_locked(const xv6_vfd_t *fd)
+{
+  if(fd == 0)
+    return 0;
+  return ((fd->flags & XV6_O_ACCMODE) == XV6_O_RDONLY) ? 0 : 1;
+}
+
+static int vfd_is_console_like_locked(const xv6_vfd_t *fd)
+{
+  if(fd == 0)
+    return 0;
+  return (strcmp(fd->path, "/dev/tty") == 0 || strcmp(fd->path, "/dev/stdin") == 0 || strcmp(fd->path, "/dev/stdout") == 0 ||
+          strcmp(fd->path, "/dev/stderr") == 0 || strcmp(fd->path, "/dev/console") == 0)
+             ? 1
+             : 0;
+}
+
+int xv6_poll_fd(int fd, short events, short *revents, int *owned_out)
+{
+  int real_fd = stdio_map_fd(fd);
+  short rev = 0;
+
+  task_ctx_clear_errno();
+  if(revents == 0 || owned_out == 0){
+    task_ctx_set_errno(EINVAL);
+    return -1;
+  }
+
+  *revents = 0;
+  *owned_out = 0;
+  if(real_fd < 0 || real_fd >= XV6_MAX_FD)
+    return 0;
+
+  vfs_lock();
+  if(!g_fds[real_fd].used){
+    vfs_unlock();
+    return 0;
+  }
+
+  *owned_out = 1;
+  if(g_fds[real_fd].kind == VFD_FILE){
+    if((events & POLLIN) != 0 && vfd_can_read_locked(&g_fds[real_fd]))
+      rev = (short)(rev | POLLIN);
+    if((events & POLLOUT) != 0 && vfd_can_write_locked(&g_fds[real_fd]))
+      rev = (short)(rev | POLLOUT);
+    *revents = rev;
+    vfs_unlock();
+    return 0;
+  }
+
+  if(g_fds[real_fd].kind == VFD_DEV){
+    if((g_fds[real_fd].dev_role == DEV_ROLE_PTY_MASTER || g_fds[real_fd].dev_role == DEV_ROLE_PTY_SLAVE) &&
+       g_fds[real_fd].dev_id >= 0 && g_fds[real_fd].dev_id < XV6_MAX_PTY && g_ptys[g_fds[real_fd].dev_id].alloc)
+    {
+      xv6_pty_t *p = &g_ptys[g_fds[real_fd].dev_id];
+      int read_n = (g_fds[real_fd].dev_role == DEV_ROLE_PTY_MASTER) ? p->s2m_n : p->m2s_n;
+      int write_n = (g_fds[real_fd].dev_role == DEV_ROLE_PTY_MASTER) ? p->m2s_n : p->s2m_n;
+      int peer_open = (g_fds[real_fd].dev_role == DEV_ROLE_PTY_MASTER) ? p->slave_open : p->master_open;
+
+      if(vfd_can_read_locked(&g_fds[real_fd]) && (read_n > 0 || peer_open == 0))
+        rev = (short)(rev | POLLIN);
+      if(peer_open == 0)
+        rev = (short)(rev | POLLHUP);
+      if(vfd_can_write_locked(&g_fds[real_fd]) && write_n < (int)XV6_PTY_BUF_CAP)
+        rev = (short)(rev | POLLOUT);
+      *revents = rev;
+      vfs_unlock();
+      return 0;
+    }
+
+    if((events & POLLIN) != 0 && vfd_can_read_locked(&g_fds[real_fd])){
+      if(vfd_is_console_like_locked(&g_fds[real_fd])){
+        if(hal_console_has_input())
+          rev = (short)(rev | POLLIN);
+      } else {
+        rev = (short)(rev | POLLIN);
+      }
+    }
+    if((events & POLLOUT) != 0 && vfd_can_write_locked(&g_fds[real_fd]))
+      rev = (short)(rev | POLLOUT);
+    *revents = rev;
+    vfs_unlock();
+    return 0;
+  }
+
+  if(g_fds[real_fd].kind == VFD_PIPE){
+    int id = g_fds[real_fd].dev_id;
+    xv6_pipe_t *p;
+
+    if(id < 0 || id >= XV6_MAX_PIPE || !g_pipes[id].alloc){
+      *revents = (short)(POLLERR | POLLHUP);
+      vfs_unlock();
+      return 0;
+    }
+
+    p = &g_pipes[id];
+    if(vfd_can_read_locked(&g_fds[real_fd]) && (p->n > 0 || p->writers == 0))
+      rev = (short)(rev | POLLIN);
+    if(p->writers == 0)
+      rev = (short)(rev | POLLHUP);
+    if(vfd_can_write_locked(&g_fds[real_fd])){
+      if(p->readers == 0)
+        rev = (short)(rev | POLLERR);
+      else if(p->n < (int)XV6_PIPE_BUF_CAP)
+        rev = (short)(rev | POLLOUT);
+    }
+    *revents = rev;
+    vfs_unlock();
+    return 0;
+  }
+
+  *revents = 0;
+  vfs_unlock();
+  return 0;
 }
 
 int xv6_pipe(int *out_read_fd, int *out_write_fd)

@@ -288,6 +288,7 @@ int xv6_ptsname(int master_fd, char *out_path, int out_len);
  * @return 0 on success, -1 on failure
  */
 int xv6_tty_flush_input(int fd);
+int xv6_poll_fd(int fd, short events, short *revents, int *owned_out);
 
 /**
  * @brief Create pipe

@@ -634,6 +634,38 @@ int main(void)
       } else {
         probe("pty_tcsetattr_flush", 0, -1, err);
       }
+
+      if(write(mfd, "r", 1) == 1){
+        struct pollfd pfd;
+        fd_set rfds_local;
+
+        memset(&pfd, 0, sizeof(pfd));
+        pfd.fd = sfd;
+        pfd.events = POLLIN;
+        errno = 0;
+        rc = poll(&pfd, 1, 0);
+        err = errno;
+        probe("poll_pty_slave_read_ready",
+              rc == 1 && err == 0 && (pfd.revents & POLLIN) != 0,
+              (rc < 0) ? -1 : rc,
+              (rc < 0) ? err : 0);
+
+        FD_ZERO(&rfds_local);
+        FD_SET(sfd, &rfds_local);
+        sel_tv.tv_sec = 0;
+        sel_tv.tv_usec = 0;
+        errno = 0;
+        rc = select(sfd + 1, &rfds_local, 0, 0, &sel_tv);
+        err = errno;
+        probe("select_pty_slave_read_ready",
+              rc == 1 && err == 0 && FD_ISSET(sfd, &rfds_local),
+              (rc < 0) ? -1 : rc,
+              (rc < 0) ? err : 0);
+        (void)read(sfd, tty_buf, 1);
+      } else {
+        probe("poll_pty_slave_read_ready", 0, -1, errno);
+        probe("select_pty_slave_read_ready", 0, -1, errno);
+      }
       close(sfd);
       sfd = -1;
     }
@@ -802,6 +834,122 @@ int main(void)
   rc = poll(0, 0, 0);
   err = errno;
   probe("poll_zero_ok", rc == 0 && err == 0, (rc < 0) ? -1 : 0, (rc < 0) ? err : 0);
+
+  {
+    int pipefd[2];
+    struct pollfd pfd;
+    fd_set rfds_local;
+
+    errno = 0;
+    rc = pipe(pipefd);
+    err = errno;
+    if(rc != 0){
+      probe("poll_pipe_write_ready", 0, -1, err);
+      probe("poll_pipe_read_ready", 0, -1, err);
+      probe("poll_pipe_hup", 0, -1, err);
+      probe("select_pipe_read_hup", 0, -1, err);
+    } else {
+      memset(&pfd, 0, sizeof(pfd));
+      pfd.fd = pipefd[1];
+      pfd.events = POLLOUT;
+      errno = 0;
+      rc = poll(&pfd, 1, 0);
+      err = errno;
+      probe("poll_pipe_write_ready",
+            rc == 1 && err == 0 && (pfd.revents & POLLOUT) != 0,
+            (rc < 0) ? -1 : rc,
+            (rc < 0) ? err : 0);
+
+      (void)write(pipefd[1], "p", 1);
+      memset(&pfd, 0, sizeof(pfd));
+      pfd.fd = pipefd[0];
+      pfd.events = POLLIN;
+      errno = 0;
+      rc = poll(&pfd, 1, 0);
+      err = errno;
+      probe("poll_pipe_read_ready",
+            rc == 1 && err == 0 && (pfd.revents & POLLIN) != 0,
+            (rc < 0) ? -1 : rc,
+            (rc < 0) ? err : 0);
+
+      (void)read(pipefd[0], tty_buf, 1);
+      close(pipefd[1]);
+      memset(&pfd, 0, sizeof(pfd));
+      pfd.fd = pipefd[0];
+      pfd.events = POLLIN;
+      errno = 0;
+      rc = poll(&pfd, 1, 0);
+      err = errno;
+      probe("poll_pipe_hup",
+            rc == 1 && err == 0 && (pfd.revents & POLLHUP) != 0,
+            (rc < 0) ? -1 : rc,
+            (rc < 0) ? err : 0);
+
+      FD_ZERO(&rfds_local);
+      FD_SET(pipefd[0], &rfds_local);
+      sel_tv.tv_sec = 0;
+      sel_tv.tv_usec = 0;
+      errno = 0;
+      rc = select(pipefd[0] + 1, &rfds_local, 0, 0, &sel_tv);
+      err = errno;
+      probe("select_pipe_read_hup",
+            rc == 1 && err == 0 && FD_ISSET(pipefd[0], &rfds_local),
+            (rc < 0) ? -1 : rc,
+            (rc < 0) ? err : 0);
+
+      close(pipefd[0]);
+    }
+  }
+
+  {
+    int fifo_fd = -1;
+    struct pollfd pfd;
+    fd_set rfds_local;
+
+    (void)unlink("/tmp/probe_fifo");
+    errno = 0;
+    rc = mkfifo("/tmp/probe_fifo", 0644);
+    err = errno;
+    if(rc != 0){
+      probe("poll_fifo_write_ready", 0, -1, err);
+      probe("select_fifo_read_ready", 0, -1, err);
+    } else {
+      errno = 0;
+      fifo_fd = open("/tmp/probe_fifo", O_RDWR);
+      err = errno;
+      if(fifo_fd < 0){
+        probe("poll_fifo_write_ready", 0, -1, err);
+        probe("select_fifo_read_ready", 0, -1, err);
+      } else {
+        memset(&pfd, 0, sizeof(pfd));
+        pfd.fd = fifo_fd;
+        pfd.events = POLLOUT;
+        errno = 0;
+        rc = poll(&pfd, 1, 0);
+        err = errno;
+        probe("poll_fifo_write_ready",
+              rc == 1 && err == 0 && (pfd.revents & POLLOUT) != 0,
+              (rc < 0) ? -1 : rc,
+              (rc < 0) ? err : 0);
+
+        (void)write(fifo_fd, "f", 1);
+        FD_ZERO(&rfds_local);
+        FD_SET(fifo_fd, &rfds_local);
+        sel_tv.tv_sec = 0;
+        sel_tv.tv_usec = 0;
+        errno = 0;
+        rc = select(fifo_fd + 1, &rfds_local, 0, 0, &sel_tv);
+        err = errno;
+        probe("select_fifo_read_ready",
+              rc == 1 && err == 0 && FD_ISSET(fifo_fd, &rfds_local),
+              (rc < 0) ? -1 : rc,
+              (rc < 0) ? err : 0);
+        (void)read(fifo_fd, tty_buf, 1);
+        close(fifo_fd);
+      }
+    }
+    (void)unlink("/tmp/probe_fifo");
+  }
 
   sel_tv.tv_sec = 0;
   sel_tv.tv_usec = 0;

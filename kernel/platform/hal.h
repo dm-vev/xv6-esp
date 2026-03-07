@@ -40,6 +40,8 @@ int hal_console_poll_ctrl_c(void);
  */
 int hal_console_poll_ctrl_z(void);
 
+int hal_console_has_input(void);
+
 /**
  * @brief Discard any queued console input bytes
  */

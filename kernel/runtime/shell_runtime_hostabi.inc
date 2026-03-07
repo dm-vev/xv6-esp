@@ -18,6 +18,9 @@ static int shell_allow_ctrl_c_poll(void)
 #ifndef POLLHUP
 #define POLLHUP 0x0010
 #endif
+#ifndef POLLNVAL
+#define POLLNVAL 0x0020
+#endif
 
 #ifndef WNOHANG
 #define WNOHANG 1
@@ -168,6 +171,7 @@ static int k_open(const char *path, int flags, ...);
 static int k_read(int fd, void *buf, size_t size);
 static int k_write(int fd, const void *buf, size_t size);
 static int k_close(int fd);
+static int k_signal_dispatch_pending_current(void);
 static off_t k_lseek(int fd, off_t offset, int whence);
 extern struct _reent *k_libc_getreent(void) __asm__("__getreent") __attribute__((weak));
 extern struct _reent k_picolibc_reent_stub_start __asm__("_picolibc_reent_stub_start") __attribute__((weak));
@@ -1196,15 +1200,8 @@ static int k_posix_recvfrom(int fd, void *buf, size_t len, int flags, struct soc
 
 static int k_posix_poll(struct pollfd *fds, nfds_t nfds, int timeout)
 {
-  fd_set rfds;
-  fd_set wfds;
-  fd_set efds;
-  struct timeval tv;
-  struct timeval *tvp = 0;
-  int maxfd = -1;
-  int ready = 0;
+  uint64 start_ms;
   nfds_t i;
-  int rc;
 
   k_posix_socket_ctx_ensure();
 
@@ -1220,62 +1217,138 @@ static int k_posix_poll(struct pollfd *fds, nfds_t nfds, int timeout)
     return -1;
   }
 
-  FD_ZERO(&rfds);
-  FD_ZERO(&wfds);
-  FD_ZERO(&efds);
+  start_ms = k_ticks_to_ms_u64((uint64)k_ticks());
+  while(1){
+    fd_set rfds;
+    fd_set wfds;
+    fd_set efds;
+    struct timeval tv;
+    struct timeval *tvp = 0;
+    int maxfd = -1;
+    int ready = 0;
+    int have_xv6 = 0;
+    int have_host = 0;
+    int wait_ms = 0;
+    int rc = 0;
 
-  for(i = 0; i < nfds; i++){
-    int fd = fds[i].fd;
-    short events = fds[i].events;
-    fds[i].revents = 0;
-    if(fd < 0)
-      continue;
-    if(fd >= FD_SETSIZE){
-      errno = EINVAL;
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_ZERO(&efds);
+
+    for(i = 0; i < nfds; i++){
+      int fd = fds[i].fd;
+      short revents = 0;
+      int owned = 0;
+
+      fds[i].revents = 0;
+      if(fd < 0)
+        continue;
+      if(fd >= FD_SETSIZE){
+        errno = EINVAL;
+        return -1;
+      }
+      if(xv6_poll_fd(fd, fds[i].events, &revents, &owned) != 0){
+        errno = EIO;
+        return -1;
+      }
+      if(owned){
+        have_xv6 = 1;
+        fds[i].revents = revents;
+        if(revents != 0)
+          ready++;
+        continue;
+      }
+
+      errno = 0;
+      if(fcntl(fd, F_GETFL) < 0 && errno == EBADF){
+        fds[i].revents = POLLNVAL;
+        ready++;
+        continue;
+      }
+
+      have_host = 1;
+      if((fds[i].events & POLLIN) != 0)
+        FD_SET(fd, &rfds);
+      if((fds[i].events & POLLOUT) != 0)
+        FD_SET(fd, &wfds);
+      FD_SET(fd, &efds);
+      if(fd > maxfd)
+        maxfd = fd;
+    }
+
+    if(ready > 0){
+      wait_ms = 0;
+    } else if(timeout == 0){
+      wait_ms = 0;
+    } else if(timeout < 0){
+      wait_ms = have_xv6 ? 10 : -1;
+    } else {
+      uint64 now_ms = k_ticks_to_ms_u64((uint64)k_ticks());
+      uint64 elapsed_ms = now_ms - start_ms;
+      if(elapsed_ms >= (uint64)timeout)
+        return 0;
+      wait_ms = (int)((uint64)timeout - elapsed_ms);
+      if(have_xv6 && wait_ms > 10)
+        wait_ms = 10;
+    }
+
+    if(have_host && maxfd >= 0){
+      if(wait_ms >= 0){
+        tv.tv_sec = wait_ms / 1000;
+        tv.tv_usec = (wait_ms % 1000) * 1000;
+        tvp = &tv;
+      }
+      rc = select(maxfd + 1, &rfds, &wfds, &efds, tvp);
+      if(rc < 0)
+        return -1;
+      if(rc > 0){
+        for(i = 0; i < nfds; i++){
+          int fd = fds[i].fd;
+          short revents = fds[i].revents;
+
+          if(fd < 0 || fd >= FD_SETSIZE)
+            continue;
+          if(FD_ISSET(fd, &rfds))
+            revents = (short)(revents | POLLIN);
+          if(FD_ISSET(fd, &wfds))
+            revents = (short)(revents | POLLOUT);
+          if(FD_ISSET(fd, &efds))
+            revents = (short)(revents | POLLERR);
+          if(fds[i].revents == 0 && revents != 0)
+            ready++;
+          fds[i].revents = revents;
+        }
+      }
+    } else if(wait_ms > 0){
+      hal_delay_ms((uint32)wait_ms);
+    }
+
+    if(ready > 0)
+      return ready;
+    if(timeout == 0)
+      return 0;
+    if(timeout > 0){
+      uint64 now_ms = k_ticks_to_ms_u64((uint64)k_ticks());
+      if((now_ms - start_ms) >= (uint64)timeout)
+        return 0;
+    }
+    if(k_signal_dispatch_pending_current() > 0){
+      errno = EINTR;
       return -1;
     }
-    if((events & POLLIN) != 0)
-      FD_SET(fd, &rfds);
-    if((events & POLLOUT) != 0)
-      FD_SET(fd, &wfds);
-    if((events & (POLLERR | POLLHUP)) != 0)
-      FD_SET(fd, &efds);
-    if(fd > maxfd)
-      maxfd = fd;
   }
-
-  if(timeout >= 0){
-    tv.tv_sec = timeout / 1000;
-    tv.tv_usec = (timeout % 1000) * 1000;
-    tvp = &tv;
-  }
-
-  rc = select(maxfd + 1, &rfds, &wfds, &efds, tvp);
-  if(rc <= 0)
-    return rc;
-
-  for(i = 0; i < nfds; i++){
-    int fd = fds[i].fd;
-    short revents = 0;
-
-    if(fd < 0)
-      continue;
-    if(FD_ISSET(fd, &rfds))
-      revents = (short)(revents | POLLIN);
-    if(FD_ISSET(fd, &wfds))
-      revents = (short)(revents | POLLOUT);
-    if(FD_ISSET(fd, &efds))
-      revents = (short)(revents | POLLERR);
-    fds[i].revents = revents;
-    if(revents != 0)
-      ready++;
-  }
-
-  return ready;
 }
 
 static int k_posix_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
 {
+  struct pollfd pfds[FD_SETSIZE];
+  int fd_map[FD_SETSIZE];
+  int poll_n = 0;
+  int timeout_ms = -1;
+  int fd;
+  int rc;
+  uint64 timeout64;
+
   k_posix_socket_ctx_ensure();
   if(nfds < 0 || nfds > FD_SETSIZE){
     errno = EINVAL;
@@ -1312,8 +1385,59 @@ static int k_posix_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *e
       errno = EINVAL;
       return -1;
     }
+    timeout64 = ((uint64)timeout->tv_sec * 1000ull) + ((uint64)timeout->tv_usec / 1000ull);
+    timeout_ms = (timeout64 > 0x7fffffffULL) ? 0x7fffffff : (int)timeout64;
   }
-  return select(nfds, readfds, writefds, exceptfds, timeout);
+
+  for(fd = 0; fd < nfds; fd++){
+    int want_read = (readfds != 0 && FD_ISSET(fd, readfds)) ? 1 : 0;
+    int want_write = (writefds != 0 && FD_ISSET(fd, writefds)) ? 1 : 0;
+    int want_except = (exceptfds != 0 && FD_ISSET(fd, exceptfds)) ? 1 : 0;
+    short events = 0;
+
+    if(!want_read && !want_write && !want_except)
+      continue;
+    if(want_read)
+      events = (short)(events | POLLIN);
+    if(want_write)
+      events = (short)(events | POLLOUT);
+    if(want_except)
+      events = (short)(events | POLLERR | POLLHUP);
+    pfds[poll_n].fd = fd;
+    pfds[poll_n].events = events;
+    pfds[poll_n].revents = 0;
+    fd_map[poll_n] = fd;
+    poll_n++;
+  }
+
+  rc = k_posix_poll(pfds, (nfds_t)poll_n, timeout_ms);
+  if(rc < 0)
+    return -1;
+
+  if(readfds != 0)
+    FD_ZERO(readfds);
+  if(writefds != 0)
+    FD_ZERO(writefds);
+  if(exceptfds != 0)
+    FD_ZERO(exceptfds);
+
+  for(fd = 0; fd < poll_n; fd++){
+    short rev = pfds[fd].revents;
+    int app_fd = fd_map[fd];
+
+    if(readfds != 0 && (rev & (POLLIN | POLLERR | POLLHUP)) != 0)
+      FD_SET(app_fd, readfds);
+    if(writefds != 0 && (rev & POLLOUT) != 0)
+      FD_SET(app_fd, writefds);
+    if(exceptfds != 0 && (rev & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+      FD_SET(app_fd, exceptfds);
+  }
+
+  if(timeout != 0){
+    timeout->tv_sec = 0;
+    timeout->tv_usec = 0;
+  }
+  return rc;
 }
 
 static int k_posix_shutdown(int fd, int how)

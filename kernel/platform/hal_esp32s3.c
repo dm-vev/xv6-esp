@@ -228,6 +228,24 @@ int hal_console_poll_ctrl_z(void)
   return hal_console_poll_byte(0x1a);
 }
 
+int hal_console_has_input(void)
+{
+  int queued;
+  int c;
+
+  portENTER_CRITICAL(&g_console_pushback_mu);
+  queued = hal_console_peek_pushback_locked();
+  portEXIT_CRITICAL(&g_console_pushback_mu);
+  if(queued >= 0)
+    return 1;
+
+  c = hal_console_getc_hw();
+  if(c < 0)
+    return 0;
+  hal_console_pushback_byte((uint8)c);
+  return 1;
+}
+
 void hal_console_discard_input(void)
 {
   portENTER_CRITICAL(&g_console_pushback_mu);
