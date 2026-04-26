@@ -8,6 +8,14 @@
 #define SFLAG 0x08
 #define VFLAG 0x10
 
+#ifndef XV6_TARGET_NODE
+#define XV6_TARGET_NODE "esp32"
+#endif
+
+#ifndef XV6_TARGET_MACHINE
+#define XV6_TARGET_MACHINE "unknown-esp32"
+#endif
+
 static void usage(void)
 {
   (void)fprintf(stderr, "usage: uname [-amnrsv]\n");
@@ -20,10 +28,10 @@ int main(int argc, char *argv[])
   int ch;
   const char *prefix = "";
   const char *sysname = "xv6-esp";
-  const char *nodename = "esp32s3";
+  const char *nodename = XV6_TARGET_NODE;
   const char *release = "1.0";
   const char *version = __DATE__ " " __TIME__;
-  const char *machine = "xtensa-esp32s3";
+  const char *machine = XV6_TARGET_MACHINE;
 
   while((ch = getopt(argc, argv, "amnrsv")) != -1){
     switch(ch){

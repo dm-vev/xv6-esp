@@ -60,6 +60,7 @@ extern int __xv6_posix_send(int fd, const void *buf, size_t len, int flags);
 extern int __xv6_posix_recv(int fd, void *buf, size_t len, int flags);
 extern int __xv6_posix_sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *addr, socklen_t addrlen);
 extern int __xv6_posix_recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *addr, socklen_t *addrlen);
+extern int __xv6_host_poll(struct pollfd *fds, nfds_t nfds, int timeout);
 extern int __xv6_posix_poll(struct pollfd *fds, nfds_t nfds, int timeout);
 extern int __xv6_posix_shutdown(int fd, int how);
 extern int __xv6_posix_getsockopt(int fd, int level, int optname, void *optval, socklen_t *optlen);
@@ -71,6 +72,12 @@ static volatile int g_lock;
 static net_socket_t g_socks[NETKMOD_MAX_SOCK];
 static net_stats_t g_stats;
 static int g_trace_verbose = 1;
+static struct pollfd g_select_read_pfds[NETKMOD_MAX_POLLFD];
+static struct pollfd g_select_write_pfds[NETKMOD_MAX_POLLFD];
+static struct pollfd g_select_except_pfds[NETKMOD_MAX_POLLFD];
+static int g_select_read_map[NETKMOD_MAX_POLLFD];
+static int g_select_write_map[NETKMOD_MAX_POLLFD];
+static int g_select_except_map[NETKMOD_MAX_POLLFD];
 
 static void net_lock(void)
 {
@@ -161,7 +168,7 @@ static int fcntl_cmd_needs_arg(int cmd)
 
 static int ioctl_cmd_needs_arg(unsigned long req)
 {
-  if(req == NETKMOD_IOCTL_FIONBIO)
+  if(req == NETKMOD_IOCTL_FIONBIO || req == NETKMOD_IOCTL_FIONREAD)
     return 1;
   return 0;
 }
@@ -415,21 +422,55 @@ int netkmod_poll(struct pollfd *fds, nfds_t nfds, int timeout)
     if(slot >= 0)
       fds[i].fd = g_socks[slot].host_fd;
   }
-  rc = __xv6_posix_poll(fds, nfds, timeout);
+  rc = __xv6_host_poll(fds, nfds, timeout);
   for(i = 0; i < nfds; i++)
     fds[i].fd = orig_fd[i];
   net_unlock();
   return rc;
 }
 
+static int select_add_pollfd(struct pollfd *pfds, int *fd_map, int *poll_n, int app_fd, int host_fd, short events)
+{
+  if(host_fd < 0 || *poll_n >= NETKMOD_MAX_POLLFD){
+    errno = EINVAL;
+    return -1;
+  }
+
+  pfds[*poll_n].fd = host_fd;
+  pfds[*poll_n].events = events;
+  pfds[*poll_n].revents = 0;
+  fd_map[*poll_n] = app_fd;
+  (*poll_n)++;
+  return 0;
+}
+
+static int select_mark_ready(fd_set *fds, struct pollfd *pfds, int *fd_map, int poll_n, short mask)
+{
+  int i;
+  int ready = 0;
+
+  if(fds == 0)
+    return 0;
+
+  for(i = 0; i < poll_n; i++){
+    if((pfds[i].revents & mask) != 0){
+      FD_SET(fd_map[i], fds);
+      ready++;
+    }
+  }
+
+  return ready;
+}
+
 int netkmod_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
 {
-  struct pollfd pfds[FD_SETSIZE];
-  int fd_map[FD_SETSIZE];
   int timeout_ms = -1;
-  int poll_n = 0;
+  int read_n = 0;
+  int write_n = 0;
+  int except_n = 0;
   int fd;
   int rc;
+  int ready = 0;
   uint64_t timeout64;
 
   if(nfds < 0 || nfds > FD_SETSIZE){
@@ -453,7 +494,6 @@ int netkmod_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfd
     int want_except = (exceptfds != 0 && FD_ISSET(fd, exceptfds)) ? 1 : 0;
     int host_fd = fd;
     int slot;
-    short events = 0;
 
     if(!want_read && !want_write && !want_except)
       continue;
@@ -461,49 +501,63 @@ int netkmod_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfd
     slot = slot_from_fd_locked(fd);
     if(slot >= 0)
       host_fd = g_socks[slot].host_fd;
-    if(host_fd < 0 || poll_n >= FD_SETSIZE){
+    if(want_read && select_add_pollfd(g_select_read_pfds, g_select_read_map, &read_n, fd, host_fd, POLLIN) != 0){
       net_unlock();
-      errno = EINVAL;
       return -1;
     }
-
-    if(want_read)
-      events = (short)(events | POLLIN);
-    if(want_write)
-      events = (short)(events | POLLOUT);
-    if(want_except)
-      events = (short)(events | POLLERR | POLLHUP);
-
-    pfds[poll_n].fd = host_fd;
-    pfds[poll_n].events = events;
-    pfds[poll_n].revents = 0;
-    fd_map[poll_n] = fd;
-    poll_n++;
-  }
-
-  rc = __xv6_posix_poll(pfds, (nfds_t)poll_n, timeout_ms);
-  if(rc >= 0){
-    if(readfds != 0)
-      FD_ZERO(readfds);
-    if(writefds != 0)
-      FD_ZERO(writefds);
-    if(exceptfds != 0)
-      FD_ZERO(exceptfds);
-
-    for(fd = 0; fd < poll_n; fd++){
-      short rev = pfds[fd].revents;
-      int app_fd = fd_map[fd];
-
-      if(readfds != 0 && (rev & (POLLIN | POLLERR | POLLHUP)) != 0)
-        FD_SET(app_fd, readfds);
-      if(writefds != 0 && (rev & POLLOUT) != 0)
-        FD_SET(app_fd, writefds);
-      if(exceptfds != 0 && (rev & (POLLERR | POLLHUP)) != 0)
-        FD_SET(app_fd, exceptfds);
+    if(want_write && select_add_pollfd(g_select_write_pfds, g_select_write_map, &write_n, fd, host_fd, POLLOUT) != 0){
+      net_unlock();
+      return -1;
+    }
+    if(want_except &&
+       select_add_pollfd(g_select_except_pfds, g_select_except_map, &except_n, fd, host_fd, (short)(POLLERR | POLLHUP)) != 0){
+      net_unlock();
+      return -1;
     }
   }
+
+  if(readfds != 0)
+    FD_ZERO(readfds);
+  if(writefds != 0)
+    FD_ZERO(writefds);
+  if(exceptfds != 0)
+    FD_ZERO(exceptfds);
+
+  if(read_n == 0 && write_n == 0 && except_n == 0){
+    rc = __xv6_host_poll(0, 0, timeout_ms);
+    net_unlock();
+    return (rc < 0) ? -1 : 0;
+  }
+
+  if(read_n > 0){
+    rc = __xv6_host_poll(g_select_read_pfds, (nfds_t)read_n, timeout_ms);
+    if(rc < 0){
+      net_unlock();
+      return -1;
+    }
+    ready += select_mark_ready(readfds, g_select_read_pfds, g_select_read_map, read_n, (short)(POLLIN | POLLERR | POLLHUP));
+  }
+
+  if(except_n > 0){
+    rc = __xv6_host_poll(g_select_except_pfds, (nfds_t)except_n, ready > 0 ? 0 : timeout_ms);
+    if(rc < 0){
+      net_unlock();
+      return -1;
+    }
+    ready += select_mark_ready(exceptfds, g_select_except_pfds, g_select_except_map, except_n, (short)(POLLERR | POLLHUP));
+  }
+
+  if(write_n > 0){
+    rc = __xv6_host_poll(g_select_write_pfds, (nfds_t)write_n, ready > 0 ? 0 : timeout_ms);
+    if(rc < 0){
+      net_unlock();
+      return -1;
+    }
+    ready += select_mark_ready(writefds, g_select_write_pfds, g_select_write_map, write_n, POLLOUT);
+  }
+
   net_unlock();
-  return rc;
+  return ready;
 }
 
 int netkmod_shutdown(int fd, int how)

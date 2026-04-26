@@ -56,6 +56,10 @@ k_ticks
 k_puts
 k_free_heap
 k_total_heap
+k_psram_total
+k_psram_free
+k_psram_largest
+k_psram_test
 xv6fs_readdir_path
 xv6fs_read_file_alloc_path
 xv6fs_write_file_path
@@ -111,6 +115,7 @@ __xv6_posix_sendto
 recvfrom
 __xv6_posix_recvfrom
 poll
+__xv6_host_poll
 __xv6_posix_poll
 select
 __xv6_posix_select

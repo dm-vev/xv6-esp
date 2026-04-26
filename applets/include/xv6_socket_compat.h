@@ -1,6 +1,14 @@
 #ifndef XV6_SOCKET_COMPAT_H
 #define XV6_SOCKET_COMPAT_H
 
+/*
+ * netkmod exposes virtual socket descriptors above the VFS fd range, so
+ * fd_set users need a larger set than newlib's small embedded default.
+ */
+#ifndef FD_SETSIZE
+#define FD_SETSIZE 512
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 #include <sys/time.h>
@@ -61,8 +69,16 @@
 #define INADDR_LOOPBACK 0x7f000001u
 #endif
 
+/*
+ * Keep socket ABI values aligned with ESP-IDF's newlib platform headers.
+ * Applets are built freestanding, so they cannot include sys/poll.h directly.
+ */
+#ifndef NETKMOD_IOCTL_FIONREAD
+#define NETKMOD_IOCTL_FIONREAD 0x4004667fUL
+#endif
+
 #ifndef NETKMOD_IOCTL_FIONBIO
-#define NETKMOD_IOCTL_FIONBIO 0x5421UL
+#define NETKMOD_IOCTL_FIONBIO 0x8004667eUL
 #endif
 
 typedef unsigned int socklen_t;
@@ -104,13 +120,16 @@ struct sockaddr_in6 {
 #define POLLIN 0x0001
 #endif
 #ifndef POLLOUT
-#define POLLOUT 0x0004
+#define POLLOUT 0x0008
 #endif
 #ifndef POLLERR
-#define POLLERR 0x0008
+#define POLLERR 0x0020
+#endif
+#ifndef POLLNVAL
+#define POLLNVAL 0x0080
 #endif
 #ifndef POLLHUP
-#define POLLHUP 0x0010
+#define POLLHUP 0x0040
 #endif
 
 struct pollfd {

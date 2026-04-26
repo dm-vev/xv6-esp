@@ -119,7 +119,7 @@ function(xv6_register_applet)
 endfunction()
 
 function(xv6_emit_applet_build_graph)
-  cmake_parse_arguments(ARG "" "APPLET_OUT_DIR;FSROOT_ROOT_DIR;FSROOT_STAGE;FSROOT_STAMP;STAMP_DIR" "DEFAULT_CFLAGS;FSROOT_SOURCE_FILES;EXTRA_RESOURCES" ${ARGN})
+  cmake_parse_arguments(ARG "" "APPLET_OUT_DIR;FSROOT_ROOT_DIR;FSROOT_STAGE;FSROOT_STAMP;STAMP_DIR" "DEFAULT_CFLAGS;DEFAULT_DEPS;FSROOT_SOURCE_FILES;EXTRA_RESOURCES" ${ARGN})
 
   if(NOT ARG_APPLET_OUT_DIR OR NOT ARG_FSROOT_ROOT_DIR OR NOT ARG_FSROOT_STAGE OR NOT ARG_FSROOT_STAMP)
     message(FATAL_ERROR "xv6_emit_applet_build_graph: required args missing")
@@ -135,10 +135,19 @@ function(xv6_emit_applet_build_graph)
 
   set(_enabled_install_paths)
   set(_enabled_install_names)
+  set(_stage_manifest_text "fsroot=${ARG_FSROOT_ROOT_DIR}\n")
   foreach(_name IN LISTS _applet_names)
     _xv6_applet_prop_key("${_name}" _prop_key)
     get_property(_enabled GLOBAL PROPERTY "${_prop_key}_ENABLED")
     get_property(_install_path GLOBAL PROPERTY "${_prop_key}_INSTALL_PATH")
+    get_property(_sources GLOBAL PROPERTY "${_prop_key}_SOURCES")
+    get_property(_build_deps GLOBAL PROPERTY "${_prop_key}_BUILD_DEPS")
+    get_property(_runtime_deps GLOBAL PROPERTY "${_prop_key}_RUNTIME_DEPS")
+    get_property(_resources GLOBAL PROPERTY "${_prop_key}_RESOURCES")
+    get_property(_cflags GLOBAL PROPERTY "${_prop_key}_CFLAGS")
+    get_property(_ldflags GLOBAL PROPERTY "${_prop_key}_LDFLAGS")
+    string(APPEND _stage_manifest_text
+           "applet=${_name};enabled=${_enabled};install=${_install_path};sources=${_sources};build_deps=${_build_deps};runtime_deps=${_runtime_deps};resources=${_resources};cflags=${_cflags};ldflags=${_ldflags}\n")
     if(_enabled STREQUAL "ON")
       list(FIND _enabled_install_paths "${_install_path}" _path_idx)
       if(NOT _path_idx EQUAL -1)
@@ -149,6 +158,12 @@ function(xv6_emit_applet_build_graph)
       list(APPEND _enabled_install_names "${_name}")
     endif()
   endforeach()
+  foreach(_resource_pair IN LISTS ARG_EXTRA_RESOURCES)
+    string(APPEND _stage_manifest_text "extra=${_resource_pair}\n")
+  endforeach()
+  set(_stage_manifest "${ARG_STAMP_DIR}/stage.inputs")
+  file(MAKE_DIRECTORY "${ARG_STAMP_DIR}")
+  file(GENERATE OUTPUT "${_stage_manifest}" CONTENT "${_stage_manifest_text}")
 
   set(_base_stamp "${ARG_STAMP_DIR}/base.stamp")
   add_custom_command(
@@ -158,7 +173,7 @@ function(xv6_emit_applet_build_graph)
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${ARG_FSROOT_STAGE}"
     COMMAND ${CMAKE_COMMAND} -E copy_directory "${ARG_FSROOT_ROOT_DIR}" "${ARG_FSROOT_STAGE}"
     COMMAND ${CMAKE_COMMAND} -E touch "${_base_stamp}"
-    DEPENDS ${ARG_FSROOT_SOURCE_FILES}
+    DEPENDS ${ARG_FSROOT_SOURCE_FILES} "${_stage_manifest}"
     VERBATIM
   )
 
@@ -186,7 +201,7 @@ function(xv6_emit_applet_build_graph)
       OUTPUT "${_applet_out}"
       COMMAND ${CMAKE_COMMAND} -E make_directory "${_applet_out_dir}"
       COMMAND ${CMAKE_C_COMPILER} ${ARG_DEFAULT_CFLAGS} ${_cflags} ${_ldflags} -o "${_applet_out}" ${_sources}
-      DEPENDS ${_sources} ${_build_deps}
+      DEPENDS ${_sources} ${_build_deps} ${ARG_DEFAULT_DEPS}
       VERBATIM
     )
 

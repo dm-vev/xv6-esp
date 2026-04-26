@@ -29,8 +29,12 @@
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_netif.h"
+#include "esp_psram.h"
+#include "soc/soc_caps.h"
+#if SOC_WIFI_SUPPORTED
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
+#endif
 #include "loader/elf_loader.h"
 #include "platform/esp_flash_disk.h"
 #include "platform/xv6_esp_boot.h"
@@ -47,7 +51,8 @@
 
 #define KSH_MAX_JOBS 32
 #define KSH_MAX_ARGS 32
-#define KSH_MAX_STAGES 8
+/* Verified safe concurrent applet pipeline depth. Longer pipelines fail fast. */
+#define KSH_MAX_STAGES 3
 #define KSH_MAX_ENV 16
 #define KSH_ENV_KEY 24
 #define KSH_ENV_VAL 128

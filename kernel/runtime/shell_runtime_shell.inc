@@ -143,11 +143,13 @@ static void print_u32(uint32 v)
     putc_console(tmp[--i]);
 }
 
+#if SOC_WIFI_SUPPORTED
 static esp_err_t k_wifi_host_init_default(void)
 {
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   return esp_wifi_init(&cfg);
 }
+#endif
 
 static int env_find_slot(const char *key)
 {
@@ -494,7 +496,8 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
   char **exec_envp = 0;
   char **saved_environ = 0;
   int exec_envc = 0;
-  char module_name[MAXPATH];
+  char resolved_path[MAXPATH];
+  char module_name[ELFLOADER_NAME_MAX];
   int module_loaded = 0;
   int environ_swapped = 0;
   int stdio_swapped = 0;
@@ -564,12 +567,12 @@ static int run_elf_command(int argc, char **argv, int *exit_code, int in_fd, int
   }
   stdio_swapped = 1;
 
-  strncpy(module_name, exec_argv[0], sizeof(module_name) - 1);
-  module_name[sizeof(module_name) - 1] = 0;
-  if(try_read_exec_image(exec_argv[0], &image, &image_size, module_name, sizeof(module_name)) != 0 || image == 0){
+  resolved_path[0] = 0;
+  if(try_read_exec_image(exec_argv[0], &image, &image_size, resolved_path, sizeof(resolved_path)) != 0 || image == 0){
     puts_line("exec: command not found");
     goto out;
   }
+  snprintf(module_name, sizeof(module_name), "exec_%08x_%08x", (unsigned)k_getpid(), (unsigned)hal_ticks());
   if(elf_module_load_from_owned_bytes(module_name, image, image_size, &m) != 0){
     puts_line("exec: elf load failed");
     goto out;
@@ -1341,6 +1344,8 @@ static int run_foreground_with_limits(int argc, char **argv, int in_fd, int out_
   int exit_code = 127;
   int allow_ctrl_c = shell_allow_ctrl_c_poll();
   int fg_pgid = -1;
+  int prev_fg_pgid = (int)k_tcgetpgrp(0);
+  int effective_pgid_hint = pgid_hint;
 
   /*
    * duktape_demo has its own interactive Ctrl+C handling in user space.
@@ -1356,7 +1361,14 @@ static int run_foreground_with_limits(int argc, char **argv, int in_fd, int out_
       allow_ctrl_c = 0;
   }
 
-  rc = spawn_background_ex(argc, argv, in_fd, out_fd, err_fd, 0, 1, max_heap_kb, max_runtime_ms, pgid_hint, &job_id);
+  if(effective_pgid_hint <= 0){
+    int self_pgid = (int)k_getpgrp();
+    if(self_pgid > 0 && self_pgid != g_shell_pgid)
+      effective_pgid_hint = self_pgid;
+  }
+
+  rc = spawn_background_ex(argc, argv, in_fd, out_fd, err_fd, 0, 1, max_heap_kb, max_runtime_ms, effective_pgid_hint,
+                           &job_id);
   if(rc != 0)
     return -1;
 
@@ -1373,7 +1385,10 @@ static int run_foreground_with_limits(int argc, char **argv, int in_fd, int out_
     (void)k_tcsetpgrp(0, (pid_t)fg_pgid);
 
   rc = wait_job_id_ex(job_id, &exit_code, 1, allow_ctrl_c);
-  (void)k_tcsetpgrp(0, (pid_t)g_shell_pgid);
+  if(prev_fg_pgid > 0)
+    (void)k_tcsetpgrp(0, (pid_t)prev_fg_pgid);
+  else
+    (void)k_tcsetpgrp(0, (pid_t)g_shell_pgid);
   if(rc != 0)
     return -1;
   if(exit_code == 124){
@@ -2277,8 +2292,10 @@ static int run_pipeline(int argc, char **argv, int run_bg, int max_heap_kb, uint
   int njobs = 0;
   int i;
   int final_rc = 0;
+  int final_job = -1;
   int fail_rc = 1;
   int pipeline_pgid = 0;
+  int prev_fg_pgid = -1;
 
   for(i = 0; i < KSH_MAX_STAGES - 1; i++){
     pipe_r[i] = -1;
@@ -2332,26 +2349,18 @@ static int run_pipeline(int argc, char **argv, int run_bg, int max_heap_kb, uint
       pipe_w[i] = -1;
     }
 
-    if(i == stage_count - 1 && !run_bg){
-      final_rc = run_foreground_with_limits(stage_exec_argc, stage_exec, io.in_fd, io.out_fd, io.err_fd, max_heap_kb,
-                                            max_runtime_ms, pipeline_pgid);
-      if(final_rc < 0){
-        close_io_custom_fds(&io, &base_io);
-        fail_rc = 1;
-        goto fail;
-      }
-    } else {
-      if(spawn_background_ex(stage_exec_argc, stage_exec, io.in_fd, io.out_fd, io.err_fd, 1, run_bg ? 0 : 1, max_heap_kb,
-                             max_runtime_ms, pipeline_pgid, &sid) != 0)
-      {
-        close_io_custom_fds(&io, &base_io);
-        fail_rc = 1;
-        goto fail;
-      }
-      if(pipeline_pgid == 0)
-        pipeline_pgid = sid;
-      jobs[njobs++] = sid;
+    if(spawn_background_ex(stage_exec_argc, stage_exec, io.in_fd, io.out_fd, io.err_fd, 1, run_bg ? 0 : 1, max_heap_kb,
+                           max_runtime_ms, pipeline_pgid, &sid) != 0)
+    {
+      close_io_custom_fds(&io, &base_io);
+      fail_rc = 1;
+      goto fail;
     }
+    if(pipeline_pgid == 0)
+      pipeline_pgid = sid;
+    jobs[njobs++] = sid;
+    if(i == stage_count - 1)
+      final_job = sid;
     close_io_custom_fds(&io, &base_io);
 
     if(i > 0 && pipe_r[i - 1] >= 3){
@@ -2365,19 +2374,47 @@ static int run_pipeline(int argc, char **argv, int run_bg, int max_heap_kb, uint
   }
 
   if(!run_bg){
+    if(pipeline_pgid > 0){
+      prev_fg_pgid = (int)k_tcgetpgrp(0);
+      (void)k_tcsetpgrp(0, (pid_t)pipeline_pgid);
+    }
+    if(final_job > 0){
+      if(wait_job_id_ex(final_job, &final_rc, 1, shell_allow_ctrl_c_poll()) != 0){
+        if(prev_fg_pgid > 0)
+          (void)k_tcsetpgrp(0, (pid_t)prev_fg_pgid);
+        else
+          (void)k_tcsetpgrp(0, (pid_t)g_shell_pgid);
+        fail_rc = 1;
+        goto fail;
+      }
+    }
     if(final_rc == 130){
+      if(prev_fg_pgid > 0)
+        (void)k_tcsetpgrp(0, (pid_t)prev_fg_pgid);
+      else
+        (void)k_tcsetpgrp(0, (pid_t)g_shell_pgid);
       cleanup_spawned_jobs(jobs, njobs);
       return 130;
     }
     for(i = 0; i < njobs; i++){
       int stage_rc = 0;
+      if(jobs[i] == final_job)
+        continue;
       if(wait_job_id_ex(jobs[i], &stage_rc, 1, shell_allow_ctrl_c_poll()) != 0)
         continue;
       if(stage_rc == 130){
+        if(prev_fg_pgid > 0)
+          (void)k_tcsetpgrp(0, (pid_t)prev_fg_pgid);
+        else
+          (void)k_tcsetpgrp(0, (pid_t)g_shell_pgid);
         cleanup_spawned_jobs(jobs + i + 1, njobs - (i + 1));
         return 130;
       }
     }
+    if(prev_fg_pgid > 0)
+      (void)k_tcsetpgrp(0, (pid_t)prev_fg_pgid);
+    else
+      (void)k_tcsetpgrp(0, (pid_t)g_shell_pgid);
   }
 
   return final_rc;
@@ -3103,7 +3140,7 @@ static int register_default_symbols(void)
     { "fwrite", (void *)k_fwrite },
     { "setbuf", (void *)k_setbuf },
     { "setvbuf", (void *)k_setvbuf },
-    { "putchar", (void *)putchar },
+    { "putchar", (void *)k_putchar },
     { "putc", (void *)k_putc },
     { "fflush", (void *)k_fflush },
     { "clearerr", (void *)k_clearerr },
@@ -3135,6 +3172,10 @@ static int register_default_symbols(void)
     { "k_puts", (void *)k_puts },
     { "k_free_heap", (void *)k_free_heap },
     { "k_total_heap", (void *)k_total_heap },
+    { "k_psram_total", (void *)k_psram_total },
+    { "k_psram_free", (void *)k_psram_free },
+    { "k_psram_largest", (void *)k_psram_largest },
+    { "k_psram_test", (void *)k_psram_test },
     { "xv6fs_readdir_path", (void *)k_fs_readdir_path },
     { "xv6fs_read_file_alloc_path", (void *)xv6fs_read_file_alloc_path },
     { "xv6fs_write_file_path", (void *)xv6fs_write_file_path },
@@ -3190,6 +3231,7 @@ static int register_default_symbols(void)
     { "recvfrom", (void *)k_recvfrom },
     { "__xv6_posix_recvfrom", (void *)k_posix_recvfrom },
     { "poll", (void *)k_poll },
+    { "__xv6_host_poll", (void *)k_host_poll },
     { "__xv6_posix_poll", (void *)k_posix_poll },
     { "select", (void *)k_select },
     { "__xv6_posix_select", (void *)k_posix_select },
@@ -3203,14 +3245,19 @@ static int register_default_symbols(void)
     { "__xv6_posix_getsockname", (void *)k_posix_getsockname },
     { "getpeername", (void *)k_getpeername },
     { "__xv6_posix_getpeername", (void *)k_posix_getpeername },
+#if SOC_WIFI_SUPPORTED
     { "xv6_wifi_host_init_default", (void *)k_wifi_host_init_default },
     { "esp_netif_create_default_wifi_sta", (void *)esp_netif_create_default_wifi_sta },
+#endif
     { "esp_netif_destroy", (void *)esp_netif_destroy },
+#if SOC_WIFI_SUPPORTED
     /* Event bases are data symbols; modules expect their addresses for relocations. */
     { "WIFI_EVENT", (void *)&WIFI_EVENT },
+#endif
     { "IP_EVENT", (void *)&IP_EVENT },
     { "esp_event_handler_instance_register", (void *)esp_event_handler_instance_register },
     { "esp_event_handler_instance_unregister", (void *)esp_event_handler_instance_unregister },
+#if SOC_WIFI_SUPPORTED
     { "esp_wifi_set_storage", (void *)esp_wifi_set_storage },
     { "esp_wifi_set_mode", (void *)esp_wifi_set_mode },
     { "esp_wifi_start", (void *)esp_wifi_start },
@@ -3223,6 +3270,7 @@ static int register_default_symbols(void)
     { "esp_wifi_scan_get_ap_records", (void *)esp_wifi_scan_get_ap_records },
     { "esp_wifi_sta_get_ap_info", (void *)esp_wifi_sta_get_ap_info },
     { "esp_wifi_deinit", (void *)esp_wifi_deinit },
+#endif
     { "stat", (void *)k_stat },
     { "__xv6_host_stat", (void *)k_stat },
     { "lstat", (void *)k_lstat },

@@ -25,13 +25,16 @@
 #define POLLIN 0x0001
 #endif
 #ifndef POLLOUT
-#define POLLOUT 0x0004
+#define POLLOUT 0x0008
 #endif
 #ifndef POLLERR
-#define POLLERR 0x0008
+#define POLLERR 0x0020
+#endif
+#ifndef POLLNVAL
+#define POLLNVAL 0x0080
 #endif
 #ifndef POLLHUP
-#define POLLHUP 0x0010
+#define POLLHUP 0x0040
 #endif
 
 /**

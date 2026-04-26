@@ -14,6 +14,10 @@ extern int k_ticks(void);
 extern int k_puts(const char *s);
 extern int k_free_heap(void);
 extern int k_total_heap(void);
+extern int k_psram_total(void);
+extern int k_psram_free(void);
+extern int k_psram_largest(void);
+extern int k_psram_test(int bytes);
 
 extern int xv6fs_readdir_path(const char *path, int index, char *name_out, int name_out_len, u16 *type_out,
                               u32 *size_out);

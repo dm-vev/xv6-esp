@@ -25,6 +25,7 @@
 #define ET_DYN 3
 
 #define EM_XTENSA 94
+#define EM_RISCV 243
 
 #define PT_LOAD 1
 #define PF_X 0x1
@@ -58,6 +59,11 @@
 #define R_XTENSA_ASM_SIMPLIFY 12
 #define R_XTENSA_SLOT0_OP 20
 #define R_XTENSA_SLOT14_ALT 49
+
+#define R_RISCV_NONE 0
+#define R_RISCV_32 1
+#define R_RISCV_RELATIVE 3
+#define R_RISCV_JUMP_SLOT 5
 
 typedef struct __attribute__((packed)) {
   uint8 e_ident[16];
@@ -221,6 +227,7 @@ void *map_vaddr_exec(elf_module_t *m, uint32 vaddr);
 void *map_vaddr_data(elf_module_t *m, uint32 vaddr);
 
 int parse_segments(elf_module_t *m, const elf32_ehdr_t *eh);
+void sync_exec_segments(elf_module_t *m);
 int find_symtab_sections(const elf_module_t *m, const elf32_ehdr_t *eh, const elf32_shdr_t **symtab_sh,
                          const elf32_shdr_t **strtab_sh, const elf32_shdr_t **dynsym_sh,
                          const elf32_shdr_t **dynstr_sh);

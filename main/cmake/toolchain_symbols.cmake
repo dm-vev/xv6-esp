@@ -38,6 +38,18 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
   endif()
 
   file(GLOB_RECURSE FSROOT_SOURCE_FILES CONFIGURE_DEPENDS "${XV6FS_ROOT_DIR}/*")
+  file(GLOB_RECURSE APPLET_INCLUDE_FILES CONFIGURE_DEPENDS "${APPLET_INCLUDE_DIR}/*")
+
+  if(CONFIG_IDF_TARGET)
+    set(XV6_TARGET_NODE "${CONFIG_IDF_TARGET}")
+  else()
+    set(XV6_TARGET_NODE "esp32")
+  endif()
+  if(CONFIG_IDF_TARGET_ARCH)
+    set(XV6_TARGET_MACHINE "${CONFIG_IDF_TARGET_ARCH}-${XV6_TARGET_NODE}")
+  else()
+    set(XV6_TARGET_MACHINE "unknown-${XV6_TARGET_NODE}")
+  endif()
 
   set(ESP_USER_FLAGS
     -Os
@@ -46,10 +58,13 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     -fno-stack-protector
     -fPIC
     -nostdlib
+    -DFD_SETSIZE=512
     -I${APPLET_INCLUDE_DIR}
     -Wl,-shared
     -Wl,-e,main
     -Wl,--unresolved-symbols=ignore-all
+    -DXV6_TARGET_NODE=\"${XV6_TARGET_NODE}\"
+    -DXV6_TARGET_MACHINE=\"${XV6_TARGET_MACHINE}\"
   )
 
   add_custom_command(

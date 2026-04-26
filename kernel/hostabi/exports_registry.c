@@ -39,6 +39,7 @@ typedef struct {
 
 static const elf_host_symbol_t *g_core_syms; /**< Core symbol table */
 static int g_core_count;                       /**< Number of core symbols */
+static elf_host_symbol_t *g_core_syms_owned; /**< Owned copy of core symbols */
 static hostabi_modsym_t *g_mod_syms;          /**< Module symbols */
 static int g_mod_syms_cap;                    /**< Allocated slot capacity */
 static int g_seq = 1;                          /**< Global sequence counter */
@@ -289,6 +290,7 @@ int hostabi_export_define_core(const elf_host_symbol_t *syms, int count)
 {
   int i;
   int rc;
+  elf_host_symbol_t *owned;
 
   if(syms == 0 || count <= 0 || count > ELFLOADER_MAX_HOST_SYMBOLS)
     return -1;
@@ -302,8 +304,19 @@ int hostabi_export_define_core(const elf_host_symbol_t *syms, int count)
       return -1;
     }
   }
+
+  owned = (elf_host_symbol_t *)exports_alloc_data((size_t)count * sizeof(*owned));
+  if(owned == 0){
+    exports_unlock();
+    return -1;
+  }
+  memcpy(owned, syms, (size_t)count * sizeof(*owned));
+
+  if(g_core_syms_owned)
+    heap_caps_free(g_core_syms_owned);
+  g_core_syms_owned = owned;
   g_core_count = count;
-  g_core_syms = syms;
+  g_core_syms = g_core_syms_owned;
 
   rc = rebuild_locked();
   exports_unlock();

@@ -285,6 +285,8 @@ static int elf_module_load_from_image(const char *name, const void *image, uint3
     }
   }
 
+  sync_exec_segments(m);
+
   m->entry_addr = map_vaddr_exec(m, m->entry_vaddr);
   if(m->entry_vaddr != 0 && m->entry_addr == 0){
     ESP_LOGE(g_elf_loader_tag, "entry map failed");

@@ -10,16 +10,16 @@ static int shell_allow_ctrl_c_poll(void)
 #define POLLIN 0x0001
 #endif
 #ifndef POLLOUT
-#define POLLOUT 0x0004
+#define POLLOUT 0x0008
 #endif
 #ifndef POLLERR
-#define POLLERR 0x0008
-#endif
-#ifndef POLLHUP
-#define POLLHUP 0x0010
+#define POLLERR 0x0020
 #endif
 #ifndef POLLNVAL
-#define POLLNVAL 0x0020
+#define POLLNVAL 0x0080
+#endif
+#ifndef POLLHUP
+#define POLLHUP 0x0040
 #endif
 
 #ifndef WNOHANG
@@ -137,6 +137,57 @@ static int k_total_heap(void)
   return (int)hal_total_heap_bytes();
 }
 
+static int k_psram_total(void)
+{
+#if CONFIG_SPIRAM
+  if(!esp_psram_is_initialized())
+    return 0;
+#endif
+  return (int)heap_caps_get_total_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static int k_psram_free(void)
+{
+  return (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static int k_psram_largest(void)
+{
+  return (int)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static int k_psram_test(int bytes)
+{
+  uint8_t *buf;
+  size_t n;
+  size_t i;
+
+  if(bytes <= 0){
+    errno = EINVAL;
+    return -1;
+  }
+  n = (size_t)bytes;
+  buf = (uint8_t *)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if(buf == 0){
+    errno = ENOMEM;
+    return -1;
+  }
+
+  for(i = 0; i < n; i++)
+    buf[i] = (uint8_t)(((i * 131u) ^ (i >> 7) ^ 0x5au) & 0xffu);
+  for(i = 0; i < n; i++){
+    uint8_t expected = (uint8_t)(((i * 131u) ^ (i >> 7) ^ 0x5au) & 0xffu);
+    if(buf[i] != expected){
+      heap_caps_free(buf);
+      errno = EIO;
+      return -1;
+    }
+  }
+
+  heap_caps_free(buf);
+  return 0;
+}
+
 static uint32 k_ticks_to_ms_u32(uint32 ticks)
 {
   uint64 ms = (uint64)ticks * 10ull;
@@ -185,17 +236,23 @@ static int k_host_printf(const char *fmt, ...)
   if(fmt == 0)
     return -1;
   va_start(ap, fmt);
-  n = vprintf(fmt, ap);
+  n = k_host_vfprintf(stdout, fmt, ap);
   va_end(ap);
   return n;
 }
 
 static int k_host_puts(const char *s)
 {
+  size_t n;
   s = (const char *)elf_loader_translate_ptr(s);
   if(s == 0)
     return -1;
-  return puts(s);
+  n = strlen(s);
+  if(k_fwrite(s, 1, n, stdout) != n)
+    return EOF;
+  if(k_fwrite("\n", 1, 1, stdout) != 1)
+    return EOF;
+  return (int)n + 1;
 }
 
 static int k_host_fprintf(FILE *stream, const char *fmt, ...)
@@ -234,18 +291,18 @@ static int k_host_vfprintf(FILE *stream, const char *fmt, va_list ap)
   fmt = (const char *)elf_loader_translate_ptr(fmt);
   if(fmt == 0)
     return -1;
+  if(stream == 0)
+    stream = stdout;
   ks = k_stream_from_file(stream);
-  if(ks){
-    n = vsnprintf(buf, sizeof(buf), fmt, ap);
-    if(n > 0){
-      size_t out_n = (size_t)n;
-      if(out_n >= sizeof(buf))
-        out_n = sizeof(buf) - 1u;
-      (void)k_fwrite(buf, 1, out_n, stream);
-    }
-    return n;
+  n = vsnprintf(buf, sizeof(buf), fmt, ap);
+  if(n > 0){
+    size_t out_n = (size_t)n;
+    if(out_n >= sizeof(buf))
+      out_n = sizeof(buf) - 1u;
+    (void)k_fwrite(buf, 1, out_n, stream);
   }
-  return vfprintf(stream, fmt, ap);
+  (void)ks;
+  return n;
 }
 
 #define KSH_STREAM_MAGIC 0x4b534831u
@@ -570,6 +627,11 @@ static int k_putc(int c, FILE *stream)
   return k_fputc(c, stream);
 }
 
+static int k_putchar(int c)
+{
+  return k_fputc(c, stdout);
+}
+
 static int k_fputs(const char *s, FILE *stream)
 {
   size_t n;
@@ -595,6 +657,8 @@ static int k_fflush(FILE *stream)
 static void k_clearerr(FILE *stream)
 {
   ksh_stream_t *s = k_stream_from_file(stream);
+  if(k_stdio_stream_fd(stream) >= 0)
+    return;
   if(s){
     s->err = 0;
     s->eof = 0;
@@ -606,6 +670,8 @@ static void k_clearerr(FILE *stream)
 static int k_feof(FILE *stream)
 {
   ksh_stream_t *s = k_stream_from_file(stream);
+  if(k_stdio_stream_fd(stream) >= 0)
+    return 0;
   if(s)
     return s->eof;
   return feof(stream);
@@ -614,6 +680,8 @@ static int k_feof(FILE *stream)
 static int k_ferror(FILE *stream)
 {
   ksh_stream_t *s = k_stream_from_file(stream);
+  if(k_stdio_stream_fd(stream) >= 0)
+    return 0;
   if(s)
     return s->err;
   return ferror(stream);
@@ -681,6 +749,8 @@ static int k_fileno(FILE *stream)
 
 static void k_setbuf(FILE *stream, char *buf)
 {
+  if(k_stdio_stream_fd(stream) >= 0)
+    return;
   if(k_stream_from_file(stream))
     return;
   setbuf(stream, buf);
@@ -688,6 +758,8 @@ static void k_setbuf(FILE *stream, char *buf)
 
 static int k_setvbuf(FILE *stream, char *buf, int mode, size_t size)
 {
+  if(k_stdio_stream_fd(stream) >= 0)
+    return 0;
   if(k_stream_from_file(stream))
     return 0;
   return setvbuf(stream, buf, mode, size);
@@ -1337,6 +1409,95 @@ static int k_posix_poll(struct pollfd *fds, nfds_t nfds, int timeout)
       return -1;
     }
   }
+}
+
+static int k_host_poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+  fd_set rfds;
+  fd_set wfds;
+  fd_set efds;
+  struct timeval tv;
+  struct timeval *tvp = 0;
+  nfds_t i;
+  int maxfd = -1;
+  int ready = 0;
+  int have_except = 0;
+  int rc;
+
+  k_posix_socket_ctx_ensure();
+
+  if(nfds > 0){
+    fds = (struct pollfd *)elf_loader_translate_ptr(fds);
+    if(fds == 0){
+      errno = EINVAL;
+      return -1;
+    }
+  }
+  if(timeout < -1){
+    errno = EINVAL;
+    return -1;
+  }
+
+  FD_ZERO(&rfds);
+  FD_ZERO(&wfds);
+  FD_ZERO(&efds);
+
+  for(i = 0; i < nfds; i++){
+    int fd = fds[i].fd;
+
+    fds[i].revents = 0;
+    if(fd < 0)
+      continue;
+    if(fd >= FD_SETSIZE){
+      errno = EINVAL;
+      return -1;
+    }
+    if((fds[i].events & POLLIN) != 0)
+      FD_SET(fd, &rfds);
+    if((fds[i].events & POLLOUT) != 0)
+      FD_SET(fd, &wfds);
+    if((fds[i].events & (POLLERR | POLLHUP)) != 0){
+      FD_SET(fd, &efds);
+      have_except = 1;
+    }
+    if(fd > maxfd)
+      maxfd = fd;
+  }
+
+  if(timeout >= 0){
+    tv.tv_sec = timeout / 1000;
+    tv.tv_usec = (timeout % 1000) * 1000;
+    tvp = &tv;
+  }
+
+  if(maxfd < 0){
+    if(timeout > 0)
+      hal_delay_ms((uint32)timeout);
+    return 0;
+  }
+
+  rc = select(maxfd + 1, &rfds, &wfds, have_except ? &efds : 0, tvp);
+  if(rc < 0)
+    return -1;
+
+  for(i = 0; i < nfds; i++){
+    int fd = fds[i].fd;
+    short revents = 0;
+
+    if(fd < 0 || fd >= FD_SETSIZE)
+      continue;
+    if(FD_ISSET(fd, &rfds))
+      revents = (short)(revents | POLLIN);
+    if(FD_ISSET(fd, &wfds))
+      revents = (short)(revents | POLLOUT);
+    if(have_except && FD_ISSET(fd, &efds))
+      revents = (short)(revents | POLLERR);
+    fds[i].revents = revents;
+    if(revents != 0)
+      ready++;
+  }
+
+  return ready;
 }
 
 static int k_posix_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)

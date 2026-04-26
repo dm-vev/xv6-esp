@@ -19,6 +19,7 @@ int main(int argc, char **argv)
 {
     int i, token;
     FILE *fp;
+    int close_fp;
     int c;
 
     while (argc > 1 && *argv[1] == '-') {
@@ -38,10 +39,14 @@ int main(int argc, char **argv)
 
     i = 1;
     do {
+        fp = stdin;
+        close_fp = 0;
         if (argc > 1 && (fp = fopen(argv[i], "r")) == NULL) {
             perror(argv[i]);
             continue;
         }
+        if (argc > 1)
+            close_fp = 1;
         linect = 0;
         wordct = 0;
         charct = 0;
@@ -70,7 +75,8 @@ int main(int argc, char **argv)
             printf(" %s\n", argv[i]);
         } else
             printf("\n");
-        fclose(fp);
+        if (close_fp)
+            fclose(fp);
         tlinect += linect;
         twordct += wordct;
         tcharct += charct;
