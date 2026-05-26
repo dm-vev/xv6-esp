@@ -46,7 +46,7 @@ jobs:
       STATIC_VENV: ${{ github.workspace }}/.venv_static
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
         if: env.DO_STATIC == 'true'
@@ -130,7 +130,7 @@ jobs:
       IDF_TOOLS_PATH: ${{ runner.temp }}/.espressif
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Prepare IDF tools directory
         run: |
@@ -243,7 +243,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install RISC-V toolchain
         run: |
