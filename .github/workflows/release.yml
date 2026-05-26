@@ -32,7 +32,7 @@ jobs:
           mkdir -p "$IDF_TOOLS_PATH"
 
       - name: Cache ESP-IDF
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ${{ env.IDF_TOOLS_PATH }}
